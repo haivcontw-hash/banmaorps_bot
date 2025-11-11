@@ -30,8 +30,10 @@ if (!TELEGRAM_TOKEN || !RPC_URL || !CONTRACT_ADDRESS) {
 // db.init() sẽ được gọi trong hàm main()
 const app = express();
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-const provider = new ethers.WebSocketProvider(RPC_URL); 
-const contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, provider);
+let provider = null;
+let contract = null;
+let reconnectTimeout = null;
+let reconnectAttempts = 0;
 
 // Hàm 't' (translate) nội bộ
 function t(lang_code, key, variables = {}) {
@@ -290,137 +292,288 @@ function startTelegramBot() {
 // ==========================================================
 // 🎧 PHẦN 4: LOGIC LẮNG NGHE BLOCKCHAIN (Cần async)
 // ==========================================================
-function startBlockchainListener() {
-    console.log(`🎧 [Blockchain] Đang lắng nghe sự kiện từ contract: ${CONTRACT_ADDRESS}`);
+async function waitForNetworkConnection(wsProvider) {
+    const timeoutMs = 10000;
+    const networkPromise = wsProvider.getNetwork();
+    const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`WSS connection timed out after ${timeoutMs / 1000} seconds`)), timeoutMs)
+    );
+    await Promise.race([networkPromise, timeoutPromise]);
+}
 
-    contract.on("Joined", async (roomId, opponent) => {
-        console.log(`[SỰ KIỆN] Room ${roomId} đã có người tham gia: ${opponent}`);
+async function cleanupBlockchainResources() {
+    if (contract) {
+        contract.removeAllListeners();
+        contract = null;
+    }
+    if (provider) {
+        provider.removeAllListeners?.();
         try {
-            const room = await contract.rooms(roomId);
-            const stake = ethers.formatEther(room.stake);
-            await sendInstantNotification(room.creator, 'notify_opponent_joined', { roomId: roomId, opponent: room.opponent, stake: stake });
-            await sendInstantNotification(room.opponent, 'notify_self_joined', { roomId: roomId, creator: room.creator, stake: stake });
-        } catch (err) {
-            console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomId}:`, err.message);
+            await provider.destroy();
+        } catch (error) {
+            console.warn(`[Blockchain] Lỗi khi hủy provider: ${error.message}`);
         }
-    });
+        provider = null;
+    }
+}
 
-    contract.on("Committed", async (roomId, player) => {
-        console.log(`[SỰ KIỆN] Room ${roomId} có người commit: ${player}`);
+function scheduleReconnect() {
+    if (reconnectTimeout) {
+        return;
+    }
+    reconnectAttempts += 1;
+    const delay = Math.min(30000, 2000 * reconnectAttempts);
+    console.warn(`[Blockchain] Mất kết nối WSS. Thử kết nối lại sau ${Math.round(delay / 1000)}s (lần ${reconnectAttempts}).`);
+    reconnectTimeout = setTimeout(async () => {
+        reconnectTimeout = null;
         try {
-            const room = await contract.rooms(roomId);
-            const playerAddress = ethers.getAddress(player);
-            const creatorAddress = ethers.getAddress(room.creator);
+            await startBlockchainListener(true);
+        } catch (error) {
+            console.error(`[Blockchain] Lỗi khi kết nối lại: ${error.message}`);
+            scheduleReconnect();
+        }
+    }, delay);
+}
+
+function attachWebSocketHandlers(wsProvider) {
+    try {
+        const socket = wsProvider.websocket;
+        if (socket && typeof socket.on === 'function') {
+            socket.on('close', (event) => {
+                const code = event?.code ?? 'unknown';
+                console.warn(`[Blockchain] WebSocket đóng (code: ${code}).`);
+                scheduleReconnect();
+            });
+            socket.on('error', (error) => {
+                const message = error?.message || error;
+                console.error(`[Blockchain] WebSocket lỗi: ${message}`);
+                scheduleReconnect();
+            });
+        } else if (socket) {
+            socket.onclose = (event) => {
+                const code = event?.code ?? 'unknown';
+                console.warn(`[Blockchain] WebSocket đóng (code: ${code}).`);
+                scheduleReconnect();
+            };
+            socket.onerror = (error) => {
+                const message = error?.message || error;
+                console.error(`[Blockchain] WebSocket lỗi: ${message}`);
+                scheduleReconnect();
+            };
+        }
+    } catch (error) {
+        console.warn(`[Blockchain] Không thể gắn handler WebSocket: ${error.message}`);
+    }
+}
+
+async function startBlockchainListener(isReconnect = false) {
+    try {
+        await cleanupBlockchainResources();
+
+        provider = new ethers.WebSocketProvider(RPC_URL);
+        provider.on('error', (error) => {
+            console.error(`[LỖI WSS Provider]: ${error.message}. Bot sẽ tự động thử kết nối lại.`);
+            scheduleReconnect();
+        });
+
+        attachWebSocketHandlers(provider);
+
+        await waitForNetworkConnection(provider);
+
+        contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, provider);
+        registerBlockchainEvents();
+
+        reconnectAttempts = 0;
+        const prefix = isReconnect ? '🔁' : '🎧';
+        console.log(`${prefix} [Blockchain] Đang lắng nghe sự kiện từ contract: ${CONTRACT_ADDRESS}`);
+    } catch (error) {
+        console.error(`[Blockchain] Lỗi khi khởi tạo listener: ${error.message}`);
+        await cleanupBlockchainResources();
+        if (!isReconnect) {
+            throw error;
+        }
+        scheduleReconnect();
+    }
+}
+
+function registerBlockchainEvents() {
+    if (!contract) return;
+
+    contract.on("Joined", handleJoinedEvent);
+    contract.on("Committed", handleCommittedEvent);
+    contract.on("Revealed", handleRevealedEvent);
+    contract.on("Resolved", handleResolvedEvent);
+    contract.on("Canceled", handleCanceledEvent);
+    contract.on("Forfeited", handleForfeitedEvent);
+}
+
+function toRoomIdString(roomId) {
+    try {
+        return roomId.toString();
+    } catch (error) {
+        return `${roomId}`;
+    }
+}
+
+async function handleJoinedEvent(roomId, opponent) {
+    const roomIdStr = toRoomIdString(roomId);
+    console.log(`[SỰ KIỆN] Room ${roomIdStr} đã có người tham gia: ${opponent}`);
+    try {
+        if (!contract) return;
+        const room = await contract.rooms(roomId);
+        const stake = ethers.formatEther(room.stake);
+        const creatorAddress = ethers.getAddress(room.creator);
+        const opponentAddress = ethers.getAddress(room.opponent);
+
+        await Promise.all([
+            sendInstantNotification(creatorAddress, 'notify_opponent_joined', { roomId: roomIdStr, opponent: opponentAddress, stake }),
+            sendInstantNotification(opponentAddress, 'notify_self_joined', { roomId: roomIdStr, creator: creatorAddress, stake })
+        ]);
+    } catch (err) {
+        console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr}:`, err.message);
+    }
+}
+
+async function handleCommittedEvent(roomId, player) {
+    const roomIdStr = toRoomIdString(roomId);
+    console.log(`[SỰ KIỆN] Room ${roomIdStr} có người commit: ${player}`);
+    try {
+        if (!contract) return;
+        const room = await contract.rooms(roomId);
+        const playerAddress = ethers.getAddress(player);
+        const creatorAddress = ethers.getAddress(room.creator);
+        const opponentAddress = ethers.getAddress(room.opponent);
+        const stake = ethers.formatEther(room.stake);
+        const otherPlayer = (playerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+
+        if (otherPlayer && otherPlayer !== ethers.ZeroAddress) {
+            await sendInstantNotification(otherPlayer, 'notify_opponent_committed', { roomId: roomIdStr, opponent: playerAddress, stake });
+        }
+    } catch (err) {
+        console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau commit):`, err.message);
+    }
+}
+
+async function handleRevealedEvent(roomId, player, choice) {
+    const roomIdStr = toRoomIdString(roomId);
+    console.log(`[SỰ KIỆN] Room ${roomIdStr} có người reveal: ${player}`);
+    try {
+        if (!contract) return;
+        const room = await contract.rooms(roomId);
+        const playerAddress = ethers.getAddress(player);
+        const creatorAddress = ethers.getAddress(room.creator);
+        const opponentAddress = ethers.getAddress(room.opponent);
+        const stake = ethers.formatEther(room.stake);
+        const otherPlayer = (playerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+
+        if (otherPlayer && otherPlayer !== ethers.ZeroAddress) {
+            await sendInstantNotification(otherPlayer, 'notify_opponent_revealed', { roomId: roomIdStr, opponent: playerAddress, stake });
+        }
+    } catch (err) {
+        console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau reveal):`, err.message);
+    }
+}
+
+async function handleResolvedEvent(roomId, winner, payout, fee) {
+    const roomIdStr = toRoomIdString(roomId);
+    console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả: ${winner} thắng`);
+    try {
+        if (!contract) return;
+        const room = await contract.rooms(roomId);
+        const winnerAddress = ethers.getAddress(winner);
+        const creatorAddress = ethers.getAddress(room.creator);
+        const opponentAddress = ethers.getAddress(room.opponent);
+        const payoutAmount = ethers.formatEther(payout);
+        const stakeAmount = parseFloat(ethers.formatEther(room.stake));
+        const loserAddress = (winnerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+
+        const winnerIsCreator = (winnerAddress === creatorAddress);
+        const winnerChoice = winnerIsCreator ? room.revealA : room.revealB;
+        const loserChoice = winnerIsCreator ? room.revealB : room.revealA;
+
+        const winnerLangs = await db.getUsersForWallet(winnerAddress);
+        const loserLangs = await db.getUsersForWallet(loserAddress);
+        const winnerLang = (winnerLangs[0] || {}).lang || defaultLang;
+        const loserLang = (loserLangs[0] || {}).lang || defaultLang;
+
+        const winnerChoiceStr = getChoiceString(winnerChoice, winnerLang);
+        const loserChoiceStr = getChoiceString(loserChoice, loserLang);
+
+        await Promise.all([
+            sendInstantNotification(winnerAddress, 'notify_game_win',
+                { roomId: roomIdStr, payout: payoutAmount, myChoice: winnerChoiceStr, opponentChoice: loserChoiceStr }
+            ),
+            sendInstantNotification(loserAddress, 'notify_game_lose',
+                { roomId: roomIdStr, winner: winnerAddress, myChoice: loserChoiceStr, opponentChoice: winnerChoiceStr }
+            )
+        ]);
+
+        await Promise.all([
+            db.writeGameResult(winnerAddress, 'win', stakeAmount),
+            db.writeGameResult(loserAddress, 'lose', stakeAmount)
+        ]);
+    } catch (err) {
+        console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau resolve):`, err.message);
+    }
+}
+
+async function handleCanceledEvent(roomId) {
+    const roomIdStr = toRoomIdString(roomId);
+    console.log(`[SỰ KIỆN] Room ${roomIdStr} đã bị hủy (Hòa/Timeout)`);
+    try {
+        if (!contract) return;
+        const room = await contract.rooms(roomId);
+        const stakeAmount = parseFloat(ethers.formatEther(room.stake));
+        const creatorAddress = ethers.getAddress(room.creator);
+
+        const creatorLangs = await db.getUsersForWallet(creatorAddress);
+        const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
+        const choiceStr = getChoiceString(room.revealA, creatorLang);
+
+        const tasks = [
+            sendInstantNotification(creatorAddress, 'notify_game_draw', { roomId: roomIdStr, choice: choiceStr })
+        ];
+
+        if (room.opponent !== ethers.ZeroAddress) {
             const opponentAddress = ethers.getAddress(room.opponent);
-            const stake = ethers.formatEther(room.stake);
-            let otherPlayer = (playerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+            const opponentLangs = await db.getUsersForWallet(opponentAddress);
+            const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
+            const choiceStrOpp = getChoiceString(room.revealA, opponentLang);
+            tasks.push(sendInstantNotification(opponentAddress, 'notify_game_draw', { roomId: roomIdStr, choice: choiceStrOpp }));
 
-            if(otherPlayer) {
-                await sendInstantNotification(otherPlayer, 'notify_opponent_committed', { roomId: roomId, opponent: playerAddress, stake: stake });
-            }
-        } catch (err) {
-            console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomId} (sau commit):`, err.message);
+            await Promise.all([
+                db.writeGameResult(creatorAddress, 'draw', stakeAmount),
+                db.writeGameResult(opponentAddress, 'draw', stakeAmount)
+            ]);
         }
-    });
 
-    contract.on("Revealed", async (roomId, player, choice) => {
-        console.log(`[SỰ KIỆN] Room ${roomId} có người reveal: ${player}`);
-        try {
-            const room = await contract.rooms(roomId);
-            const playerAddress = ethers.getAddress(player);
-            const creatorAddress = ethers.getAddress(room.creator);
-            const opponentAddress = ethers.getAddress(room.opponent);
-            const stake = ethers.formatEther(room.stake);
-            let otherPlayer = (playerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+        await Promise.all(tasks);
+    } catch (err) {
+        console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau cancel):`, err.message);
+    }
+}
 
-            if(otherPlayer) {
-                await sendInstantNotification(otherPlayer, 'notify_opponent_revealed', { roomId: roomId, opponent: playerAddress, stake: stake });
-            }
-        } catch (err) {
-            console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomId} (sau reveal):`, err.message);
-        }
-    });
-    
-    contract.on("Resolved", async (roomId, winner, payout, fee) => {
-        console.log(`[SỰ KIỆN] Room ${roomId} có kết quả: ${winner} thắng`);
-        try {
-            const room = await contract.rooms(roomId);
-            const winnerAddress = ethers.getAddress(winner);
-            const creatorAddress = ethers.getAddress(room.creator);
-            const opponentAddress = ethers.getAddress(room.opponent);
-            const payoutAmount = ethers.formatEther(payout);
-            const stakeAmount = parseFloat(ethers.formatEther(room.stake));
-            let loserAddress = (winnerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
+    const roomIdStr = toRoomIdString(roomId);
+    console.log(`[SỰ KIỆN] Room ${roomIdStr} có người bỏ cuộc: ${loser}`);
+    const payoutAmount = ethers.formatEther(winnerPayout);
+    const stakeAmount = parseFloat(ethers.formatEther(winnerPayout)) / 1.8;
 
-            const winnerIsCreator = (winnerAddress === creatorAddress);
-            const winnerChoice = winnerIsCreator ? room.revealA : room.revealB;
-            const loserChoice = winnerIsCreator ? room.revealB : room.revealA;
-            
-            // Lấy ngôn ngữ đã lưu
-            const winnerLangs = await db.getUsersForWallet(winnerAddress);
-            const loserLangs = await db.getUsersForWallet(loserAddress);
-            const winnerLang = (winnerLangs[0] || {}).lang || defaultLang;
-            const loserLang = (loserLangs[0] || {}).lang || defaultLang;
-            
-            const winnerChoiceStr = getChoiceString(winnerChoice, winnerLang);
-            const loserChoiceStr = getChoiceString(loserChoice, loserLang);
+    try {
+        await Promise.all([
+            sendInstantNotification(winner, 'notify_forfeit_win', { roomId: roomIdStr, loser, payout: payoutAmount }),
+            sendInstantNotification(loser, 'notify_forfeit_lose', { roomId: roomIdStr, winner })
+        ]);
 
-            await sendInstantNotification(winnerAddress, 'notify_game_win', 
-                { roomId: roomId, payout: payoutAmount, myChoice: winnerChoiceStr, opponentChoice: loserChoiceStr }
-            );
-            await sendInstantNotification(loserAddress, 'notify_game_lose', 
-                { roomId: roomId, winner: winnerAddress, myChoice: loserChoiceStr, opponentChoice: winnerChoiceStr }
-            );
-            
-            await db.writeGameResult(winnerAddress, 'win', stakeAmount);
-            await db.writeGameResult(loserAddress, 'lose', stakeAmount);
-        } catch (err) {
-            console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomId} (sau resolve):`, err.message);
-        }
-    });
-
-    contract.on("Canceled", async (roomId) => {
-        console.log(`[SỰ KIỆN] Room ${roomId} đã bị hủy (Hòa/Timeout)`);
-        try {
-            const room = await contract.rooms(roomId);
-            const stakeAmount = parseFloat(ethers.formatEther(room.stake));
-            
-            const creatorLangs = await db.getUsersForWallet(room.creator);
-            const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
-            const choiceStr = getChoiceString(room.revealA, creatorLang); 
-
-            await sendInstantNotification(room.creator, 'notify_game_draw', { roomId: roomId, choice: choiceStr });
-            if (room.opponent !== ethers.ZeroAddress) {
-                const opponentLangs = await db.getUsersForWallet(room.opponent);
-                const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
-                const choiceStr_opp = getChoiceString(room.revealA, opponentLang);
-                await sendInstantNotification(room.opponent, 'notify_game_draw', { roomId: roomId, choice: choiceStr_opp });
-                
-                await db.writeGameResult(room.creator, 'draw', stakeAmount);
-                await db.writeGameResult(room.opponent, 'draw', stakeAmount);
-            }
-        } catch (err) {
-            console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomId} (sau cancel):`, err.message);
-        }
-    });
-
-    contract.on("Forfeited", async (roomId, loser, winner, winnerPayout) => {
-        console.log(`[SỰ KIỆN] Room ${roomId} có người bỏ cuộc: ${loser}`);
-        const payoutAmount = ethers.formatEther(winnerPayout);
-        const stakeAmount = parseFloat(ethers.formatEther(winnerPayout)) / 1.8;
-        
-        await sendInstantNotification(winner, 'notify_forfeit_win', { roomId: roomId, loser: loser, payout: payoutAmount });
-        await sendInstantNotification(loser, 'notify_forfeit_lose', { roomId: roomId, winner: winner });
-        
         if (stakeAmount > 0) {
-            await db.writeGameResult(winner, 'win', stakeAmount);
-            await db.writeGameResult(loser, 'lose', stakeAmount);
+            await Promise.all([
+                db.writeGameResult(winner, 'win', stakeAmount),
+                db.writeGameResult(loser, 'lose', stakeAmount)
+            ]);
         }
-    });
-
-    provider.on("error", (error) => {
-        console.error(`[LỖI WSS Provider]: ${error.message}. Bot sẽ tự động thử kết nối lại.`);
-    });
+    } catch (error) {
+        console.error(`[Lỗi] Khi xử lý sự kiện Forfeited cho room ${roomIdStr}:`, error.message);
+    }
 }
 
 // ==========================================================
@@ -428,26 +581,33 @@ function startBlockchainListener() {
 // ==========================================================
 async function sendInstantNotification(playerAddress, langKey, variables = {}) {
     if (!playerAddress || playerAddress === ethers.ZeroAddress) return;
-    
-    const users = await db.getUsersForWallet(playerAddress); 
-    if (!users || users.length === 0) {
-        console.log(`[Notify] Không tìm thấy user nào theo dõi ví ${playerAddress}. Bỏ qua.`);
+
+    let normalizedAddress;
+    try {
+        normalizedAddress = ethers.getAddress(playerAddress);
+    } catch (error) {
+        console.warn(`[Notify] Địa chỉ không hợp lệ: ${playerAddress}`);
         return;
     }
 
-    for (const user of users) {
-        const { chatId, lang } = user;
+    const users = await db.getUsersForWallet(normalizedAddress);
+    if (!users || users.length === 0) {
+        console.log(`[Notify] Không tìm thấy user nào theo dõi ví ${normalizedAddress}. Bỏ qua.`);
+        return;
+    }
+
+    const tasks = users.map(async ({ chatId, lang }) => {
         const message = t(lang, langKey, variables);
 
         const button = {
-            text: `🎮 ${t(lang, 'action_button_play')}`, 
+            text: `🎮 ${t(lang, 'action_button_play')}`,
             url: `${WEB_URL}/?join=${variables.roomId || ''}`
         };
-        
+
         let options = {
             parse_mode: "Markdown",
             reply_markup: {
-                inline_keyboard: [ [ button ] ]
+                inline_keyboard: [[button]]
             }
         };
 
@@ -462,7 +622,9 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
         } catch (error) {
             console.error(`[Lỗi Gửi Text]: ${error.message}`);
         }
-    }
+    });
+
+    await Promise.allSettled(tasks);
 }
 
 // ==========================================================
@@ -475,22 +637,15 @@ async function main() {
         // Bước 1: Khởi tạo DB
         await db.init(); 
 
-        // Bước 2: Xác thực kết nối WSS (bộ 'tai')
+        // Bước 2: Kết nối Blockchain (WSS) và gắn listener
         console.log("Đang kết nối tới Blockchain (WSS)...");
-        const networkPromise = provider.getNetwork();
-        const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("WSS connection timed out after 10 seconds")), 10000)
-        );
-        await Promise.race([networkPromise, timeoutPromise]);
+        await startBlockchainListener();
         console.log("✅ [Blockchain] Kết nối WSS thành công.");
-        
-        // Bước 3: Bật bộ 'tai' (listener)
-        startBlockchainListener(); 
-        
-        // Bước 4: Bật API
+
+        // Bước 3: Bật API
         startApiServer();
-        
-        // Bước 5: Bật Bot (bộ 'miệng')
+
+        // Bước 4: Bật Bot (bộ 'miệng')
         startTelegramBot();
 
         console.log("🚀 TẤT CẢ DỊCH VỤ ĐÃ SẴN SÀNG!");
