@@ -31,9 +31,9 @@
   "notify_self_joined": "⚔️ **GAME ON (Room {roomId})**\n\nYou joined the room of:\n`{creator}`\n...with a 💰 **{stake} $BANMAO** stake. Time to COMMIT!",
   "notify_opponent_committed": "⚡️ **OPPONENT COMMITTED (Room {roomId})**\n\nRoom stake: 💰 **{stake} $BANMAO**.\nYour opponent:\n`{opponent}`\n...has just **COMMITTED**. It's your turn!",
   "notify_opponent_revealed": "⚡️ **OPPONENT REVEALED (Room {roomId})**\n\nRoom stake: 💰 **{stake} $BANMAO**.\nYour opponent:\n`{opponent}`\n...has just **REVEALED**. It's your turn!",
-  "notify_game_win": "🎉 **YOU WON (Room {roomId})** 🎉\n\nYou received 💸 **{payout} $BANMAO**!\n\n*Reason: You played **{myChoice}**, opponent played **{opponentChoice}*.",
-  "notify_game_lose": "😥 **YOU LOST (Room {roomId})**\n\nThe winner:\n`{winner}`\n...has won.\n\n*Reason: You played **{myChoice}**, opponent played **{opponentChoice}*.",
-  "notify_game_draw": "🤝 **GAME DRAW (Room {roomId})**\n\nThe match ended in a draw.\n\n*Reason: You both played **{choice}*.",
+  "notify_game_win": "🎉 **YOU WON (Room {roomId})** 🎉\n\nYou received 💸 **{payout} $BANMAO**!\n\n*Reason: You played **{myChoice}**, opponent played **{opponentChoice}**.*",
+  "notify_game_lose": "😥 **YOU LOST (Room {roomId})**\n\nThe winner:\n`{winner}`\n...has won.\n\n*Reason: You played **{myChoice}**, opponent played **{opponentChoice}**.*",
+  "notify_game_draw": "🤝 **GAME DRAW (Room {roomId})**\n\nThe match ended in a draw.\n\n*Reason: You both played **{choice}**.*",
   "notify_forfeit_win": "🎉 **OPPONENT FORFEITED (Room {roomId})**\n\nYour opponent:\n`{loser}`\n...has **FORFEITED**. You **WON** and received 💸 **{payout} $BANMAO**!",
   "notify_forfeit_lose": "😥 **YOU FORFEITED (Room {roomId})**\n\nYou have **FORFEITED**. Your opponent:\n`{winner}`\n...has won."
 }

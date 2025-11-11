@@ -31,9 +31,9 @@
   "notify_self_joined": "⚔️ **PERMAINAN DIMULAI (Room {roomId})**\n\nAnda bergabung dengan room:\n`{creator}`\n...dengan taruhan 💰 **{stake} $BANMAO**. Waktunya COMMIT!",
   "notify_opponent_committed": "⚡️ **LAWAN COMMIT (Room {roomId})**\n\nTaruhan: 💰 **{stake} $BANMAO**.\nLawan Anda:\n`{opponent}`\n...baru saja **COMMIT**. Sekarang giliran Anda!",
   "notify_opponent_revealed": "⚡️ **LAWAN REVEAL (Room {roomId})**\n\nTaruhan: 💰 **{stake} $BANMAO**.\nLawan Anda:\n`{opponent}`\n...baru saja **REVEAL**. Sekarang giliran Anda!",
-  "notify_game_win": "🎉 **ANDA MENANG (Room {roomId})** 🎉\n\nAnda menerima 💸 **{payout} $BANMAO**!\n\n*Alasan: Anda main **{myChoice}**, lawan main **{opponentChoice}*.",
-  "notify_game_lose": "😥 **ANDA KALAH (Room {roomId})**\n\nPemenangnya:\n`{winner}`\n\n*Alasan: Anda main **{myChoice}**, lawan main **{opponentChoice}*.",
-  "notify_game_draw": "🤝 **PERMAINAN SERI (Room {roomId})**\n\nPertandingan berakhir **SERI**.\n\n*Alasan: Keduanya main **{choice}*.",
+  "notify_game_win": "🎉 **ANDA MENANG (Room {roomId})** 🎉\n\nAnda menerima 💸 **{payout} $BANMAO**!\n\n*Alasan: Anda main **{myChoice}**, lawan main **{opponentChoice}**.*",
+  "notify_game_lose": "😥 **ANDA KALAH (Room {roomId})**\n\nPemenangnya:\n`{winner}`\n\n*Alasan: Anda main **{myChoice}**, lawan main **{opponentChoice}**.*",
+  "notify_game_draw": "🤝 **PERMAINAN SERI (Room {roomId})**\n\nPertandingan berakhir **SERI**.\n\n*Alasan: Keduanya main **{choice}**.*",
   "notify_forfeit_win": "🎉 **LAWAN MENYERAH (Room {roomId})**\n\nLawan Anda:\n`{loser}`\n...telah **MENYERAH**. Anda **MENANG** dan menerima 💸 **{payout} $BANMAO**!",
   "notify_forfeit_lose": "😥 **ANDA MENYERAH (Room {roomId})**\n\nAnda telah **MENYERAH**. Lawan Anda:\n`{winner}`\n...telah menang."
 }
