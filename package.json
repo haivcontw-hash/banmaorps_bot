@@ -1,0 +1,18 @@
+{
+  "name": "banmao-bot-server",
+  "version": "1.0.0",
+  "description": "Bot va API cho Banmao RPS",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "sqlite3": "^5.1.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.1",
+    "express": "^4.19.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "uuid": "^10.0.0"
+  }
+}

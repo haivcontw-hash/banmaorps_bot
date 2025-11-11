@@ -1,0 +1,17 @@
+ssh root@103.75.183.59
+100700
+scp .\package.json root@103.75.183.59:/root/
+scp .\index.js root@103.75.183.59:/root/
+scp -r .\locales root@103.75.183.59:/root/
+scp .\database.js root@103.75.183.59:/root/
+
+pm2 restart banmaorps_bot
+pm2 stop banmaorps_bot
+pm2 logs banmaorps_bot
+
+(Kill) tất cả các bot cũ
+Lệnh này sẽ "giết" tất cả các tiến trình node (bao gồm cả con bot "zombie" đang bị treo).
+
+pkill node
+
+
