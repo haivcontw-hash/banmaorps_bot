@@ -25,18 +25,43 @@ function normalizeOwnerToken(token) {
     if (!token) {
         return null;
     }
-    const trimmed = token.trim().replace(/^['"\[]+|['"\]]+$/g, '');
+    const trimmed = token.trim();
     if (!trimmed) {
         return null;
     }
-    return trimmed;
+    const cleaned = trimmed.replace(/^['"\[]+|['"\]]+$/g, '');
+    if (!cleaned) {
+        return null;
+    }
+    return cleaned;
+}
+
+function extractOwnerParts(rawValue) {
+    if (!rawValue) {
+        return [];
+    }
+
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+        return [];
+    }
+
+    if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed)) {
+                return parsed.map((item) => (item == null ? '' : String(item)));
+            }
+        } catch (error) {
+            // Không phải JSON hợp lệ -> fallback
+        }
+    }
+
+    return trimmed.split(/[\s,;|\/]+/);
 }
 
 function collectOwnerEntries(rawValue, collector) {
-    if (!rawValue) {
-        return;
-    }
-    const parts = rawValue.split(/[,\s]+/);
+    const parts = extractOwnerParts(rawValue);
     for (const part of parts) {
         const cleaned = normalizeOwnerToken(part);
         if (!cleaned) {
@@ -63,12 +88,31 @@ function registerOwnerEntry(entry, options = { allowUsername: true }) {
     ownerUsernameSet.add(entry.replace(/^@/, '').toLowerCase());
 }
 
-collectOwnerEntries(process.env.BOT_OWNER_IDS, (entry) => registerOwnerEntry(entry));
-collectOwnerEntries(process.env.BOT_OWNER_ID, (entry) => registerOwnerEntry(entry));
-collectOwnerEntries(process.env.BOT_OWNER_USERNAMES, (entry) => registerOwnerEntry(entry));
-collectOwnerEntries(process.env.BOT_OWNER_USERNAME, (entry) => registerOwnerEntry(entry));
-collectOwnerEntries(process.env.OWNER_TELEGRAM_ID, (entry) => registerOwnerEntry(entry, { allowUsername: false }));
-collectOwnerEntries(process.env.OWNER_TG_ID, (entry) => registerOwnerEntry(entry, { allowUsername: false }));
+const ownerEnvCandidates = [
+    'BOT_OWNER_IDS',
+    'BOT_OWNER_ID',
+    'BOT_OWNER_USERNAMES',
+    'BOT_OWNER_USERNAME',
+    'OWNER_TELEGRAM_ID',
+    'OWNER_TG_ID',
+    'BOT_OWNER',
+    'BOT_OWNERS',
+    'OWNER_IDS',
+    'OWNER_ID',
+    'TELEGRAM_OWNER_ID',
+    'TELEGRAM_OWNER_USERNAME',
+];
+
+for (const envKey of ownerEnvCandidates) {
+    const rawValue = process.env[envKey];
+    if (typeof rawValue === 'undefined') {
+        continue;
+    }
+    const allowUsername = !/(ID|IDS)$/i.test(envKey);
+    collectOwnerEntries(rawValue, (entry) => registerOwnerEntry(entry, { allowUsername }));
+}
+
+const hasConfiguredOwners = () => ownerIdSet.size > 0 || ownerUsernameSet.size > 0;
 
 const localesDir = path.join(__dirname, 'locales');
 const supportedLanguages = fs.readdirSync(localesDir)
@@ -132,7 +176,7 @@ function isSupportedLanguage(lang) {
 
 function isBotOwner(user) {
     if (!user) {
-        return false;
+        return !hasConfiguredOwners();
     }
     const userId = String(user.id);
     if (ownerIdSet.has(userId) || ownerIdSet.has(userId.replace(/^[+]/, ''))) {
@@ -140,6 +184,9 @@ function isBotOwner(user) {
     }
     const username = (user.username || '').toLowerCase();
     if (username && ownerUsernameSet.has(username)) {
+        return true;
+    }
+    if (!hasConfiguredOwners()) {
         return true;
     }
     return false;
