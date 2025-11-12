@@ -79,6 +79,34 @@ function getChoiceString(choice, lang) {
 }
 // =======================================================
 
+function applyChoiceTranslations(lang, variables) {
+    const mapping = variables.__choiceTranslations;
+    if (!Array.isArray(mapping)) {
+        return;
+    }
+
+    for (const entry of mapping) {
+        if (!entry || typeof entry !== 'object') {
+            continue;
+        }
+
+        const { valueKey, targetKey } = entry;
+        if (!valueKey || !targetKey || !(valueKey in variables)) {
+            continue;
+        }
+
+        const rawValue = variables[valueKey];
+        if (Array.isArray(rawValue)) {
+            variables[targetKey] = rawValue.map((choiceValue) => getChoiceString(choiceValue, lang));
+        } else {
+            variables[targetKey] = getChoiceString(rawValue, lang);
+        }
+    }
+
+    delete variables.__choiceTranslations;
+}
+
+
 function buildDrawNotificationMessage(lang, variables) {
     const lines = [
         t(lang, 'notify_game_draw_header', { roomId: variables.roomId }),
@@ -473,30 +501,20 @@ async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } =
     const stakeAmountText = formatBanmaoFromWei(stakeWeiValue);
     const feeAmountText = formatBanmaoFromWei(drawFeeWei);
 
-    const [creatorLangs, opponentLangs] = await Promise.all([
-        db.getUsersForWallet(creatorAddress),
-        db.getUsersForWallet(opponentAddress)
-    ]);
-
-    const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
-    const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
-
-    const creatorChoiceStr = getChoiceString(creatorChoice, creatorLang);
-    const opponentChoiceStr = getChoiceString(opponentChoice, opponentLang);
-
     const baseDrawVariables = {
         roomId: roomIdStr,
         refundAmount: refundAmountText,
         refundPercent: '98%',
         stakeAmount: stakeAmountText,
         feePercent: '2%',
-        feeAmount: feeAmountText
+        feeAmount: feeAmountText,
+        __choiceTranslations: [{ valueKey: 'choiceValue', targetKey: 'choice' }]
     };
 
     const notifyTasks = [
         sendInstantNotification(creatorAddress, 'notify_game_draw', {
             ...baseDrawVariables,
-            choice: creatorChoiceStr,
+            choiceValue: creatorChoice,
             __messageBuilder: (lang, vars) => buildDrawNotificationMessage(lang, vars)
         })
     ];
@@ -505,7 +523,7 @@ async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } =
         notifyTasks.push(
             sendInstantNotification(opponentAddress, 'notify_game_draw', {
                 ...baseDrawVariables,
-                choice: opponentChoiceStr,
+                choiceValue: opponentChoice,
                 __messageBuilder: (lang, vars) => buildDrawNotificationMessage(lang, vars)
             })
         );
@@ -1162,47 +1180,45 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
             return;
         }
 
-        const winnerLangs = await db.getUsersForWallet(normalizedWinner);
-        const loserLangs = await db.getUsersForWallet(loserAddress);
-        const winnerLang = (winnerLangs[0] || {}).lang || defaultLang;
-        const loserLang = (loserLangs[0] || {}).lang || defaultLang;
-
         const winnerIsCreator = normalizedWinner === creatorAddress;
         const winnerChoice = winnerIsCreator ? creatorChoice : opponentChoice;
         const loserChoice = winnerIsCreator ? opponentChoice : creatorChoice;
-
-        const winnerChoiceForWinnerLang = getChoiceString(winnerChoice, winnerLang);
-        const loserChoiceForWinnerLang = getChoiceString(loserChoice, winnerLang);
-        const winnerChoiceForLoserLang = getChoiceString(winnerChoice, loserLang);
-        const loserChoiceForLoserLang = getChoiceString(loserChoice, loserLang);
 
         await Promise.all([
             sendInstantNotification(normalizedWinner, 'notify_game_win', {
                 __messageBuilder: buildWinNotificationMessage,
                 roomId: roomIdStr,
                 payout: winnerPayoutText,
-                myChoice: winnerChoiceForWinnerLang,
-                opponentChoice: loserChoiceForWinnerLang,
+                myChoiceValue: winnerChoice,
+                opponentChoiceValue: loserChoice,
                 winnerPercent: '98%',
                 totalPot: totalPotText,
                 feePercent: '2%',
                 feeAmount: feeAmountText,
                 opponentLoss: loserLossText,
-                opponentLossPercent: '100%'
+                opponentLossPercent: '100%',
+                __choiceTranslations: [
+                    { valueKey: 'myChoiceValue', targetKey: 'myChoice' },
+                    { valueKey: 'opponentChoiceValue', targetKey: 'opponentChoice' }
+                ]
             }),
             sendInstantNotification(loserAddress, 'notify_game_lose', {
                 __messageBuilder: buildLoseNotificationMessage,
                 roomId: roomIdStr,
                 winner: normalizedWinner,
-                myChoice: loserChoiceForLoserLang,
-                opponentChoice: winnerChoiceForLoserLang,
+                myChoiceValue: loserChoice,
+                opponentChoiceValue: winnerChoice,
                 lostAmount: loserLossText,
                 lostPercent: '100%',
                 opponentPayout: winnerPayoutText,
                 opponentPayoutPercent: '98%',
                 totalPot: totalPotText,
                 feePercent: '2%',
-                feeAmount: feeAmountText
+                feeAmount: feeAmountText,
+                __choiceTranslations: [
+                    { valueKey: 'myChoiceValue', targetKey: 'myChoice' },
+                    { valueKey: 'opponentChoiceValue', targetKey: 'opponentChoice' }
+                ]
             })
         ]);
 
@@ -1572,6 +1588,8 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
             resolvedVariables.reason = translateClaimTimeoutReason(lang, info, perspective, addresses);
             delete resolvedVariables.reasonInfo;
         }
+
+        applyChoiceTranslations(lang, resolvedVariables);
 
         let message;
 
