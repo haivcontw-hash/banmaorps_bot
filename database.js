@@ -1,4 +1,6 @@
 const sqlite3 = require('sqlite3').verbose();
+const { normalizeLanguageCode } = require('./i18n.js');
+
 const db = new sqlite3.Database('banmao.db', (err) => {
     if (err) {
         console.error("LỖI KHỞI TẠO DB:", err.message);
@@ -37,9 +39,18 @@ async function init() {
         CREATE TABLE IF NOT EXISTS users (
             chatId TEXT PRIMARY KEY,
             lang TEXT,
-            wallets TEXT
+            wallets TEXT,
+            lang_source TEXT DEFAULT 'auto'
         );
     `);
+
+    try {
+        await dbRun(`ALTER TABLE users ADD COLUMN lang_source TEXT DEFAULT 'auto'`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
     await dbRun(`
         CREATE TABLE IF NOT EXISTS pending_tokens (
             token TEXT PRIMARY KEY,
@@ -70,17 +81,39 @@ async function init() {
 // --- Hàm xử lý User & Wallet ---
 
 async function addWalletToUser(chatId, lang, walletAddress) {
+    const normalizedLangInput = normalizeLanguageCode(lang);
     const normalizedAddr = ethers.getAddress(walletAddress);
-    let user = await dbGet('SELECT * FROM users WHERE chatId = ?', [chatId]);
-    
+    let user = await dbGet('SELECT lang, lang_source, wallets FROM users WHERE chatId = ?', [chatId]);
+
     if (user) {
-        let wallets = JSON.parse(user.wallets);
+        let wallets = [];
+        try {
+            wallets = JSON.parse(user.wallets) || [];
+        } catch (err) {
+            console.error(`[DB] Lỗi đọc danh sách ví cho ${chatId}:`, err.message);
+            wallets = [];
+        }
         if (!wallets.includes(normalizedAddr)) {
             wallets.push(normalizedAddr);
         }
-        await dbRun('UPDATE users SET lang = ?, wallets = ? WHERE chatId = ?', [lang, JSON.stringify(wallets), chatId]);
+
+        const hasStoredLang = typeof user.lang === 'string' && user.lang.trim().length > 0;
+        const normalizedStored = hasStoredLang ? normalizeLanguageCode(user.lang) : null;
+        const source = user.lang_source || 'auto';
+
+        let langToPersist = normalizedStored || normalizedLangInput;
+        let nextSource = source;
+
+        if (!normalizedStored) {
+            nextSource = 'auto';
+        } else if (source !== 'manual' && normalizedStored !== normalizedLangInput) {
+            langToPersist = normalizedLangInput;
+            nextSource = 'auto';
+        }
+
+        await dbRun('UPDATE users SET lang = ?, lang_source = ?, wallets = ? WHERE chatId = ?', [langToPersist, nextSource, JSON.stringify(wallets), chatId]);
     } else {
-        await dbRun('INSERT INTO users (chatId, lang, wallets) VALUES (?, ?, ?)', [chatId, lang, JSON.stringify([normalizedAddr])]);
+        await dbRun('INSERT INTO users (chatId, lang, wallets, lang_source) VALUES (?, ?, ?, ?)', [chatId, normalizedLangInput, JSON.stringify([normalizedAddr]), 'auto']);
     }
     console.log(`[DB] Đã thêm/cập nhật ví ${normalizedAddr} cho chatId ${chatId}`);
 }
@@ -109,7 +142,7 @@ async function getWalletsForUser(chatId) {
 async function getUsersForWallet(walletAddress) {
     const normalizedAddr = ethers.getAddress(walletAddress);
     const allUsers = await dbAll('SELECT chatId, lang, wallets FROM users');
-    
+
     const users = [];
     for (const user of allUsers) {
         // Đảm bảo user.wallets không bị null/undefined
@@ -123,32 +156,55 @@ async function getUsersForWallet(walletAddress) {
         }
         
         if (Array.isArray(wallets) && wallets.includes(normalizedAddr)) {
-            users.push({ chatId: user.chatId, lang: user.lang });
+            const info = await getUserLanguageInfo(user.chatId);
+            const normalizedLang = info ? info.lang : normalizeLanguageCode(user.lang);
+            users.push({ chatId: user.chatId, lang: normalizedLang });
         }
     }
     return users;
 }
 
-// ===== HÀM MỚI (SỬA LỖI) =====
-/**
- * Lấy ngôn ngữ đã lưu của user
- * @param {string} chatId 
- * @returns {string|null} Trả về 'vi', 'en'... hoặc null
- */
-async function getUserLanguage(chatId) {
-    let user = await dbGet('SELECT lang FROM users WHERE chatId = ?', [chatId]);
-    return user ? user.lang : null;
+async function getUserLanguageInfo(chatId) {
+    let user = await dbGet('SELECT lang, lang_source FROM users WHERE chatId = ?', [chatId]);
+    if (!user) return null;
+
+    const normalizedLang = normalizeLanguageCode(user.lang);
+    const source = user.lang_source || 'auto';
+
+    if (normalizedLang !== user.lang || source !== user.lang_source) {
+        try {
+            await dbRun('UPDATE users SET lang = ?, lang_source = ? WHERE chatId = ?', [normalizedLang, source, chatId]);
+        } catch (err) {
+            console.error(`[DB] Không thể đồng bộ lang/lang_source cho ${chatId}:`, err.message);
+        }
+    }
+
+    return { lang: normalizedLang, source };
 }
-// =================================
+
+async function getUserLanguage(chatId) {
+    const info = await getUserLanguageInfo(chatId);
+    return info ? info.lang : null;
+}
+
+async function setUserLanguage(chatId, lang, source = 'manual') {
+    const normalizedLang = normalizeLanguageCode(lang);
+    const normalizedSource = source === 'manual' ? 'manual' : 'auto';
+    let user = await dbGet('SELECT wallets FROM users WHERE chatId = ?', [chatId]);
+    if (user) {
+        await dbRun('UPDATE users SET lang = ?, lang_source = ? WHERE chatId = ?', [normalizedLang, normalizedSource, chatId]);
+    } else {
+        await dbRun('INSERT INTO users (chatId, lang, lang_source, wallets) VALUES (?, ?, ?, ?)', [chatId, normalizedLang, normalizedSource, '[]']);
+    }
+    console.log(`[DB] Đã lưu ngôn ngữ ${normalizedLang} (${normalizedSource}) cho ${chatId}`);
+}
 
 async function setLanguage(chatId, lang) {
-    let user = await dbGet('SELECT * FROM users WHERE chatId = ?', [chatId]);
-    if (user) {
-        await dbRun('UPDATE users SET lang = ? WHERE chatId = ?', [lang, chatId]);
-    } else {
-        await dbRun('INSERT INTO users (chatId, lang, wallets) VALUES (?, ?, ?)', [chatId, lang, '[]']);
-    }
-    console.log(`[DB] Đã đổi ngôn ngữ cho ${chatId} thành ${lang}`);
+    await setUserLanguage(chatId, lang, 'manual');
+}
+
+async function setLanguageAuto(chatId, lang) {
+    await setUserLanguage(chatId, lang, 'auto');
 }
 
 // --- Hàm xử lý Pending (Deep Link) ---
@@ -223,8 +279,10 @@ module.exports = {
     removeAllWalletsFromUser,
     getWalletsForUser,
     getUsersForWallet,
-    getUserLanguage, // <-- Thêm hàm mới
+    getUserLanguage,
+    getUserLanguageInfo,
     setLanguage,
+    setLanguageAuto,
     addPendingToken,
     getPendingWallet,
     deletePendingToken,

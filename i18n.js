@@ -12,9 +12,34 @@ fs.readdirSync(localesDir).forEach(file => {
     }
 });
 
-// ===== THAY ĐỔI Ở ĐÂY =====
 const defaultLang = 'en'; // Chọn tiếng Anh làm mặc định
-// ==========================
+
+function normalizeLanguageCode(lang_code) {
+    if (!lang_code) {
+        return defaultLang;
+    }
+
+    let candidate = String(lang_code).trim();
+    if (!candidate) {
+        return defaultLang;
+    }
+
+    candidate = candidate.toLowerCase();
+
+    if (locales[candidate]) {
+        return candidate;
+    }
+
+    const hyphenIndex = candidate.indexOf('-');
+    if (hyphenIndex !== -1) {
+        const base = candidate.substring(0, hyphenIndex);
+        if (locales[base]) {
+            return base;
+        }
+    }
+
+    return defaultLang;
+}
 
 /**
  * Lấy chuỗi dịch
@@ -24,30 +49,25 @@ const defaultLang = 'en'; // Chọn tiếng Anh làm mặc định
  * @returns {string} Chuỗi đã dịch
  */
 function t(lang_code, key, variables = {}) {
-    // Ưu tiên ngôn ngữ của user, nếu không có thì dùng 'en'
-    const lang = locales[lang_code] ? lang_code : defaultLang;
-    
+    const lang = normalizeLanguageCode(lang_code);
+
     let translation = '';
 
-    // Thử lấy từ ngôn ngữ của user
     if (locales[lang] && locales[lang][key]) {
         translation = locales[lang][key];
     }
-    // Nếu không có, thử ngôn ngữ mặc định (en)
     else if (locales[defaultLang] && locales[defaultLang][key]) {
         translation = locales[defaultLang][key];
     }
-    // Nếu vẫn không có, trả về chính cái key
     else {
         return key;
     }
 
-    // Thay thế biến (ví dụ: {walletAddress})
     for (const [varName, varValue] of Object.entries(variables)) {
         translation = translation.replace(`{${varName}}`, varValue);
     }
-    
+
     return translation;
 }
 
-module.exports = { t_ : t }; // Đổi tên export để tránh xung đột
+module.exports = { t_: t, normalizeLanguageCode };

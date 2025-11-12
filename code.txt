@@ -1,6 +1,7 @@
 ssh root@103.75.183.59
 100700
 scp .\package.json root@103.75.183.59:/root/
+scp .\i18n.js root@103.75.183.59:/root/
 scp .\index.js root@103.75.183.59:/root/
 scp -r .\locales root@103.75.183.59:/root/
 scp .\database.js root@103.75.183.59:/root/
@@ -15,3 +16,46 @@ Lệnh này sẽ "giết" tất cả các tiến trình node (bao gồm cả con
 pkill node
 
 
+làm cho bảng cài đặt, chỉnh sửa thông báo của bot cho trực quan dễ dùng hơn và phải xác minh đúng là chủ sở hữu mới được phép sữa ( thêm bảng cài đặt nhỏ tổng hợp các chức năng dành cho owner, thêm các nút bấm để chỉnh sửa file cho dễ không rườm rà )
+
+kết quả hòa nhưng bot lại báo về claim timeout, kiểm tra lại logic thông báo toàn bộ cho đúng
+chỉnh sửa nút Telegram reminders luôn đóng khi người dùng ấn mới mở ra, các nội dung trong bảng con thu gọn lại cho đẹp
+kết quả là hòa nhưng bot lại báo về claim timeout là sai hãy sửa lại
+
+dựa vào dữ liệu này hãy chỉnh sửa lại thông báo cho đúng với từng ngôn ngữ
+phân chia rõ ràng các kết quả:
+
+1. Kết thúc thông thường
+Thắng/Thua: Người thắng nhận 98% tổng cược (2% phí).
+
+Hòa: Cả hai được hoàn 98% tiền cược của mình (2% phí).
+
+2. Bỏ cuộc (Forfeit)
+Một người bỏ cuộc 🏳️:
+
+Người bỏ cuộc mất tiền.
+
+Đối thủ nhận 90% tổng cược.
+
+Ví cộng đồng nhận 5%.
+
+5% bị burn.
+
+3. Hết giờ (Timeout)
+Một người Timeout ⏰: (Không Commit hoặc không Reveal).
+
+Người còn lại có thể Claim Timeout.
+
+Người claim nhận 98% tổng cược (như một trận thắng).
+
+Cả hai không Commit ♻️:
+
+Một trong hai người Claim Timeout.
+
+Cả hai được hoàn 100% tiền cược (Không mất phí).
+
+Cả hai không Reveal 🌀: (Đã Commit nhưng không Reveal).
+
+Một trong hai người Claim Timeout.
+
+Cả hai được hoàn 98% tiền cược (Mất 2% phí ).

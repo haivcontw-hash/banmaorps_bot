@@ -8,7 +8,7 @@ const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
-const { t_ } = require('./i18n.js');
+const { t_, normalizeLanguageCode } = require('./i18n.js');
 const db = require('./database.js'); 
 
 // --- CẤU HÌNH ---
@@ -69,6 +69,10 @@ function t(lang_code, key, variables = {}) {
     return t_(lang_code, key, variables);
 }
 
+function resolveLangCode(lang_code) {
+    return normalizeLanguageCode(lang_code || defaultLang);
+}
+
 // ===== HÀM HELPER: Dịch Lựa chọn (Kéo/Búa/Bao) =====
 function getChoiceString(choice, lang) {
     const choiceNum = Number(choice);
@@ -78,6 +82,195 @@ function getChoiceString(choice, lang) {
     return t(lang, 'choice_none'); // "Chưa rõ"
 }
 // =======================================================
+
+function applyChoiceTranslations(lang, variables) {
+    const mapping = variables.__choiceTranslations;
+    if (!Array.isArray(mapping)) {
+        return;
+    }
+
+    for (const entry of mapping) {
+        if (!entry || typeof entry !== 'object') {
+            continue;
+        }
+
+        const { valueKey, targetKey } = entry;
+        if (!valueKey || !targetKey || !(valueKey in variables)) {
+            continue;
+        }
+
+        const rawValue = variables[valueKey];
+        if (Array.isArray(rawValue)) {
+            variables[targetKey] = rawValue.map((choiceValue) => getChoiceString(choiceValue, lang));
+        } else {
+            variables[targetKey] = getChoiceString(rawValue, lang);
+        }
+    }
+
+    delete variables.__choiceTranslations;
+}
+
+
+async function resolveNotificationLanguage(chatId, fallbackLang) {
+    try {
+        if (chatId) {
+            const info = await db.getUserLanguageInfo(chatId);
+            if (info && info.lang) {
+                return resolveLangCode(info.lang);
+            }
+        }
+    } catch (error) {
+        console.warn(`[Notify] Không thể đọc ngôn ngữ đã lưu cho ${chatId}: ${error.message}`);
+    }
+
+    return resolveLangCode(fallbackLang || defaultLang);
+}
+
+
+function buildDrawNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_game_draw_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_game_draw_overview', {
+            refundPercent: variables.refundPercent,
+            feePercent: variables.feePercent
+        }),
+        '',
+        t(lang, 'notify_game_draw_breakdown_title'),
+        t(lang, 'notify_game_draw_breakdown_you', {
+            refundAmount: variables.refundAmount,
+            refundPercent: variables.refundPercent,
+            stakeAmount: variables.stakeAmount
+        }),
+        t(lang, 'notify_game_draw_breakdown_fee', {
+            feeAmount: variables.feeAmount,
+            feePercent: variables.feePercent
+        }),
+        '',
+        t(lang, 'notify_game_draw_reason', { choice: variables.choice })
+    ];
+
+    return lines.join('\n');
+}
+
+function buildWinNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_game_win_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_game_win_breakdown_title'),
+        t(lang, 'notify_game_win_breakdown_you', {
+            payout: variables.payout,
+            winnerPercent: variables.winnerPercent,
+            totalPot: variables.totalPot
+        }),
+        t(lang, 'notify_game_win_breakdown_opponent', {
+            opponentLoss: variables.opponentLoss,
+            opponentLossPercent: variables.opponentLossPercent
+        }),
+        t(lang, 'notify_game_win_breakdown_fee', {
+            feeAmount: variables.feeAmount,
+            feePercent: variables.feePercent
+        }),
+        '',
+        t(lang, 'notify_game_win_reason', {
+            myChoice: variables.myChoice,
+            opponentChoice: variables.opponentChoice
+        })
+    ];
+
+    return lines.join('\n');
+}
+
+function buildLoseNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_game_lose_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_game_lose_breakdown_title'),
+        t(lang, 'notify_game_lose_breakdown_you', {
+            lostAmount: variables.lostAmount,
+            lostPercent: variables.lostPercent
+        }),
+        t(lang, 'notify_game_lose_breakdown_opponent', {
+            opponentPayout: variables.opponentPayout,
+            opponentPayoutPercent: variables.opponentPayoutPercent,
+            totalPot: variables.totalPot
+        }),
+        t(lang, 'notify_game_lose_breakdown_fee', {
+            feeAmount: variables.feeAmount,
+            feePercent: variables.feePercent
+        }),
+        '',
+        t(lang, 'notify_game_lose_reason', {
+            myChoice: variables.myChoice,
+            opponentChoice: variables.opponentChoice
+        })
+    ];
+
+    return lines.join('\n');
+}
+
+function buildForfeitWinNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_forfeit_win_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_forfeit_win_overview'),
+        '',
+        t(lang, 'notify_forfeit_win_breakdown_title'),
+        t(lang, 'notify_forfeit_win_breakdown_you', {
+            payoutAmount: variables.payoutAmount,
+            winnerPercent: variables.winnerPercent,
+            totalPot: variables.totalPot
+        }),
+        t(lang, 'notify_forfeit_win_breakdown_opponent', {
+            opponentLossAmount: variables.opponentLossAmount,
+            opponentLossPercent: variables.opponentLossPercent
+        }),
+        t(lang, 'notify_forfeit_win_breakdown_community', {
+            communityAmount: variables.communityAmount,
+            communityPercent: variables.communityPercent
+        }),
+        t(lang, 'notify_forfeit_win_breakdown_burn', {
+            burnAmount: variables.burnAmount,
+            burnPercent: variables.burnPercent
+        }),
+        '',
+        t(lang, 'notify_forfeit_win_reason', { loser: variables.loser })
+    ];
+
+    return lines.join('\n');
+}
+
+function buildForfeitLoseNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_forfeit_lose_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_forfeit_lose_overview'),
+        '',
+        t(lang, 'notify_forfeit_lose_breakdown_title'),
+        t(lang, 'notify_forfeit_lose_breakdown_you', {
+            lostAmount: variables.lostAmount,
+            lostPercent: variables.lostPercent
+        }),
+        t(lang, 'notify_forfeit_lose_breakdown_opponent', {
+            opponentPayout: variables.opponentPayout,
+            winnerPercent: variables.winnerPercent,
+            totalPot: variables.totalPot
+        }),
+        t(lang, 'notify_forfeit_lose_breakdown_community', {
+            communityAmount: variables.communityAmount,
+            communityPercent: variables.communityPercent
+        }),
+        t(lang, 'notify_forfeit_lose_breakdown_burn', {
+            burnAmount: variables.burnAmount,
+            burnPercent: variables.burnPercent
+        }),
+        '',
+        t(lang, 'notify_forfeit_lose_reason', { winner: variables.winner })
+    ];
+
+    return lines.join('\n');
+}
+
 
 function shortAddress(address) {
     if (!address) return '-';
@@ -98,6 +291,62 @@ function formatBanmao(amount) {
         return '0.00';
     }
     return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function toBigIntSafe(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+
+    if (typeof value === 'bigint') {
+        return value;
+    }
+
+    try {
+        if (typeof value === 'number') {
+            if (!Number.isFinite(value)) {
+                return null;
+            }
+            return BigInt(Math.trunc(value));
+        }
+
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed) {
+                return null;
+            }
+            return BigInt(trimmed);
+        }
+
+        if (value && typeof value.toString === 'function') {
+            const asString = value.toString();
+            if (asString) {
+                return BigInt(asString);
+            }
+        }
+    } catch (error) {
+        return null;
+    }
+
+    return null;
+}
+
+function formatBanmaoFromWei(weiValue) {
+    const bigIntValue = toBigIntSafe(weiValue);
+    if (bigIntValue === null) {
+        return '0.00';
+    }
+
+    try {
+        const etherString = ethers.formatEther(bigIntValue);
+        const numeric = Number(etherString);
+        if (Number.isFinite(numeric)) {
+            return formatBanmao(numeric);
+        }
+        return etherString;
+    } catch (error) {
+        return '0.00';
+    }
 }
 
 function toRoomIdString(roomId) {
@@ -169,6 +418,17 @@ function mergeRoomData(existing = {}, incoming = {}) {
                 continue;
             }
             if (value === 0n && existing && existing.stakeWei !== undefined) {
+                continue;
+            }
+        }
+
+        if ((key === 'commitA' || key === 'commitB') && existing) {
+            const existingValue = existing[key];
+            const incomingValue = value;
+            const isExistingSet = Boolean(existingValue && existingValue !== ethers.ZeroHash);
+            const isIncomingUnset = !incomingValue || incomingValue === ethers.ZeroHash;
+
+            if (isExistingSet && isIncomingUnset) {
                 continue;
             }
         }
@@ -251,33 +511,40 @@ async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } =
 
     markRoomFinalOutcome(roomId, 'draw');
 
-    const stakeAmount = roomState.stakeWei !== undefined
-        ? parseFloat(ethers.formatEther(roomState.stakeWei))
+    const stakeWeiValue = roomState.stakeWei !== undefined ? roomState.stakeWei : null;
+    const stakeAmount = stakeWeiValue !== null
+        ? parseFloat(ethers.formatEther(stakeWeiValue))
         : 0;
+    const drawRefundWei = stakeWeiValue !== null ? (stakeWeiValue * 98n) / 100n : null;
+    const drawFeeWei = stakeWeiValue !== null && drawRefundWei !== null ? stakeWeiValue - drawRefundWei : null;
+    const refundAmountText = formatBanmaoFromWei(drawRefundWei);
+    const stakeAmountText = formatBanmaoFromWei(stakeWeiValue);
+    const feeAmountText = formatBanmaoFromWei(drawFeeWei);
 
-    const [creatorLangs, opponentLangs] = await Promise.all([
-        db.getUsersForWallet(creatorAddress),
-        db.getUsersForWallet(opponentAddress)
-    ]);
-
-    const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
-    const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
-
-    const creatorChoiceStr = getChoiceString(creatorChoice, creatorLang);
-    const opponentChoiceStr = getChoiceString(opponentChoice, opponentLang);
+    const baseDrawVariables = {
+        roomId: roomIdStr,
+        refundAmount: refundAmountText,
+        refundPercent: '98%',
+        stakeAmount: stakeAmountText,
+        feePercent: '2%',
+        feeAmount: feeAmountText,
+        __choiceTranslations: [{ valueKey: 'choiceValue', targetKey: 'choice' }]
+    };
 
     const notifyTasks = [
         sendInstantNotification(creatorAddress, 'notify_game_draw', {
-            roomId: roomIdStr,
-            choice: creatorChoiceStr
+            ...baseDrawVariables,
+            choiceValue: creatorChoice,
+            __messageBuilder: (lang, vars) => buildDrawNotificationMessage(lang, vars)
         })
     ];
 
     if (opponentAddress) {
         notifyTasks.push(
             sendInstantNotification(opponentAddress, 'notify_game_draw', {
-                roomId: roomIdStr,
-                choice: opponentChoiceStr
+                ...baseDrawVariables,
+                choiceValue: opponentChoice,
+                __messageBuilder: (lang, vars) => buildDrawNotificationMessage(lang, vars)
             })
         );
     }
@@ -352,18 +619,39 @@ function startApiServer() {
 // ===== HÀM HELPER MỚI (SỬA LỖI) =====
 // Lấy ngôn ngữ ĐÃ LƯU của user, nếu không có thì set ngôn ngữ mặc định
 async function getLang(msg) {
-    const chatId = msg.chat.id.toString();
-    const detectedLang = msg.from.language_code || defaultLang; // Ngôn ngữ từ TG
-
-    let savedLang = await db.getUserLanguage(chatId); // Thử đọc từ DB
-    
-    if (savedLang) {
-        return savedLang; // Đã tìm thấy, trả về ngôn ngữ đã lưu
-    } else {
-        // User mới, hoặc user cũ nhưng chưa có lang
-        await db.setLanguage(chatId, detectedLang); // Lưu ngôn ngữ mặc định
-        return detectedLang; // Trả về ngôn ngữ mặc định
+    if (!msg || !msg.chat) {
+        return defaultLang;
     }
+
+    const chatId = msg.chat.id.toString();
+    const detectedLang = resolveLangCode(msg?.from?.language_code);
+
+    const info = await db.getUserLanguageInfo(chatId);
+    if (info) {
+        const savedLang = resolveLangCode(info.lang);
+        const source = info.source || 'auto';
+
+        if (source === 'manual') {
+            if (savedLang !== info.lang) {
+                await db.setLanguage(chatId, savedLang);
+            }
+            return savedLang;
+        }
+
+        if (savedLang !== detectedLang) {
+            await db.setLanguage(chatId, savedLang);
+            return savedLang;
+        }
+
+        if (savedLang !== info.lang || source !== info.source) {
+            await db.setLanguageAuto(chatId, savedLang);
+        }
+
+        return detectedLang;
+    }
+
+    await db.setLanguageAuto(chatId, detectedLang);
+    return detectedLang;
 }
 // ======================================
 
@@ -374,7 +662,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
-        const lang = msg.from.language_code || defaultLang; 
+        const lang = resolveLangCode(msg.from.language_code);
         const walletAddress = await db.getPendingWallet(token); 
         if (walletAddress) {
             await db.addWalletToUser(chatId, lang, walletAddress);
@@ -469,7 +757,7 @@ function startTelegramBot() {
     bot.onText(/\/banmaofeed(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
-        const userLang = msg.from.language_code || defaultLang;
+        const userLang = resolveLangCode(msg.from.language_code);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
             bot.sendMessage(chatId, t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
@@ -585,7 +873,7 @@ function startTelegramBot() {
         
         try {
             if (query.data.startsWith('lang_')) {
-                const newLang = query.data.split('_')[1];
+                const newLang = resolveLangCode(query.data.split('_')[1]);
                 await db.setLanguage(chatId, newLang);
                 const message = t(newLang, 'language_changed_success'); // Dùng newLang
                 bot.sendMessage(chatId, message);
@@ -885,8 +1173,17 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
         const creatorAddress = roomState.creator;
         const opponentAddress = roomState.opponent;
         const normalizedWinner = winner === ethers.ZeroAddress ? null : normalizeAddress(winner);
-        const payoutAmount = ethers.formatEther(payout);
-        const stakeAmount = roomState.stakeWei !== undefined ? parseFloat(ethers.formatEther(roomState.stakeWei)) : 0;
+        const payoutWeiValue = toBigIntSafe(payout);
+        const stakeWeiValue = roomState.stakeWei !== undefined ? roomState.stakeWei : null;
+        const payoutAmount = payoutWeiValue !== null ? ethers.formatEther(payoutWeiValue) : '0';
+        const stakeAmount = stakeWeiValue !== null ? parseFloat(ethers.formatEther(stakeWeiValue)) : 0;
+        const totalPotWei = stakeWeiValue !== null ? stakeWeiValue * 2n : null;
+        const feeWei = payoutWeiValue !== null && totalPotWei !== null ? totalPotWei - payoutWeiValue : null;
+        const loserLossWei = stakeWeiValue;
+        const totalPotText = formatBanmaoFromWei(totalPotWei);
+        const winnerPayoutText = formatBanmaoFromWei(payoutWeiValue);
+        const feeAmountText = formatBanmaoFromWei(feeWei);
+        const loserLossText = formatBanmaoFromWei(loserLossWei);
         const creatorChoice = Number(roomState.revealA ?? 0);
         const opponentChoice = Number(roomState.revealB ?? 0);
 
@@ -924,25 +1221,46 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
             return;
         }
 
-        const winnerLangs = await db.getUsersForWallet(normalizedWinner);
-        const loserLangs = await db.getUsersForWallet(loserAddress);
-        const winnerLang = (winnerLangs[0] || {}).lang || defaultLang;
-        const loserLang = (loserLangs[0] || {}).lang || defaultLang;
-
         const winnerIsCreator = normalizedWinner === creatorAddress;
         const winnerChoice = winnerIsCreator ? creatorChoice : opponentChoice;
         const loserChoice = winnerIsCreator ? opponentChoice : creatorChoice;
 
-        const winnerChoiceStr = getChoiceString(winnerChoice, winnerLang);
-        const loserChoiceStr = getChoiceString(loserChoice, loserLang);
-
         await Promise.all([
-            sendInstantNotification(normalizedWinner, 'notify_game_win',
-                { roomId: roomIdStr, payout: payoutAmount, myChoice: winnerChoiceStr, opponentChoice: loserChoiceStr }
-            ),
-            sendInstantNotification(loserAddress, 'notify_game_lose',
-                { roomId: roomIdStr, winner: normalizedWinner, myChoice: loserChoiceStr, opponentChoice: winnerChoiceStr }
-            )
+            sendInstantNotification(normalizedWinner, 'notify_game_win', {
+                __messageBuilder: buildWinNotificationMessage,
+                roomId: roomIdStr,
+                payout: winnerPayoutText,
+                myChoiceValue: winnerChoice,
+                opponentChoiceValue: loserChoice,
+                winnerPercent: '98%',
+                totalPot: totalPotText,
+                feePercent: '2%',
+                feeAmount: feeAmountText,
+                opponentLoss: loserLossText,
+                opponentLossPercent: '100%',
+                __choiceTranslations: [
+                    { valueKey: 'myChoiceValue', targetKey: 'myChoice' },
+                    { valueKey: 'opponentChoiceValue', targetKey: 'opponentChoice' }
+                ]
+            }),
+            sendInstantNotification(loserAddress, 'notify_game_lose', {
+                __messageBuilder: buildLoseNotificationMessage,
+                roomId: roomIdStr,
+                winner: normalizedWinner,
+                myChoiceValue: loserChoice,
+                opponentChoiceValue: winnerChoice,
+                lostAmount: loserLossText,
+                lostPercent: '100%',
+                opponentPayout: winnerPayoutText,
+                opponentPayoutPercent: '98%',
+                totalPot: totalPotText,
+                feePercent: '2%',
+                feeAmount: feeAmountText,
+                __choiceTranslations: [
+                    { valueKey: 'myChoiceValue', targetKey: 'myChoice' },
+                    { valueKey: 'opponentChoiceValue', targetKey: 'opponentChoice' }
+                ]
+            })
         ]);
 
         if (stakeAmount > 0) {
@@ -1033,6 +1351,8 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
 
     let subjectText;
 
+    let claimerText = null;
+
     if (reasonInfo.subject === 'both') {
         subjectText = t(lang, 'timeout_subject_both');
         if (perspective === 'group') {
@@ -1049,6 +1369,14 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
         if (address) {
             subjectText += ` (${shortAddress(address)})`;
         }
+
+        const claimerRole = reasonInfo.subject === 'creator' ? 'challenger' : 'creator';
+        const claimerKey = claimerRole === 'creator' ? 'timeout_subject_creator' : 'timeout_subject_challenger';
+        claimerText = t(lang, claimerKey);
+        const claimerAddress = claimerRole === 'creator' ? addresses.creator : addresses.opponent;
+        if (claimerAddress) {
+            claimerText += ` (${shortAddress(claimerAddress)})`;
+        }
     } else {
         const isSelf = (reasonInfo.subject === 'creator' && perspective === 'creator') ||
             (reasonInfo.subject === 'opponent' && perspective === 'opponent');
@@ -1063,14 +1391,31 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
     const baseReason = t(lang, reasonKey, { subject: subjectText });
 
     let refundKey = null;
+    let refundVariables = {};
+    const isSelf = (reasonInfo.subject === 'creator' && perspective === 'creator') ||
+        (reasonInfo.subject === 'opponent' && perspective === 'opponent');
+
     if (reasonInfo.type === 'missing_commit' && reasonInfo.subject === 'both') {
         refundKey = 'timeout_refund_missing_commit_both';
     } else if (reasonInfo.type === 'missing_reveal' && reasonInfo.subject === 'both') {
         refundKey = 'timeout_refund_missing_reveal_both';
+    } else if (reasonInfo.type === 'missing_commit' || reasonInfo.type === 'missing_reveal') {
+        if (reasonInfo.subject === 'creator' || reasonInfo.subject === 'opponent') {
+            if (perspective === 'group') {
+                refundKey = reasonInfo.subject === 'creator'
+                    ? 'timeout_refund_missing_single_creator'
+                    : 'timeout_refund_missing_single_challenger';
+                refundVariables = { claimer: claimerText || '' };
+            } else {
+                refundKey = isSelf
+                    ? 'timeout_refund_missing_single_self'
+                    : 'timeout_refund_missing_single_opponent';
+            }
+        }
     }
 
     if (refundKey) {
-        const refundText = t(lang, refundKey);
+        const refundText = t(lang, refundKey, refundVariables);
         return `${baseReason} ${refundText}`.trim();
     }
 
@@ -1156,8 +1501,17 @@ async function handleCanceledEvent(roomId) {
 async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
     const roomIdStr = toRoomIdString(roomId);
     console.log(`[SỰ KIỆN] Room ${roomIdStr} có người bỏ cuộc: ${loser}`);
-    const payoutAmount = ethers.formatEther(winnerPayout);
-    const stakeAmount = parseFloat(ethers.formatEther(winnerPayout)) / 1.8;
+    const winnerPayoutWei = toBigIntSafe(winnerPayout);
+    const payoutAmount = formatBanmaoFromWei(winnerPayoutWei);
+    const totalPotWei = winnerPayoutWei !== null ? (winnerPayoutWei * 10n) / 9n : null;
+    const stakePerPlayerWei = totalPotWei !== null ? totalPotWei / 2n : null;
+    const communityShareWei = totalPotWei !== null ? totalPotWei / 20n : null;
+    const burnShareWei = communityShareWei;
+    const totalPotAmount = formatBanmaoFromWei(totalPotWei);
+    const opponentLossAmount = formatBanmaoFromWei(stakePerPlayerWei);
+    const communityAmount = formatBanmaoFromWei(communityShareWei);
+    const burnAmount = formatBanmaoFromWei(burnShareWei);
+    const stakeAmount = totalPotWei !== null ? Number(ethers.formatEther(totalPotWei)) / 2 : 0;
 
     markRoomFinalOutcome(roomId, 'forfeit');
 
@@ -1185,9 +1539,39 @@ async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
         if (!creatorAddress) creatorAddress = winnerAddress;
         if (!opponentAddress) opponentAddress = loserAddress;
 
+        const winnerShort = shortAddress(winnerAddress);
+        const loserShort = shortAddress(loserAddress);
+
         await Promise.all([
-            sendInstantNotification(winnerAddress, 'notify_forfeit_win', { roomId: roomIdStr, loser: loserAddress, payout: payoutAmount }),
-            sendInstantNotification(loserAddress, 'notify_forfeit_lose', { roomId: roomIdStr, winner: winnerAddress })
+            sendInstantNotification(winnerAddress, 'notify_forfeit_win', {
+                __messageBuilder: buildForfeitWinNotificationMessage,
+                roomId: roomIdStr,
+                loser: loserShort,
+                payout: payoutAmount,
+                payoutAmount,
+                winnerPercent: '90%',
+                totalPot: totalPotAmount,
+                opponentLossAmount,
+                opponentLossPercent: '100%',
+                communityAmount,
+                communityPercent: '5%',
+                burnAmount,
+                burnPercent: '5%'
+            }),
+            sendInstantNotification(loserAddress, 'notify_forfeit_lose', {
+                __messageBuilder: buildForfeitLoseNotificationMessage,
+                roomId: roomIdStr,
+                winner: winnerShort,
+                lostAmount: opponentLossAmount,
+                lostPercent: '100%',
+                opponentPayout: payoutAmount,
+                winnerPercent: '90%',
+                totalPot: totalPotAmount,
+                communityAmount,
+                communityPercent: '5%',
+                burnAmount,
+                burnPercent: '5%'
+            })
         ]);
 
         if (stakeAmount > 0) {
@@ -1236,20 +1620,33 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
     }
 
     const tasks = users.map(async ({ chatId, lang }) => {
+        const langCode = await resolveNotificationLanguage(chatId, lang);
         const resolvedVariables = { ...variables };
 
         if (resolvedVariables.reasonInfo) {
             const info = resolvedVariables.reasonInfo.info;
             const perspective = resolvedVariables.reasonInfo.perspective || 'creator';
             const addresses = resolvedVariables.reasonInfo.addresses || {};
-            resolvedVariables.reason = translateClaimTimeoutReason(lang, info, perspective, addresses);
+            resolvedVariables.reason = translateClaimTimeoutReason(langCode, info, perspective, addresses);
             delete resolvedVariables.reasonInfo;
         }
 
-        const message = t(lang, langKey, resolvedVariables);
+        applyChoiceTranslations(langCode, resolvedVariables);
+
+        let message;
+
+        if (typeof resolvedVariables.__messageBuilder === 'function') {
+            const builder = resolvedVariables.__messageBuilder;
+            delete resolvedVariables.__messageBuilder;
+            message = builder(langCode, resolvedVariables);
+        }
+
+        if (!message) {
+            message = t(langCode, langKey, resolvedVariables);
+        }
 
         const button = {
-            text: `🎮 ${t(lang, 'action_button_play')}`,
+            text: `🎮 ${t(langCode, 'action_button_play')}`,
             url: `${WEB_URL}/?join=${variables.roomId || ''}`
         };
 
@@ -1293,7 +1690,7 @@ async function broadcastGroupGameUpdate(eventType, payload) {
             return;
         }
 
-        const lang = group.lang || defaultLang;
+        const lang = resolveLangCode(group.lang);
         const messagePayload = buildGroupBroadcastMessage(eventType, lang, payload);
         if (!messagePayload) {
             return;
