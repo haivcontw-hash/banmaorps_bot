@@ -55,6 +55,15 @@ async function init() {
         );
     `);
     await dbRun(`CREATE INDEX IF NOT EXISTS idx_wallet ON game_stats (walletAddress);`);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS group_subscriptions (
+            chatId TEXT PRIMARY KEY,
+            lang TEXT,
+            minStake REAL,
+            createdAt INTEGER,
+            updatedAt INTEGER
+        );
+    `);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -168,7 +177,7 @@ async function writeGameResult(walletAddress, result, stake) {
 async function getStats(walletAddress) {
     const normalizedAddr = ethers.getAddress(walletAddress);
     const rows = await dbAll('SELECT result, stake FROM game_stats WHERE walletAddress = ?', [normalizedAddr]);
-    
+
     let stats = { games: 0, wins: 0, losses: 0, draws: 0, totalWon: 0, totalLost: 0 };
     for (const row of rows) {
         stats.games++;
@@ -185,6 +194,28 @@ async function getStats(walletAddress) {
     return stats;
 }
 
+async function upsertGroupSubscription(chatId, lang, minStake) {
+    const now = Math.floor(Date.now() / 1000);
+    const existing = await dbGet('SELECT chatId FROM group_subscriptions WHERE chatId = ?', [chatId]);
+    if (existing) {
+        await dbRun('UPDATE group_subscriptions SET lang = ?, minStake = ?, updatedAt = ? WHERE chatId = ?', [lang, minStake, now, chatId]);
+    } else {
+        await dbRun('INSERT INTO group_subscriptions (chatId, lang, minStake, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)', [chatId, lang, minStake, now, now]);
+    }
+}
+
+async function removeGroupSubscription(chatId) {
+    await dbRun('DELETE FROM group_subscriptions WHERE chatId = ?', [chatId]);
+}
+
+async function getGroupSubscription(chatId) {
+    return dbGet('SELECT chatId, lang, minStake FROM group_subscriptions WHERE chatId = ?', [chatId]);
+}
+
+async function getGroupSubscriptions() {
+    return dbAll('SELECT chatId, lang, minStake FROM group_subscriptions');
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -198,5 +229,9 @@ module.exports = {
     getPendingWallet,
     deletePendingToken,
     writeGameResult,
-    getStats
+    getStats,
+    upsertGroupSubscription,
+    removeGroupSubscription,
+    getGroupSubscription,
+    getGroupSubscriptions
 };

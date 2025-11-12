@@ -50,6 +50,27 @@ function getChoiceString(choice, lang) {
 }
 // =======================================================
 
+function shortAddress(address) {
+    if (!address) return '-';
+    try {
+        const normalized = ethers.getAddress(address);
+        return `${normalized.substring(0, 6)}…${normalized.substring(normalized.length - 4)}`;
+    } catch (error) {
+        return address.substring(0, 6) + '…';
+    }
+}
+
+function formatBanmao(amount) {
+    const num = Number(amount);
+    if (!Number.isFinite(num)) {
+        if (typeof amount === 'string' && amount.trim() !== '') {
+            return amount;
+        }
+        return '0.00';
+    }
+    return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 
 // ==========================================================
 // 🚀 PHẦN 1: API SERVER
@@ -209,6 +230,65 @@ function startTelegramBot() {
         message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
         message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
         bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+    });
+
+    // COMMAND: /banmaofeed - Chỉ dùng cho group
+    bot.onText(/\/banmaofeed(?:\s+(.+))?/, async (msg, match) => {
+        const chatId = msg.chat.id.toString();
+        const chatType = msg.chat.type;
+        const userLang = msg.from.language_code || defaultLang;
+
+        if (chatType !== 'group' && chatType !== 'supergroup') {
+            bot.sendMessage(chatId, t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
+            return;
+        }
+
+        let memberInfo;
+        try {
+            memberInfo = await bot.getChatMember(chatId, msg.from.id);
+        } catch (error) {
+            console.error(`[GroupFeed] Không thể lấy thông tin admin cho ${chatId}:`, error.message);
+        }
+
+        const isAdmin = memberInfo && ['administrator', 'creator'].includes(memberInfo.status);
+        if (!isAdmin) {
+            bot.sendMessage(chatId, t(userLang, 'group_feed_admin_only'), { parse_mode: "Markdown" });
+            return;
+        }
+
+        const arg = (match && match[1]) ? match[1].trim() : '';
+
+        try {
+            if (!arg) {
+                const current = await db.getGroupSubscription(chatId);
+                const statusLine = current
+                    ? t(userLang, 'group_feed_current_threshold', { amount: formatBanmao(current.minStake || 0) })
+                    : t(userLang, 'group_feed_not_configured');
+                const usage = t(userLang, 'group_feed_usage');
+                bot.sendMessage(chatId, `${statusLine}\n\n${usage}`, { parse_mode: "Markdown" });
+                return;
+            }
+
+            const lowered = arg.toLowerCase();
+            if (['off', 'disable', 'stop', 'cancel'].includes(lowered)) {
+                await db.removeGroupSubscription(chatId);
+                bot.sendMessage(chatId, t(userLang, 'group_feed_disabled'), { parse_mode: "Markdown" });
+                return;
+            }
+
+            const normalizedArg = arg.replace(',', '.');
+            const minStake = parseFloat(normalizedArg);
+            if (!Number.isFinite(minStake) || minStake < 0) {
+                bot.sendMessage(chatId, t(userLang, 'group_feed_invalid_amount'), { parse_mode: "Markdown" });
+                return;
+            }
+
+            await db.upsertGroupSubscription(chatId, userLang, minStake);
+            bot.sendMessage(chatId, t(userLang, 'group_feed_enabled', { amount: formatBanmao(minStake) }), { parse_mode: "Markdown" });
+        } catch (error) {
+            console.error(`[GroupFeed] Lỗi cấu hình cho nhóm ${chatId}:`, error.message);
+            bot.sendMessage(chatId, t(userLang, 'group_feed_error'), { parse_mode: "Markdown" });
+        }
     });
 
     // COMMAND: /unregister - Cần async
@@ -512,6 +592,18 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
             db.writeGameResult(winnerAddress, 'win', stakeAmount),
             db.writeGameResult(loserAddress, 'lose', stakeAmount)
         ]);
+
+        await broadcastGroupGameUpdate('win', {
+            roomId: roomIdStr,
+            creatorAddress,
+            opponentAddress,
+            winnerAddress,
+            loserAddress,
+            stakeAmount,
+            payoutAmount: parseFloat(payoutAmount),
+            creatorChoice: Number(room.revealA),
+            opponentChoice: Number(room.revealB)
+        });
     } catch (err) {
         console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau resolve):`, err.message);
     }
@@ -534,11 +626,14 @@ async function handleCanceledEvent(roomId) {
             sendInstantNotification(creatorAddress, 'notify_game_draw', { roomId: roomIdStr, choice: choiceStr })
         ];
 
+        let opponentAddress = null;
+        let opponentChoiceValue = null;
         if (room.opponent !== ethers.ZeroAddress) {
-            const opponentAddress = ethers.getAddress(room.opponent);
+            opponentAddress = ethers.getAddress(room.opponent);
             const opponentLangs = await db.getUsersForWallet(opponentAddress);
             const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
-            const choiceStrOpp = getChoiceString(room.revealA, opponentLang);
+            opponentChoiceValue = Number(room.revealB);
+            const choiceStrOpp = getChoiceString(room.revealB, opponentLang);
             tasks.push(sendInstantNotification(opponentAddress, 'notify_game_draw', { roomId: roomIdStr, choice: choiceStrOpp }));
 
             await Promise.all([
@@ -548,6 +643,17 @@ async function handleCanceledEvent(roomId) {
         }
 
         await Promise.all(tasks);
+
+        if (opponentAddress) {
+            await broadcastGroupGameUpdate('draw', {
+                roomId: roomIdStr,
+                creatorAddress,
+                opponentAddress,
+                stakeAmount,
+                creatorChoice: Number(room.revealA),
+                opponentChoice: opponentChoiceValue
+            });
+        }
     } catch (err) {
         console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau cancel):`, err.message);
     }
@@ -560,17 +666,56 @@ async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
     const stakeAmount = parseFloat(ethers.formatEther(winnerPayout)) / 1.8;
 
     try {
+        const winnerAddress = ethers.getAddress(winner);
+        const loserAddress = ethers.getAddress(loser);
+
+        let creatorAddress = null;
+        let opponentAddress = null;
+        let creatorChoice = null;
+        let opponentChoice = null;
+
+        if (contract) {
+            try {
+                const room = await contract.rooms(roomId);
+                if (room.creator && room.creator !== ethers.ZeroAddress) {
+                    creatorAddress = ethers.getAddress(room.creator);
+                }
+                if (room.opponent && room.opponent !== ethers.ZeroAddress) {
+                    opponentAddress = ethers.getAddress(room.opponent);
+                }
+                creatorChoice = Number(room.revealA);
+                opponentChoice = Number(room.revealB);
+            } catch (fetchErr) {
+                console.warn(`[Forfeit] Không thể lấy dữ liệu phòng ${roomIdStr}:`, fetchErr.message);
+            }
+        }
+
+        if (!creatorAddress) creatorAddress = winnerAddress;
+        if (!opponentAddress) opponentAddress = loserAddress;
+
         await Promise.all([
-            sendInstantNotification(winner, 'notify_forfeit_win', { roomId: roomIdStr, loser, payout: payoutAmount }),
-            sendInstantNotification(loser, 'notify_forfeit_lose', { roomId: roomIdStr, winner })
+            sendInstantNotification(winnerAddress, 'notify_forfeit_win', { roomId: roomIdStr, loser: loserAddress, payout: payoutAmount }),
+            sendInstantNotification(loserAddress, 'notify_forfeit_lose', { roomId: roomIdStr, winner: winnerAddress })
         ]);
 
         if (stakeAmount > 0) {
             await Promise.all([
-                db.writeGameResult(winner, 'win', stakeAmount),
-                db.writeGameResult(loser, 'lose', stakeAmount)
+                db.writeGameResult(winnerAddress, 'win', stakeAmount),
+                db.writeGameResult(loserAddress, 'lose', stakeAmount)
             ]);
         }
+
+        await broadcastGroupGameUpdate('forfeit', {
+            roomId: roomIdStr,
+            creatorAddress,
+            opponentAddress,
+            winnerAddress,
+            loserAddress,
+            stakeAmount,
+            payoutAmount: parseFloat(payoutAmount),
+            creatorChoice,
+            opponentChoice
+        });
     } catch (error) {
         console.error(`[Lỗi] Khi xử lý sự kiện Forfeited cho room ${roomIdStr}:`, error.message);
     }
@@ -625,6 +770,109 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
     });
 
     await Promise.allSettled(tasks);
+}
+
+async function broadcastGroupGameUpdate(eventType, payload) {
+    const groups = await db.getGroupSubscriptions();
+    if (!groups || groups.length === 0) {
+        return;
+    }
+
+    const stakeAmount = Number(payload.stakeAmount || 0);
+
+    const tasks = groups.map(async (group) => {
+        const minStake = Number(group.minStake || 0);
+        if (Number.isFinite(minStake) && stakeAmount < minStake) {
+            return;
+        }
+
+        const lang = group.lang || defaultLang;
+        const messagePayload = buildGroupBroadcastMessage(eventType, lang, payload);
+        if (!messagePayload) {
+            return;
+        }
+
+        const options = {
+            parse_mode: "Markdown",
+            disable_web_page_preview: true
+        };
+
+        if (messagePayload.withButton) {
+            options.reply_markup = {
+                inline_keyboard: [[{ text: `🔥 ${t(lang, 'group_broadcast_cta')}`, url: WEB_URL }]]
+            };
+        }
+
+        try {
+            await bot.sendMessage(group.chatId, messagePayload.text, options);
+            console.log(`[Group Broadcast] Đã gửi ${eventType} tới nhóm ${group.chatId}`);
+        } catch (error) {
+            console.error(`[Group Broadcast] Lỗi gửi tới ${group.chatId}: ${error.message}`);
+            const errorCode = error?.response?.body?.error_code;
+            if (errorCode === 403 || errorCode === 400) {
+                await db.removeGroupSubscription(group.chatId);
+                console.warn(`[Group Broadcast] Đã xóa đăng ký nhóm ${group.chatId} (bot bị chặn/rời nhóm).`);
+            }
+        }
+    });
+
+    await Promise.allSettled(tasks);
+}
+
+function buildGroupBroadcastMessage(eventType, lang, payload) {
+    if (!payload) return null;
+
+    const lines = [];
+    const header = `🔥 *${t(lang, 'group_broadcast_header')}* 🔥`;
+    lines.push(`🆔 ${t(lang, 'group_broadcast_room', { roomId: payload.roomId })}`);
+
+    if (payload.creatorAddress && payload.opponentAddress) {
+        lines.push(`🤼 ${t(lang, 'group_broadcast_players', {
+            creator: shortAddress(payload.creatorAddress),
+            opponent: shortAddress(payload.opponentAddress)
+        })}`);
+    }
+
+    if (payload.creatorChoice !== undefined || payload.opponentChoice !== undefined) {
+        const creatorChoiceStr = getChoiceString(payload.creatorChoice, lang);
+        const opponentChoiceStr = getChoiceString(payload.opponentChoice, lang);
+        if (payload.creatorChoice !== undefined || payload.opponentChoice !== undefined) {
+            lines.push(`🃏 ${t(lang, 'group_broadcast_choices', {
+                creatorChoice: creatorChoiceStr,
+                opponentChoice: opponentChoiceStr
+            })}`);
+        }
+    }
+
+    if (payload.stakeAmount !== undefined) {
+        lines.push(`💰 ${t(lang, 'group_broadcast_stake', { amount: formatBanmao(payload.stakeAmount) })}`);
+    }
+
+    let resultLine = null;
+    if (eventType === 'win') {
+        resultLine = `🏆 ${t(lang, 'group_broadcast_win', {
+            winner: shortAddress(payload.winnerAddress),
+            payout: formatBanmao(payload.payoutAmount)
+        })}`;
+    } else if (eventType === 'draw') {
+        resultLine = `🤝 ${t(lang, 'group_broadcast_draw')}`;
+    } else if (eventType === 'forfeit') {
+        resultLine = `🚨 ${t(lang, 'group_broadcast_forfeit', {
+            winner: shortAddress(payload.winnerAddress),
+            loser: shortAddress(payload.loserAddress),
+            payout: formatBanmao(payload.payoutAmount)
+        })}`;
+    }
+
+    if (!resultLine) {
+        return null;
+    }
+
+    lines.push(resultLine);
+    lines.push(`🔥 ${t(lang, 'group_broadcast_footer')}`);
+
+    const text = [header, '', ...lines].join('\n');
+    return { text, withButton: true };
 }
 
 // ==========================================================
