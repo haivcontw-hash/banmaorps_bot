@@ -100,6 +100,62 @@ function formatBanmao(amount) {
     return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function toBigIntSafe(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+
+    if (typeof value === 'bigint') {
+        return value;
+    }
+
+    try {
+        if (typeof value === 'number') {
+            if (!Number.isFinite(value)) {
+                return null;
+            }
+            return BigInt(Math.trunc(value));
+        }
+
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed) {
+                return null;
+            }
+            return BigInt(trimmed);
+        }
+
+        if (value && typeof value.toString === 'function') {
+            const asString = value.toString();
+            if (asString) {
+                return BigInt(asString);
+            }
+        }
+    } catch (error) {
+        return null;
+    }
+
+    return null;
+}
+
+function formatBanmaoFromWei(weiValue) {
+    const bigIntValue = toBigIntSafe(weiValue);
+    if (bigIntValue === null) {
+        return '0.00';
+    }
+
+    try {
+        const etherString = ethers.formatEther(bigIntValue);
+        const numeric = Number(etherString);
+        if (Number.isFinite(numeric)) {
+            return formatBanmao(numeric);
+        }
+        return etherString;
+    } catch (error) {
+        return '0.00';
+    }
+}
+
 function toRoomIdString(roomId) {
     try {
         return roomId.toString();
@@ -262,9 +318,15 @@ async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } =
 
     markRoomFinalOutcome(roomId, 'draw');
 
-    const stakeAmount = roomState.stakeWei !== undefined
-        ? parseFloat(ethers.formatEther(roomState.stakeWei))
+    const stakeWeiValue = roomState.stakeWei !== undefined ? roomState.stakeWei : null;
+    const stakeAmount = stakeWeiValue !== null
+        ? parseFloat(ethers.formatEther(stakeWeiValue))
         : 0;
+    const drawRefundWei = stakeWeiValue !== null ? (stakeWeiValue * 98n) / 100n : null;
+    const drawFeeWei = stakeWeiValue !== null && drawRefundWei !== null ? stakeWeiValue - drawRefundWei : null;
+    const refundAmountText = formatBanmaoFromWei(drawRefundWei);
+    const stakeAmountText = formatBanmaoFromWei(stakeWeiValue);
+    const feeAmountText = formatBanmaoFromWei(drawFeeWei);
 
     const [creatorLangs, opponentLangs] = await Promise.all([
         db.getUsersForWallet(creatorAddress),
@@ -280,7 +342,12 @@ async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } =
     const notifyTasks = [
         sendInstantNotification(creatorAddress, 'notify_game_draw', {
             roomId: roomIdStr,
-            choice: creatorChoiceStr
+            choice: creatorChoiceStr,
+            refundAmount: refundAmountText,
+            refundPercent: '98%',
+            stakeAmount: stakeAmountText,
+            feePercent: '2%',
+            feeAmount: feeAmountText
         })
     ];
 
@@ -288,7 +355,12 @@ async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } =
         notifyTasks.push(
             sendInstantNotification(opponentAddress, 'notify_game_draw', {
                 roomId: roomIdStr,
-                choice: opponentChoiceStr
+                choice: opponentChoiceStr,
+                refundAmount: refundAmountText,
+                refundPercent: '98%',
+                stakeAmount: stakeAmountText,
+                feePercent: '2%',
+                feeAmount: feeAmountText
             })
         );
     }
@@ -896,8 +968,17 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
         const creatorAddress = roomState.creator;
         const opponentAddress = roomState.opponent;
         const normalizedWinner = winner === ethers.ZeroAddress ? null : normalizeAddress(winner);
-        const payoutAmount = ethers.formatEther(payout);
-        const stakeAmount = roomState.stakeWei !== undefined ? parseFloat(ethers.formatEther(roomState.stakeWei)) : 0;
+        const payoutWeiValue = toBigIntSafe(payout);
+        const stakeWeiValue = roomState.stakeWei !== undefined ? roomState.stakeWei : null;
+        const payoutAmount = payoutWeiValue !== null ? ethers.formatEther(payoutWeiValue) : '0';
+        const stakeAmount = stakeWeiValue !== null ? parseFloat(ethers.formatEther(stakeWeiValue)) : 0;
+        const totalPotWei = stakeWeiValue !== null ? stakeWeiValue * 2n : null;
+        const feeWei = payoutWeiValue !== null && totalPotWei !== null ? totalPotWei - payoutWeiValue : null;
+        const loserLossWei = stakeWeiValue;
+        const totalPotText = formatBanmaoFromWei(totalPotWei);
+        const winnerPayoutText = formatBanmaoFromWei(payoutWeiValue);
+        const feeAmountText = formatBanmaoFromWei(feeWei);
+        const loserLossText = formatBanmaoFromWei(loserLossWei);
         const creatorChoice = Number(roomState.revealA ?? 0);
         const opponentChoice = Number(roomState.revealB ?? 0);
 
@@ -948,12 +1029,31 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
         const loserChoiceStr = getChoiceString(loserChoice, loserLang);
 
         await Promise.all([
-            sendInstantNotification(normalizedWinner, 'notify_game_win',
-                { roomId: roomIdStr, payout: payoutAmount, myChoice: winnerChoiceStr, opponentChoice: loserChoiceStr }
-            ),
-            sendInstantNotification(loserAddress, 'notify_game_lose',
-                { roomId: roomIdStr, winner: normalizedWinner, myChoice: loserChoiceStr, opponentChoice: winnerChoiceStr }
-            )
+            sendInstantNotification(normalizedWinner, 'notify_game_win', {
+                roomId: roomIdStr,
+                payout: winnerPayoutText,
+                myChoice: winnerChoiceStr,
+                opponentChoice: loserChoiceStr,
+                winnerPercent: '98%',
+                totalPot: totalPotText,
+                feePercent: '2%',
+                feeAmount: feeAmountText,
+                opponentLoss: loserLossText,
+                opponentLossPercent: '100%'
+            }),
+            sendInstantNotification(loserAddress, 'notify_game_lose', {
+                roomId: roomIdStr,
+                winner: normalizedWinner,
+                myChoice: loserChoiceStr,
+                opponentChoice: winnerChoiceStr,
+                lostAmount: loserLossText,
+                lostPercent: '100%',
+                opponentPayout: winnerPayoutText,
+                opponentPayoutPercent: '98%',
+                totalPot: totalPotText,
+                feePercent: '2%',
+                feeAmount: feeAmountText
+            })
         ]);
 
         if (stakeAmount > 0) {
