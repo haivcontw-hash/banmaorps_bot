@@ -111,6 +111,22 @@ function applyChoiceTranslations(lang, variables) {
 }
 
 
+async function resolveNotificationLanguage(chatId, fallbackLang) {
+    try {
+        if (chatId) {
+            const info = await db.getUserLanguageInfo(chatId);
+            if (info && info.lang) {
+                return resolveLangCode(info.lang);
+            }
+        }
+    } catch (error) {
+        console.warn(`[Notify] Không thể đọc ngôn ngữ đã lưu cho ${chatId}: ${error.message}`);
+    }
+
+    return resolveLangCode(fallbackLang || defaultLang);
+}
+
+
 function buildDrawNotificationMessage(lang, variables) {
     const lines = [
         t(lang, 'notify_game_draw_header', { roomId: variables.roomId }),
@@ -1604,14 +1620,7 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
     }
 
     const tasks = users.map(async ({ chatId, lang }) => {
-        let langCode = null;
-        try {
-            const storedLang = await db.getUserLanguage(chatId);
-            langCode = resolveLangCode(storedLang || lang);
-        } catch (error) {
-            console.warn(`[Notify] Không thể lấy ngôn ngữ đã lưu cho ${chatId}: ${error.message}`);
-            langCode = resolveLangCode(lang);
-        }
+        const langCode = await resolveNotificationLanguage(chatId, lang);
         const resolvedVariables = { ...variables };
 
         if (resolvedVariables.reasonInfo) {
