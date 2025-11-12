@@ -64,6 +64,16 @@ async function init() {
             updatedAt INTEGER
         );
     `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS custom_messages (
+            lang TEXT NOT NULL,
+            messageKey TEXT NOT NULL,
+            messageText TEXT NOT NULL,
+            updatedBy TEXT,
+            updatedAt INTEGER,
+            PRIMARY KEY (lang, messageKey)
+        );
+    `);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -216,6 +226,31 @@ async function getGroupSubscriptions() {
     return dbAll('SELECT chatId, lang, minStake FROM group_subscriptions');
 }
 
+async function upsertCustomMessage(lang, messageKey, messageText, updatedBy) {
+    const now = Math.floor(Date.now() / 1000);
+    const existing = await dbGet('SELECT lang FROM custom_messages WHERE lang = ? AND messageKey = ?', [lang, messageKey]);
+    if (existing) {
+        await dbRun('UPDATE custom_messages SET messageText = ?, updatedBy = ?, updatedAt = ? WHERE lang = ? AND messageKey = ?',
+            [messageText, updatedBy, now, lang, messageKey]);
+    } else {
+        await dbRun('INSERT INTO custom_messages (lang, messageKey, messageText, updatedBy, updatedAt) VALUES (?, ?, ?, ?, ?)',
+            [lang, messageKey, messageText, updatedBy, now]);
+    }
+}
+
+async function removeCustomMessage(lang, messageKey) {
+    const result = await dbRun('DELETE FROM custom_messages WHERE lang = ? AND messageKey = ?', [lang, messageKey]);
+    return result.changes > 0;
+}
+
+async function getCustomMessage(lang, messageKey) {
+    return dbGet('SELECT lang, messageKey, messageText FROM custom_messages WHERE lang = ? AND messageKey = ?', [lang, messageKey]);
+}
+
+async function getAllCustomMessages() {
+    return dbAll('SELECT lang, messageKey, messageText FROM custom_messages');
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -233,5 +268,9 @@ module.exports = {
     upsertGroupSubscription,
     removeGroupSubscription,
     getGroupSubscription,
-    getGroupSubscriptions
+    getGroupSubscriptions,
+    upsertCustomMessage,
+    removeCustomMessage,
+    getCustomMessage,
+    getAllCustomMessages
 };

@@ -5,11 +5,12 @@ require('dotenv').config();
 const ethers = require('ethers');
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const { t_ } = require('./i18n.js');
-const db = require('./database.js'); 
+const db = require('./database.js');
 
 // --- CẤU HÌNH ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -19,6 +20,15 @@ const contractABI = require('./BanmaoRPS_ABI.json');
 const API_PORT = 3000;
 const WEB_URL = "https://www.banmao.fun";
 const defaultLang = 'en';
+const BOT_OWNER_IDS = (process.env.BOT_OWNER_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+
+const localesDir = path.join(__dirname, 'locales');
+const supportedLanguages = fs.readdirSync(localesDir)
+    .filter((file) => file.endsWith('.json'))
+    .map((file) => file.replace('.json', ''));
 
 // --- Kiểm tra Cấu hình ---
 if (!TELEGRAM_TOKEN || !RPC_URL || !CONTRACT_ADDRESS) {
@@ -34,10 +44,49 @@ let provider = null;
 let contract = null;
 let reconnectTimeout = null;
 let reconnectAttempts = 0;
+const customMessageCache = new Map();
 
-// Hàm 't' (translate) nội bộ
+const overrideKey = (lang, key) => `${lang}::${key}`;
+
+function applyVariables(template, variables = {}) {
+    let text = template;
+    for (const [varName, varValue] of Object.entries(variables)) {
+        const placeholder = `{${varName}}`;
+        text = text.split(placeholder).join(varValue);
+    }
+    return text;
+}
+
 function t(lang_code, key, variables = {}) {
+    const langsToTry = [lang_code];
+    if (lang_code !== defaultLang) {
+        langsToTry.push(defaultLang);
+    }
+
+    for (const lang of langsToTry) {
+        const cached = customMessageCache.get(overrideKey(lang, key));
+        if (cached) {
+            return applyVariables(cached, variables);
+        }
+    }
+
     return t_(lang_code, key, variables);
+}
+
+async function refreshCustomMessageCache() {
+    const overrides = await db.getAllCustomMessages();
+    customMessageCache.clear();
+    overrides.forEach((item) => {
+        customMessageCache.set(overrideKey(item.lang, item.messageKey), item.messageText);
+    });
+}
+
+function isSupportedLanguage(lang) {
+    return supportedLanguages.includes(lang);
+}
+
+function isBotOwner(userId) {
+    return BOT_OWNER_IDS.includes(String(userId));
 }
 
 // ===== HÀM HELPER: Dịch Lựa chọn (Kéo/Búa/Bao) =====
@@ -135,7 +184,17 @@ async function getLang(msg) {
 // ======================================
 
 function startTelegramBot() {
-    
+
+    async function ensureOwner(msg) {
+        if (isBotOwner(msg.from.id)) {
+            return true;
+        }
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+        await bot.sendMessage(chatId, t(lang, 'owner_only_command'), { parse_mode: "Markdown" });
+        return false;
+    }
+
     // Xử lý /start CÓ token (Từ DApp) - Cần async
     bot.onText(/\/start (.+)/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
@@ -229,7 +288,35 @@ function startTelegramBot() {
         message += `• ${t(lang, 'stats_line_3', { amount: totalStats.totalWon.toFixed(2) })}\n`;
         message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
         message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
-        bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+    });
+
+    bot.onText(/\/help/, async (msg) => {
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+
+        const lines = [t(lang, 'help_title'), ''];
+
+        lines.push(t(lang, 'help_section_user'));
+        lines.push(`• ${t(lang, 'help_cmd_start')}`);
+        lines.push(`• ${t(lang, 'help_cmd_register')}`);
+        lines.push(`• ${t(lang, 'help_cmd_mywallet')}`);
+        lines.push(`• ${t(lang, 'help_cmd_stats')}`);
+        lines.push(`• ${t(lang, 'help_cmd_language')}`);
+        lines.push(`• ${t(lang, 'help_cmd_unregister')}`);
+
+        lines.push('');
+        lines.push(t(lang, 'help_section_group'));
+        lines.push(`• ${t(lang, 'help_cmd_banmaofeed')}`);
+
+        lines.push('');
+        lines.push(t(lang, 'help_section_owner'));
+        lines.push(`• ${t(lang, 'help_cmd_setmessage')}`);
+        lines.push(`• ${t(lang, 'help_cmd_resetmessage')}`);
+        lines.push(`• ${t(lang, 'help_cmd_showmessage')}`);
+
+        const message = lines.join('\n');
+        bot.sendMessage(chatId, message, { parse_mode: "Markdown", disable_web_page_preview: true });
     });
 
     // COMMAND: /banmaofeed - Chỉ dùng cho group
@@ -305,9 +392,88 @@ function startTelegramBot() {
             return [{ text: `❌ ${shortWallet}`, callback_data: `delete_${wallet}` }];
         });
         keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'delete_all' }]);
-        bot.sendMessage(chatId, t(lang, 'unregister_header'), {
+            bot.sendMessage(chatId, t(lang, 'unregister_header'), {
             reply_markup: { inline_keyboard: keyboard }
         });
+    });
+
+    bot.onText(/^\/setmessage\s+(\S+)\s+(\S+)\s+([\s\S]+)/, async (msg, match) => {
+        if (!(await ensureOwner(msg))) {
+            return;
+        }
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+        const targetLang = match[1].toLowerCase();
+        const messageKey = match[2];
+        const messageText = match[3].trim();
+
+        if (!isSupportedLanguage(targetLang)) {
+            bot.sendMessage(chatId, t(lang, 'custom_message_invalid_language', { lang: targetLang }));
+            return;
+        }
+
+        if (!messageText) {
+            bot.sendMessage(chatId, t(lang, 'custom_message_missing_text'));
+            return;
+        }
+
+        await db.upsertCustomMessage(targetLang, messageKey, messageText, String(msg.from.id));
+        customMessageCache.set(overrideKey(targetLang, messageKey), messageText);
+        bot.sendMessage(chatId, t(lang, 'custom_message_saved', { lang: targetLang, key: messageKey }));
+    });
+
+    bot.onText(/^\/resetmessage\s+(\S+)\s+(\S+)/, async (msg, match) => {
+        if (!(await ensureOwner(msg))) {
+            return;
+        }
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+        const targetLang = match[1].toLowerCase();
+        const messageKey = match[2];
+
+        if (!isSupportedLanguage(targetLang)) {
+            bot.sendMessage(chatId, t(lang, 'custom_message_invalid_language', { lang: targetLang }));
+            return;
+        }
+
+        const removed = await db.removeCustomMessage(targetLang, messageKey);
+        customMessageCache.delete(overrideKey(targetLang, messageKey));
+        if (removed) {
+            bot.sendMessage(chatId, t(lang, 'custom_message_removed', { lang: targetLang, key: messageKey }));
+        } else {
+            bot.sendMessage(chatId, t(lang, 'custom_message_not_found', { lang: targetLang, key: messageKey }));
+        }
+    });
+
+    bot.onText(/^\/showmessage\s+(\S+)\s+(\S+)/, async (msg, match) => {
+        if (!(await ensureOwner(msg))) {
+            return;
+        }
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+        const targetLang = match[1].toLowerCase();
+        const messageKey = match[2];
+
+        if (!isSupportedLanguage(targetLang)) {
+            bot.sendMessage(chatId, t(lang, 'custom_message_invalid_language', { lang: targetLang }));
+            return;
+        }
+
+        const cacheKey = overrideKey(targetLang, messageKey);
+        const overrideText = customMessageCache.get(cacheKey);
+        let response;
+        if (overrideText) {
+            response = `${t(lang, 'custom_message_preview_override', { lang: targetLang, key: messageKey })}\n\n${overrideText}`;
+        } else {
+            const defaultText = t_(targetLang, messageKey, {});
+            if (defaultText === messageKey) {
+                response = t(lang, 'custom_message_not_found', { lang: targetLang, key: messageKey });
+            } else {
+                response = `${t(lang, 'custom_message_preview_default', { lang: targetLang, key: messageKey })}\n\n${defaultText}`;
+            }
+        }
+
+        bot.sendMessage(chatId, response);
     });
 
     // LỆNH: /language - Cần async
@@ -881,9 +1047,12 @@ function buildGroupBroadcastMessage(eventType, lang, payload) {
 async function main() {
     try {
         console.log("Đang khởi động...");
-        
+
         // Bước 1: Khởi tạo DB
-        await db.init(); 
+        await db.init();
+
+        // Bước 1.5: Nạp các thông điệp tùy chỉnh (nếu có)
+        await refreshCustomMessageCache();
 
         // Bước 2: Kết nối Blockchain (WSS) và gắn listener
         console.log("Đang kết nối tới Blockchain (WSS)...");
