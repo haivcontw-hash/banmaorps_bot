@@ -105,6 +105,124 @@ function buildDrawNotificationMessage(lang, variables) {
     return lines.join('\n');
 }
 
+function buildWinNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_game_win_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_game_win_breakdown_title'),
+        t(lang, 'notify_game_win_breakdown_you', {
+            payout: variables.payout,
+            winnerPercent: variables.winnerPercent,
+            totalPot: variables.totalPot
+        }),
+        t(lang, 'notify_game_win_breakdown_opponent', {
+            opponentLoss: variables.opponentLoss,
+            opponentLossPercent: variables.opponentLossPercent
+        }),
+        t(lang, 'notify_game_win_breakdown_fee', {
+            feeAmount: variables.feeAmount,
+            feePercent: variables.feePercent
+        }),
+        '',
+        t(lang, 'notify_game_win_reason', {
+            myChoice: variables.myChoice,
+            opponentChoice: variables.opponentChoice
+        })
+    ];
+
+    return lines.join('\n');
+}
+
+function buildLoseNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_game_lose_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_game_lose_breakdown_title'),
+        t(lang, 'notify_game_lose_breakdown_you', {
+            lostAmount: variables.lostAmount,
+            lostPercent: variables.lostPercent
+        }),
+        t(lang, 'notify_game_lose_breakdown_opponent', {
+            opponentPayout: variables.opponentPayout,
+            opponentPayoutPercent: variables.opponentPayoutPercent,
+            totalPot: variables.totalPot
+        }),
+        t(lang, 'notify_game_lose_breakdown_fee', {
+            feeAmount: variables.feeAmount,
+            feePercent: variables.feePercent
+        }),
+        '',
+        t(lang, 'notify_game_lose_reason', {
+            myChoice: variables.myChoice,
+            opponentChoice: variables.opponentChoice
+        })
+    ];
+
+    return lines.join('\n');
+}
+
+function buildForfeitWinNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_forfeit_win_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_forfeit_win_overview'),
+        '',
+        t(lang, 'notify_forfeit_win_breakdown_title'),
+        t(lang, 'notify_forfeit_win_breakdown_you', {
+            payoutAmount: variables.payoutAmount,
+            winnerPercent: variables.winnerPercent,
+            totalPot: variables.totalPot
+        }),
+        t(lang, 'notify_forfeit_win_breakdown_opponent', {
+            opponentLossAmount: variables.opponentLossAmount,
+            opponentLossPercent: variables.opponentLossPercent
+        }),
+        t(lang, 'notify_forfeit_win_breakdown_community', {
+            communityAmount: variables.communityAmount,
+            communityPercent: variables.communityPercent
+        }),
+        t(lang, 'notify_forfeit_win_breakdown_burn', {
+            burnAmount: variables.burnAmount,
+            burnPercent: variables.burnPercent
+        }),
+        '',
+        t(lang, 'notify_forfeit_win_reason', { loser: variables.loser })
+    ];
+
+    return lines.join('\n');
+}
+
+function buildForfeitLoseNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_forfeit_lose_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_forfeit_lose_overview'),
+        '',
+        t(lang, 'notify_forfeit_lose_breakdown_title'),
+        t(lang, 'notify_forfeit_lose_breakdown_you', {
+            lostAmount: variables.lostAmount,
+            lostPercent: variables.lostPercent
+        }),
+        t(lang, 'notify_forfeit_lose_breakdown_opponent', {
+            opponentPayout: variables.opponentPayout,
+            winnerPercent: variables.winnerPercent,
+            totalPot: variables.totalPot
+        }),
+        t(lang, 'notify_forfeit_lose_breakdown_community', {
+            communityAmount: variables.communityAmount,
+            communityPercent: variables.communityPercent
+        }),
+        t(lang, 'notify_forfeit_lose_breakdown_burn', {
+            burnAmount: variables.burnAmount,
+            burnPercent: variables.burnPercent
+        }),
+        '',
+        t(lang, 'notify_forfeit_lose_reason', { winner: variables.winner })
+    ];
+
+    return lines.join('\n');
+}
+
 
 function shortAddress(address) {
     if (!address) return '-';
@@ -1058,6 +1176,7 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
 
         await Promise.all([
             sendInstantNotification(normalizedWinner, 'notify_game_win', {
+                __messageBuilder: buildWinNotificationMessage,
                 roomId: roomIdStr,
                 payout: winnerPayoutText,
                 myChoice: winnerChoiceStr,
@@ -1070,6 +1189,7 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
                 opponentLossPercent: '100%'
             }),
             sendInstantNotification(loserAddress, 'notify_game_lose', {
+                __messageBuilder: buildLoseNotificationMessage,
                 roomId: roomIdStr,
                 winner: normalizedWinner,
                 myChoice: loserChoiceStr,
@@ -1322,8 +1442,17 @@ async function handleCanceledEvent(roomId) {
 async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
     const roomIdStr = toRoomIdString(roomId);
     console.log(`[SỰ KIỆN] Room ${roomIdStr} có người bỏ cuộc: ${loser}`);
-    const payoutAmount = ethers.formatEther(winnerPayout);
-    const stakeAmount = parseFloat(ethers.formatEther(winnerPayout)) / 1.8;
+    const winnerPayoutWei = toBigIntSafe(winnerPayout);
+    const payoutAmount = formatBanmaoFromWei(winnerPayoutWei);
+    const totalPotWei = winnerPayoutWei !== null ? (winnerPayoutWei * 10n) / 9n : null;
+    const stakePerPlayerWei = totalPotWei !== null ? totalPotWei / 2n : null;
+    const communityShareWei = totalPotWei !== null ? totalPotWei / 20n : null;
+    const burnShareWei = communityShareWei;
+    const totalPotAmount = formatBanmaoFromWei(totalPotWei);
+    const opponentLossAmount = formatBanmaoFromWei(stakePerPlayerWei);
+    const communityAmount = formatBanmaoFromWei(communityShareWei);
+    const burnAmount = formatBanmaoFromWei(burnShareWei);
+    const stakeAmount = totalPotWei !== null ? Number(ethers.formatEther(totalPotWei)) / 2 : 0;
 
     markRoomFinalOutcome(roomId, 'forfeit');
 
@@ -1351,9 +1480,39 @@ async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
         if (!creatorAddress) creatorAddress = winnerAddress;
         if (!opponentAddress) opponentAddress = loserAddress;
 
+        const winnerShort = shortAddress(winnerAddress);
+        const loserShort = shortAddress(loserAddress);
+
         await Promise.all([
-            sendInstantNotification(winnerAddress, 'notify_forfeit_win', { roomId: roomIdStr, loser: loserAddress, payout: payoutAmount }),
-            sendInstantNotification(loserAddress, 'notify_forfeit_lose', { roomId: roomIdStr, winner: winnerAddress })
+            sendInstantNotification(winnerAddress, 'notify_forfeit_win', {
+                __messageBuilder: buildForfeitWinNotificationMessage,
+                roomId: roomIdStr,
+                loser: loserShort,
+                payout: payoutAmount,
+                payoutAmount,
+                winnerPercent: '90%',
+                totalPot: totalPotAmount,
+                opponentLossAmount,
+                opponentLossPercent: '100%',
+                communityAmount,
+                communityPercent: '5%',
+                burnAmount,
+                burnPercent: '5%'
+            }),
+            sendInstantNotification(loserAddress, 'notify_forfeit_lose', {
+                __messageBuilder: buildForfeitLoseNotificationMessage,
+                roomId: roomIdStr,
+                winner: winnerShort,
+                lostAmount: opponentLossAmount,
+                lostPercent: '100%',
+                opponentPayout: payoutAmount,
+                winnerPercent: '90%',
+                totalPot: totalPotAmount,
+                communityAmount,
+                communityPercent: '5%',
+                burnAmount,
+                burnPercent: '5%'
+            })
         ]);
 
         if (stakeAmount > 0) {
