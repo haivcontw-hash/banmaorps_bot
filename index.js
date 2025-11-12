@@ -327,6 +327,23 @@ function startTelegramBot() {
         bot.sendMessage(chatId, text, options);
     });
 
+    // LỆNH: /help - Cần async
+    bot.onText(/\/help/, async (msg) => {
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+        const helpMessage = `${t(lang, 'help_header')}\n\n${[
+            t(lang, 'help_command_start'),
+            t(lang, 'help_command_register'),
+            t(lang, 'help_command_mywallet'),
+            t(lang, 'help_command_stats'),
+            t(lang, 'help_command_unregister'),
+            t(lang, 'help_command_language'),
+            t(lang, 'help_command_banmaofeed'),
+            t(lang, 'help_command_help')
+        ].join('\n')}`;
+        bot.sendMessage(chatId, helpMessage, { parse_mode: "Markdown" });
+    });
+
     // Xử lý tất cả CALLBACK QUERY (Nút bấm) - Cần async
     bot.on('callback_query', async (query) => {
         const chatId = query.message.chat.id.toString();
@@ -609,49 +626,131 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
     }
 }
 
+function determineClaimTimeoutReason(room) {
+    if (!room) {
+        return { type: 'room_expired' };
+    }
+
+    const hasOpponent = room.opponent && room.opponent !== ethers.ZeroAddress;
+    const creatorCommitted = room.commitA && room.commitA !== ethers.ZeroHash;
+    const opponentCommitted = room.commitB && room.commitB !== ethers.ZeroHash;
+    const creatorRevealed = Number(room.revealA) !== 0;
+    const opponentRevealed = Number(room.revealB) !== 0;
+
+    if (!hasOpponent) {
+        return { type: 'no_opponent' };
+    }
+
+    if (!creatorCommitted && !opponentCommitted) {
+        return { type: 'missing_commit', subject: 'both' };
+    }
+    if (!creatorCommitted) {
+        return { type: 'missing_commit', subject: 'creator' };
+    }
+    if (!opponentCommitted) {
+        return { type: 'missing_commit', subject: 'opponent' };
+    }
+
+    if (!creatorRevealed && !opponentRevealed) {
+        return { type: 'missing_reveal', subject: 'both' };
+    }
+    if (!creatorRevealed) {
+        return { type: 'missing_reveal', subject: 'creator' };
+    }
+    if (!opponentRevealed) {
+        return { type: 'missing_reveal', subject: 'opponent' };
+    }
+
+    return { type: 'room_expired' };
+}
+
+function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = {}) {
+    if (!reasonInfo) {
+        return t(lang, 'timeout_reason_room_expired');
+    }
+
+    if (reasonInfo.type === 'no_opponent') {
+        return t(lang, 'timeout_reason_no_opponent');
+    }
+
+    if (reasonInfo.type === 'room_expired') {
+        return t(lang, 'timeout_reason_room_expired');
+    }
+
+    let subjectText;
+
+    if (reasonInfo.subject === 'both') {
+        subjectText = t(lang, 'timeout_subject_both');
+        if (perspective === 'group') {
+            const shortCreator = addresses.creator ? shortAddress(addresses.creator) : null;
+            const shortOpponent = addresses.opponent ? shortAddress(addresses.opponent) : null;
+            if (shortCreator && shortOpponent) {
+                subjectText += ` (${shortCreator} & ${shortOpponent})`;
+            }
+        }
+    } else if (perspective === 'group') {
+        const subjectKey = reasonInfo.subject === 'creator' ? 'timeout_subject_creator' : 'timeout_subject_challenger';
+        subjectText = t(lang, subjectKey);
+        const address = reasonInfo.subject === 'creator' ? addresses.creator : addresses.opponent;
+        if (address) {
+            subjectText += ` (${shortAddress(address)})`;
+        }
+    } else {
+        const isSelf = (reasonInfo.subject === 'creator' && perspective === 'creator') ||
+            (reasonInfo.subject === 'opponent' && perspective === 'opponent');
+        const subjectKey = isSelf ? 'timeout_subject_you' : 'timeout_subject_opponent';
+        subjectText = t(lang, subjectKey);
+    }
+
+    const reasonKey = reasonInfo.type === 'missing_commit'
+        ? 'timeout_reason_missing_commit'
+        : 'timeout_reason_missing_reveal';
+
+    return t(lang, reasonKey, { subject: subjectText });
+}
+
 async function handleCanceledEvent(roomId) {
     const roomIdStr = toRoomIdString(roomId);
-    console.log(`[SỰ KIỆN] Room ${roomIdStr} đã bị hủy (Hòa/Timeout)`);
+    console.log(`[SỰ KIỆN] Room ${roomIdStr} đã bị hủy (Claim Timeout)`);
     try {
         if (!contract) return;
         const room = await contract.rooms(roomId);
         const stakeAmount = parseFloat(ethers.formatEther(room.stake));
         const creatorAddress = ethers.getAddress(room.creator);
+        const opponentAddress = room.opponent !== ethers.ZeroAddress ? ethers.getAddress(room.opponent) : null;
+        const reasonInfo = determineClaimTimeoutReason(room);
+        const addresses = { creator: creatorAddress, opponent: opponentAddress };
 
-        const creatorLangs = await db.getUsersForWallet(creatorAddress);
-        const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
-        const choiceStr = getChoiceString(room.revealA, creatorLang);
-
-        const tasks = [
-            sendInstantNotification(creatorAddress, 'notify_game_draw', { roomId: roomIdStr, choice: choiceStr })
+        const notificationTasks = [
+            sendInstantNotification(creatorAddress, 'notify_claim_timeout', {
+                roomId: roomIdStr,
+                reasonInfo: { info: reasonInfo, perspective: 'creator', addresses }
+            })
         ];
 
-        let opponentAddress = null;
-        let opponentChoiceValue = null;
-        if (room.opponent !== ethers.ZeroAddress) {
-            opponentAddress = ethers.getAddress(room.opponent);
-            const opponentLangs = await db.getUsersForWallet(opponentAddress);
-            const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
-            opponentChoiceValue = Number(room.revealB);
-            const choiceStrOpp = getChoiceString(room.revealB, opponentLang);
-            tasks.push(sendInstantNotification(opponentAddress, 'notify_game_draw', { roomId: roomIdStr, choice: choiceStrOpp }));
+        if (opponentAddress) {
+            notificationTasks.push(
+                sendInstantNotification(opponentAddress, 'notify_claim_timeout', {
+                    roomId: roomIdStr,
+                    reasonInfo: { info: reasonInfo, perspective: 'opponent', addresses }
+                })
+            );
+        }
 
+        await Promise.all(notificationTasks);
+
+        if (opponentAddress) {
             await Promise.all([
                 db.writeGameResult(creatorAddress, 'draw', stakeAmount),
                 db.writeGameResult(opponentAddress, 'draw', stakeAmount)
             ]);
-        }
 
-        await Promise.all(tasks);
-
-        if (opponentAddress) {
-            await broadcastGroupGameUpdate('draw', {
+            await broadcastGroupGameUpdate('timeout', {
                 roomId: roomIdStr,
                 creatorAddress,
                 opponentAddress,
                 stakeAmount,
-                creatorChoice: Number(room.revealA),
-                opponentChoice: opponentChoiceValue
+                reasonInfo: { info: reasonInfo, addresses }
             });
         }
     } catch (err) {
@@ -742,7 +841,17 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
     }
 
     const tasks = users.map(async ({ chatId, lang }) => {
-        const message = t(lang, langKey, variables);
+        const resolvedVariables = { ...variables };
+
+        if (resolvedVariables.reasonInfo) {
+            const info = resolvedVariables.reasonInfo.info;
+            const perspective = resolvedVariables.reasonInfo.perspective || 'creator';
+            const addresses = resolvedVariables.reasonInfo.addresses || {};
+            resolvedVariables.reason = translateClaimTimeoutReason(lang, info, perspective, addresses);
+            delete resolvedVariables.reasonInfo;
+        }
+
+        const message = t(lang, langKey, resolvedVariables);
 
         const button = {
             text: `🎮 ${t(lang, 'action_button_play')}`,
@@ -756,7 +865,10 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
             }
         };
 
-        const isGameOver = langKey.startsWith('notify_game_') || langKey.startsWith('notify_forfeit_');
+        const isGameOver = langKey.startsWith('notify_game_') ||
+            langKey.startsWith('notify_forfeit_') ||
+            langKey.startsWith('notify_timeout_') ||
+            langKey === 'notify_claim_timeout';
         if (isGameOver) {
             delete options.reply_markup;
         }
@@ -862,6 +974,15 @@ function buildGroupBroadcastMessage(eventType, lang, payload) {
             loser: shortAddress(payload.loserAddress),
             payout: formatBanmao(payload.payoutAmount)
         })}`;
+    } else if (eventType === 'timeout') {
+        const reasonInfo = payload.reasonInfo || {};
+        const info = reasonInfo.info;
+        const addresses = reasonInfo.addresses || {
+            creator: payload.creatorAddress,
+            opponent: payload.opponentAddress
+        };
+        const reasonText = translateClaimTimeoutReason(lang, info, 'group', addresses);
+        resultLine = `⏰ ${t(lang, 'group_broadcast_timeout', { reason: reasonText })}`;
     }
 
     if (!resultLine) {
