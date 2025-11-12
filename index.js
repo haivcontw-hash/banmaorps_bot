@@ -19,6 +19,35 @@ const contractABI = require('./BanmaoRPS_ABI.json');
 const API_PORT = 3000;
 const WEB_URL = "https://www.banmao.fun";
 const defaultLang = 'en';
+const roomCache = new Map();
+const finalRoomOutcomes = new Map();
+
+function markRoomFinalOutcome(roomId, outcome) {
+    const roomIdStr = toRoomIdString(roomId);
+    const record = { outcome, recordedAt: Date.now() };
+    finalRoomOutcomes.set(roomIdStr, record);
+
+    const timeout = setTimeout(() => {
+        const existing = finalRoomOutcomes.get(roomIdStr);
+        if (existing && existing.recordedAt === record.recordedAt) {
+            finalRoomOutcomes.delete(roomIdStr);
+        }
+    }, 60 * 60 * 1000);
+
+    if (typeof timeout.unref === 'function') {
+        timeout.unref();
+    }
+
+    return record;
+}
+
+function getRoomFinalOutcome(roomId) {
+    return finalRoomOutcomes.get(toRoomIdString(roomId)) || null;
+}
+
+function clearRoomFinalOutcome(roomId) {
+    finalRoomOutcomes.delete(toRoomIdString(roomId));
+}
 
 // --- Kiểm tra Cấu hình ---
 if (!TELEGRAM_TOKEN || !RPC_URL || !CONTRACT_ADDRESS) {
@@ -69,6 +98,210 @@ function formatBanmao(amount) {
         return '0.00';
     }
     return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function toRoomIdString(roomId) {
+    try {
+        return roomId.toString();
+    } catch (error) {
+        return `${roomId}`;
+    }
+}
+
+function normalizeAddress(value) {
+    if (!value || value === ethers.ZeroAddress) {
+        return null;
+    }
+    try {
+        return ethers.getAddress(value);
+    } catch (error) {
+        return null;
+    }
+}
+
+function normalizeRoomStruct(room) {
+    if (!room) {
+        return null;
+    }
+
+    let stakeWei;
+    if (room.stake !== undefined) {
+        try {
+            if (typeof room.stake === 'bigint') {
+                stakeWei = room.stake;
+            } else if (typeof room.stake === 'number') {
+                stakeWei = BigInt(Math.trunc(room.stake));
+            } else if (typeof room.stake === 'string') {
+                stakeWei = BigInt(room.stake);
+            } else if (room.stake && typeof room.stake.toString === 'function') {
+                stakeWei = BigInt(room.stake.toString());
+            }
+        } catch (error) {
+            stakeWei = undefined;
+        }
+    }
+
+    return {
+        creator: normalizeAddress(room.creator),
+        opponent: normalizeAddress(room.opponent),
+        stakeWei,
+        commitA: room.commitA,
+        commitB: room.commitB,
+        revealA: room.revealA !== undefined ? Number(room.revealA) : undefined,
+        revealB: room.revealB !== undefined ? Number(room.revealB) : undefined
+    };
+}
+
+function mergeRoomData(existing = {}, incoming = {}) {
+    const merged = { ...existing };
+
+    for (const [key, value] of Object.entries(incoming)) {
+        if (value === undefined) {
+            continue;
+        }
+
+        if ((key === 'creator' || key === 'opponent') && !value) {
+            continue;
+        }
+
+        if (key === 'stakeWei') {
+            if (value === null || value === undefined) {
+                continue;
+            }
+            if (value === 0n && existing && existing.stakeWei !== undefined) {
+                continue;
+            }
+        }
+
+        if ((key === 'revealA' || key === 'revealB') && value === 0 && existing && typeof existing[key] === 'number' && existing[key] !== 0) {
+            continue;
+        }
+
+        merged[key] = value;
+    }
+
+    return merged;
+}
+
+function updateRoomCache(roomId, incoming = {}) {
+    const roomIdStr = toRoomIdString(roomId);
+    const existing = roomCache.get(roomIdStr) || {};
+    const merged = mergeRoomData(existing, incoming);
+    roomCache.set(roomIdStr, merged);
+    return merged;
+}
+
+function getCachedRoom(roomId) {
+    return roomCache.get(toRoomIdString(roomId)) || null;
+}
+
+async function getRoomState(roomId, { refresh = true } = {}) {
+    let latest = null;
+    if (refresh && contract) {
+        try {
+            const room = await contract.rooms(roomId);
+            const normalized = normalizeRoomStruct(room);
+            if (normalized) {
+                latest = updateRoomCache(roomId, normalized);
+            }
+        } catch (error) {
+            console.warn(`[RoomCache] Không thể tải dữ liệu phòng ${toRoomIdString(roomId)}: ${error.message}`);
+        }
+    }
+
+    if (!latest) {
+        latest = getCachedRoom(roomId);
+    }
+
+    return latest;
+}
+
+function clearRoomCache(roomId) {
+    roomCache.delete(toRoomIdString(roomId));
+}
+
+async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } = {}) {
+    const roomIdStr = toRoomIdString(roomId);
+
+    if (!roomState) {
+        return false;
+    }
+
+    const creatorAddress = roomState.creator || null;
+    const opponentAddress = roomState.opponent || null;
+
+    if (!creatorAddress || !opponentAddress) {
+        return false;
+    }
+
+    const creatorChoice = Number(roomState.revealA ?? 0);
+    const opponentChoice = Number(roomState.revealB ?? 0);
+
+    if (!creatorChoice || !opponentChoice || creatorChoice !== opponentChoice) {
+        return false;
+    }
+
+    const existingOutcome = getRoomFinalOutcome(roomId);
+    if (existingOutcome && existingOutcome.outcome === 'draw') {
+        console.log(`[${source}] Room ${roomIdStr} đã được đánh dấu hòa trước đó, bỏ qua.`);
+        return true;
+    }
+
+    console.log(`[${source}] Room ${roomIdStr} được xác nhận hòa dựa trên dữ liệu cache.`);
+
+    markRoomFinalOutcome(roomId, 'draw');
+
+    const stakeAmount = roomState.stakeWei !== undefined
+        ? parseFloat(ethers.formatEther(roomState.stakeWei))
+        : 0;
+
+    const [creatorLangs, opponentLangs] = await Promise.all([
+        db.getUsersForWallet(creatorAddress),
+        db.getUsersForWallet(opponentAddress)
+    ]);
+
+    const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
+    const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
+
+    const creatorChoiceStr = getChoiceString(creatorChoice, creatorLang);
+    const opponentChoiceStr = getChoiceString(opponentChoice, opponentLang);
+
+    const notifyTasks = [
+        sendInstantNotification(creatorAddress, 'notify_game_draw', {
+            roomId: roomIdStr,
+            choice: creatorChoiceStr
+        })
+    ];
+
+    if (opponentAddress) {
+        notifyTasks.push(
+            sendInstantNotification(opponentAddress, 'notify_game_draw', {
+                roomId: roomIdStr,
+                choice: opponentChoiceStr
+            })
+        );
+    }
+
+    await Promise.all(notifyTasks);
+
+    if (opponentAddress && stakeAmount > 0) {
+        await Promise.all([
+            db.writeGameResult(creatorAddress, 'draw', stakeAmount),
+            db.writeGameResult(opponentAddress, 'draw', stakeAmount)
+        ]);
+    }
+
+    await broadcastGroupGameUpdate('draw', {
+        roomId: roomIdStr,
+        creatorAddress,
+        opponentAddress,
+        stakeAmount,
+        creatorChoice,
+        opponentChoice
+    });
+
+    clearRoomCache(roomId);
+    return true;
 }
 
 
@@ -412,6 +645,7 @@ async function cleanupBlockchainResources() {
         }
         provider = null;
     }
+    roomCache.clear();
 }
 
 function scheduleReconnect() {
@@ -496,6 +730,7 @@ async function startBlockchainListener(isReconnect = false) {
 function registerBlockchainEvents() {
     if (!contract) return;
 
+    contract.on("RoomCreated", handleRoomCreatedEvent);
     contract.on("Joined", handleJoinedEvent);
     contract.on("Committed", handleCommittedEvent);
     contract.on("Revealed", handleRevealedEvent);
@@ -504,11 +739,28 @@ function registerBlockchainEvents() {
     contract.on("Forfeited", handleForfeitedEvent);
 }
 
-function toRoomIdString(roomId) {
+async function handleRoomCreatedEvent(roomId, creator, stake) {
+    const roomIdStr = toRoomIdString(roomId);
+    console.log(`[SỰ KIỆN] Room ${roomIdStr} được tạo bởi ${creator}`);
     try {
-        return roomId.toString();
-    } catch (error) {
-        return `${roomId}`;
+        clearRoomFinalOutcome(roomId);
+
+        const creatorAddress = normalizeAddress(creator);
+        let stakeWei;
+        if (typeof stake === 'bigint') {
+            stakeWei = stake;
+        } else if (stake && typeof stake.toString === 'function') {
+            stakeWei = BigInt(stake.toString());
+        }
+
+        const snapshot = {};
+        if (creatorAddress) snapshot.creator = creatorAddress;
+        if (stakeWei !== undefined) snapshot.stakeWei = stakeWei;
+        updateRoomCache(roomId, snapshot);
+
+        await getRoomState(roomId, { refresh: true });
+    } catch (err) {
+        console.warn(`[RoomCreated] Không thể cập nhật cache cho phòng ${roomIdStr}: ${err.message}`);
     }
 }
 
@@ -516,11 +768,27 @@ async function handleJoinedEvent(roomId, opponent) {
     const roomIdStr = toRoomIdString(roomId);
     console.log(`[SỰ KIỆN] Room ${roomIdStr} đã có người tham gia: ${opponent}`);
     try {
-        if (!contract) return;
-        const room = await contract.rooms(roomId);
-        const stake = ethers.formatEther(room.stake);
-        const creatorAddress = ethers.getAddress(room.creator);
-        const opponentAddress = ethers.getAddress(room.opponent);
+        const roomState = await getRoomState(roomId, { refresh: true });
+        if (!roomState) {
+            console.warn(`[Joined] Không thể xác định thông tin phòng ${roomIdStr}.`);
+            return;
+        }
+
+        let opponentAddress = roomState.opponent;
+        if (!opponentAddress) {
+            opponentAddress = normalizeAddress(opponent);
+            if (opponentAddress) {
+                updateRoomCache(roomId, { opponent: opponentAddress });
+            }
+        }
+
+        const creatorAddress = roomState.creator;
+        if (!creatorAddress || !opponentAddress) {
+            console.warn(`[Joined] Thiếu thông tin người chơi cho phòng ${roomIdStr}.`);
+            return;
+        }
+
+        const stake = roomState.stakeWei !== undefined ? ethers.formatEther(roomState.stakeWei) : '0';
 
         await Promise.all([
             sendInstantNotification(creatorAddress, 'notify_opponent_joined', { roomId: roomIdStr, opponent: opponentAddress, stake }),
@@ -535,15 +803,24 @@ async function handleCommittedEvent(roomId, player) {
     const roomIdStr = toRoomIdString(roomId);
     console.log(`[SỰ KIỆN] Room ${roomIdStr} có người commit: ${player}`);
     try {
-        if (!contract) return;
-        const room = await contract.rooms(roomId);
-        const playerAddress = ethers.getAddress(player);
-        const creatorAddress = ethers.getAddress(room.creator);
-        const opponentAddress = ethers.getAddress(room.opponent);
-        const stake = ethers.formatEther(room.stake);
-        const otherPlayer = (playerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+        const roomState = await getRoomState(roomId, { refresh: true });
+        if (!roomState) {
+            console.warn(`[Commit] Không thể xác định thông tin phòng ${roomIdStr}.`);
+            return;
+        }
 
-        if (otherPlayer && otherPlayer !== ethers.ZeroAddress) {
+        const playerAddress = normalizeAddress(player);
+        const creatorAddress = roomState.creator;
+        const opponentAddress = roomState.opponent;
+
+        if (!playerAddress || !creatorAddress) {
+            console.warn(`[Commit] Thiếu dữ liệu người chơi ở phòng ${roomIdStr}.`);
+            return;
+        }
+
+        const otherPlayer = (playerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+        if (otherPlayer) {
+            const stake = roomState.stakeWei !== undefined ? ethers.formatEther(roomState.stakeWei) : '0';
             await sendInstantNotification(otherPlayer, 'notify_opponent_committed', { roomId: roomIdStr, opponent: playerAddress, stake });
         }
     } catch (err) {
@@ -555,15 +832,34 @@ async function handleRevealedEvent(roomId, player, choice) {
     const roomIdStr = toRoomIdString(roomId);
     console.log(`[SỰ KIỆN] Room ${roomIdStr} có người reveal: ${player}`);
     try {
-        if (!contract) return;
-        const room = await contract.rooms(roomId);
-        const playerAddress = ethers.getAddress(player);
-        const creatorAddress = ethers.getAddress(room.creator);
-        const opponentAddress = ethers.getAddress(room.opponent);
-        const stake = ethers.formatEther(room.stake);
+        const roomState = await getRoomState(roomId, { refresh: true });
+        if (!roomState) {
+            console.warn(`[Reveal] Không thể xác định thông tin phòng ${roomIdStr}.`);
+            return;
+        }
+
+        const playerAddress = normalizeAddress(player);
+        const creatorAddress = roomState.creator;
+        const opponentAddress = roomState.opponent;
+
+        if (!playerAddress || !creatorAddress) {
+            console.warn(`[Reveal] Thiếu dữ liệu người chơi ở phòng ${roomIdStr}.`);
+            return;
+        }
+
+        const numericChoice = choice !== undefined ? Number(choice) : undefined;
+        if (numericChoice !== undefined && !Number.isNaN(numericChoice)) {
+            if (creatorAddress === playerAddress) {
+                updateRoomCache(roomId, { revealA: numericChoice });
+            } else if (opponentAddress === playerAddress) {
+                updateRoomCache(roomId, { revealB: numericChoice });
+            }
+        }
+
         const otherPlayer = (playerAddress === creatorAddress) ? opponentAddress : creatorAddress;
 
-        if (otherPlayer && otherPlayer !== ethers.ZeroAddress) {
+        if (otherPlayer) {
+            const stake = roomState.stakeWei !== undefined ? ethers.formatEther(roomState.stakeWei) : '0';
             await sendInstantNotification(otherPlayer, 'notify_opponent_revealed', { roomId: roomIdStr, opponent: playerAddress, stake });
         }
     } catch (err) {
@@ -573,56 +869,105 @@ async function handleRevealedEvent(roomId, player, choice) {
 
 async function handleResolvedEvent(roomId, winner, payout, fee) {
     const roomIdStr = toRoomIdString(roomId);
-    console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả: ${winner} thắng`);
     try {
-        if (!contract) return;
-        const room = await contract.rooms(roomId);
-        const winnerAddress = ethers.getAddress(winner);
-        const creatorAddress = ethers.getAddress(room.creator);
-        const opponentAddress = ethers.getAddress(room.opponent);
+        const priorOutcome = getRoomFinalOutcome(roomId);
+        if (priorOutcome && priorOutcome.outcome !== 'timeout') {
+            console.log(`[Resolve] Room ${roomIdStr} đã có kết quả cuối cùng '${priorOutcome.outcome}', bỏ qua sự kiện.`);
+            return;
+        }
+
+        const roomState = await getRoomState(roomId, { refresh: true }) || await getRoomState(roomId, { refresh: false });
+        if (!roomState) {
+            console.warn(`[Resolve] Không tìm thấy dữ liệu phòng ${roomIdStr}.`);
+            return;
+        }
+
+        const creatorAddress = roomState.creator;
+        const opponentAddress = roomState.opponent;
+        const normalizedWinner = winner === ethers.ZeroAddress ? null : normalizeAddress(winner);
         const payoutAmount = ethers.formatEther(payout);
-        const stakeAmount = parseFloat(ethers.formatEther(room.stake));
-        const loserAddress = (winnerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+        const stakeAmount = roomState.stakeWei !== undefined ? parseFloat(ethers.formatEther(roomState.stakeWei)) : 0;
+        const creatorChoice = Number(roomState.revealA ?? 0);
+        const opponentChoice = Number(roomState.revealB ?? 0);
 
-        const winnerIsCreator = (winnerAddress === creatorAddress);
-        const winnerChoice = winnerIsCreator ? room.revealA : room.revealB;
-        const loserChoice = winnerIsCreator ? room.revealB : room.revealA;
+        if (!creatorAddress) {
+            console.warn(`[Resolve] Thiếu địa chỉ creator cho phòng ${roomIdStr}.`);
+            clearRoomCache(roomId);
+            return;
+        }
 
-        const winnerLangs = await db.getUsersForWallet(winnerAddress);
+        const hasOpponent = Boolean(opponentAddress);
+        const isDraw = hasOpponent && (!normalizedWinner || (creatorChoice !== 0 && creatorChoice === opponentChoice));
+
+        if (isDraw) {
+            const handled = await finalizeDrawOutcome(roomId, roomState, { source: 'Resolve' });
+            if (!handled) {
+                console.warn(`[Resolve] Không thể xác nhận kết quả hòa cho phòng ${roomIdStr}.`);
+            }
+            return;
+        }
+
+        if (!normalizedWinner) {
+            console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả nhưng không xác định được người thắng.`);
+            clearRoomCache(roomId);
+            return;
+        }
+
+        console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả: ${normalizedWinner} thắng`);
+
+        markRoomFinalOutcome(roomId, 'win');
+
+        const loserAddress = normalizedWinner === creatorAddress ? opponentAddress : creatorAddress;
+        if (!loserAddress) {
+            console.warn(`[SỰ KIỆN] Room ${roomIdStr} không xác định được người thua.`);
+            clearRoomCache(roomId);
+            return;
+        }
+
+        const winnerLangs = await db.getUsersForWallet(normalizedWinner);
         const loserLangs = await db.getUsersForWallet(loserAddress);
         const winnerLang = (winnerLangs[0] || {}).lang || defaultLang;
         const loserLang = (loserLangs[0] || {}).lang || defaultLang;
+
+        const winnerIsCreator = normalizedWinner === creatorAddress;
+        const winnerChoice = winnerIsCreator ? creatorChoice : opponentChoice;
+        const loserChoice = winnerIsCreator ? opponentChoice : creatorChoice;
 
         const winnerChoiceStr = getChoiceString(winnerChoice, winnerLang);
         const loserChoiceStr = getChoiceString(loserChoice, loserLang);
 
         await Promise.all([
-            sendInstantNotification(winnerAddress, 'notify_game_win',
+            sendInstantNotification(normalizedWinner, 'notify_game_win',
                 { roomId: roomIdStr, payout: payoutAmount, myChoice: winnerChoiceStr, opponentChoice: loserChoiceStr }
             ),
             sendInstantNotification(loserAddress, 'notify_game_lose',
-                { roomId: roomIdStr, winner: winnerAddress, myChoice: loserChoiceStr, opponentChoice: winnerChoiceStr }
+                { roomId: roomIdStr, winner: normalizedWinner, myChoice: loserChoiceStr, opponentChoice: winnerChoiceStr }
             )
         ]);
 
-        await Promise.all([
-            db.writeGameResult(winnerAddress, 'win', stakeAmount),
-            db.writeGameResult(loserAddress, 'lose', stakeAmount)
-        ]);
+        if (stakeAmount > 0) {
+            await Promise.all([
+                db.writeGameResult(normalizedWinner, 'win', stakeAmount),
+                db.writeGameResult(loserAddress, 'lose', stakeAmount)
+            ]);
+        }
 
         await broadcastGroupGameUpdate('win', {
             roomId: roomIdStr,
             creatorAddress,
             opponentAddress,
-            winnerAddress,
+            winnerAddress: normalizedWinner,
             loserAddress,
             stakeAmount,
             payoutAmount: parseFloat(payoutAmount),
-            creatorChoice: Number(room.revealA),
-            opponentChoice: Number(room.revealB)
+            creatorChoice,
+            opponentChoice
         });
+
+        clearRoomCache(roomId);
     } catch (err) {
         console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau resolve):`, err.message);
+        clearRoomCache(roomId);
     }
 }
 
@@ -631,11 +976,18 @@ function determineClaimTimeoutReason(room) {
         return { type: 'room_expired' };
     }
 
-    const hasOpponent = room.opponent && room.opponent !== ethers.ZeroAddress;
-    const creatorCommitted = room.commitA && room.commitA !== ethers.ZeroHash;
-    const opponentCommitted = room.commitB && room.commitB !== ethers.ZeroHash;
-    const creatorRevealed = Number(room.revealA) !== 0;
-    const opponentRevealed = Number(room.revealB) !== 0;
+    const opponentValue = room.opponent ?? room.opponentAddress ?? null;
+    const hasOpponent = Boolean(opponentValue && opponentValue !== ethers.ZeroAddress);
+
+    const creatorCommitValue = room.commitA ?? room.commitCreator ?? null;
+    const opponentCommitValue = room.commitB ?? room.commitOpponent ?? null;
+    const creatorCommitted = Boolean(creatorCommitValue && creatorCommitValue !== ethers.ZeroHash);
+    const opponentCommitted = Boolean(opponentCommitValue && opponentCommitValue !== ethers.ZeroHash);
+
+    const creatorRevealValue = Number(room.revealA ?? room.creatorReveal ?? 0);
+    const opponentRevealValue = Number(room.revealB ?? room.opponentReveal ?? 0);
+    const creatorRevealed = creatorRevealValue !== 0;
+    const opponentRevealed = opponentRevealValue !== 0;
 
     if (!hasOpponent) {
         return { type: 'no_opponent' };
@@ -670,7 +1022,9 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
     }
 
     if (reasonInfo.type === 'no_opponent') {
-        return t(lang, 'timeout_reason_no_opponent');
+        const baseReason = t(lang, 'timeout_reason_no_opponent');
+        const refundText = t(lang, 'timeout_refund_no_opponent');
+        return `${baseReason} ${refundText}`.trim();
     }
 
     if (reasonInfo.type === 'room_expired') {
@@ -706,19 +1060,58 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
         ? 'timeout_reason_missing_commit'
         : 'timeout_reason_missing_reveal';
 
-    return t(lang, reasonKey, { subject: subjectText });
+    const baseReason = t(lang, reasonKey, { subject: subjectText });
+
+    let refundKey = null;
+    if (reasonInfo.type === 'missing_commit' && reasonInfo.subject === 'both') {
+        refundKey = 'timeout_refund_missing_commit_both';
+    } else if (reasonInfo.type === 'missing_reveal' && reasonInfo.subject === 'both') {
+        refundKey = 'timeout_refund_missing_reveal_both';
+    }
+
+    if (refundKey) {
+        const refundText = t(lang, refundKey);
+        return `${baseReason} ${refundText}`.trim();
+    }
+
+    return baseReason;
 }
 
 async function handleCanceledEvent(roomId) {
     const roomIdStr = toRoomIdString(roomId);
     console.log(`[SỰ KIỆN] Room ${roomIdStr} đã bị hủy (Claim Timeout)`);
+
+    const existingOutcome = getRoomFinalOutcome(roomId);
+    if (existingOutcome && existingOutcome.outcome !== 'timeout') {
+        console.log(`[Timeout] Room ${roomIdStr} đã được đánh dấu '${existingOutcome.outcome}', bỏ qua thông báo claim timeout.`);
+        return;
+    }
+
+    markRoomFinalOutcome(roomId, 'timeout');
+
     try {
-        if (!contract) return;
-        const room = await contract.rooms(roomId);
-        const stakeAmount = parseFloat(ethers.formatEther(room.stake));
-        const creatorAddress = ethers.getAddress(room.creator);
-        const opponentAddress = room.opponent !== ethers.ZeroAddress ? ethers.getAddress(room.opponent) : null;
-        const reasonInfo = determineClaimTimeoutReason(room);
+        const roomState = await getRoomState(roomId, { refresh: true }) || await getRoomState(roomId, { refresh: false });
+        if (!roomState) {
+            console.warn(`[Timeout] Không tìm thấy dữ liệu phòng ${roomIdStr}.`);
+            return;
+        }
+
+        const drawHandled = await finalizeDrawOutcome(roomId, roomState, { source: 'Cancel' });
+        if (drawHandled) {
+            return;
+        }
+
+        const stakeAmount = roomState.stakeWei !== undefined ? parseFloat(ethers.formatEther(roomState.stakeWei)) : 0;
+        const creatorAddress = roomState.creator;
+        const opponentAddress = roomState.opponent || null;
+
+        if (!creatorAddress) {
+            console.warn(`[Timeout] Thiếu địa chỉ creator cho phòng ${roomIdStr}.`);
+            clearRoomCache(roomId);
+            return;
+        }
+
+        const reasonInfo = determineClaimTimeoutReason(roomState);
         const addresses = { creator: creatorAddress, opponent: opponentAddress };
 
         const notificationTasks = [
@@ -739,7 +1132,7 @@ async function handleCanceledEvent(roomId) {
 
         await Promise.all(notificationTasks);
 
-        if (opponentAddress) {
+        if (opponentAddress && stakeAmount > 0) {
             await Promise.all([
                 db.writeGameResult(creatorAddress, 'draw', stakeAmount),
                 db.writeGameResult(opponentAddress, 'draw', stakeAmount)
@@ -753,8 +1146,10 @@ async function handleCanceledEvent(roomId) {
                 reasonInfo: { info: reasonInfo, addresses }
             });
         }
+        clearRoomCache(roomId);
     } catch (err) {
         console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau cancel):`, err.message);
+        clearRoomCache(roomId);
     }
 }
 
@@ -763,6 +1158,8 @@ async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
     console.log(`[SỰ KIỆN] Room ${roomIdStr} có người bỏ cuộc: ${loser}`);
     const payoutAmount = ethers.formatEther(winnerPayout);
     const stakeAmount = parseFloat(ethers.formatEther(winnerPayout)) / 1.8;
+
+    markRoomFinalOutcome(roomId, 'forfeit');
 
     try {
         const winnerAddress = ethers.getAddress(winner);
@@ -773,20 +1170,16 @@ async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
         let creatorChoice = null;
         let opponentChoice = null;
 
-        if (contract) {
-            try {
-                const room = await contract.rooms(roomId);
-                if (room.creator && room.creator !== ethers.ZeroAddress) {
-                    creatorAddress = ethers.getAddress(room.creator);
-                }
-                if (room.opponent && room.opponent !== ethers.ZeroAddress) {
-                    opponentAddress = ethers.getAddress(room.opponent);
-                }
-                creatorChoice = Number(room.revealA);
-                opponentChoice = Number(room.revealB);
-            } catch (fetchErr) {
-                console.warn(`[Forfeit] Không thể lấy dữ liệu phòng ${roomIdStr}:`, fetchErr.message);
+        try {
+            const roomState = await getRoomState(roomId, { refresh: true }) || await getRoomState(roomId, { refresh: false });
+            if (roomState) {
+                creatorAddress = roomState.creator || creatorAddress;
+                opponentAddress = roomState.opponent || opponentAddress;
+                creatorChoice = Number(roomState.revealA ?? creatorChoice ?? 0);
+                opponentChoice = Number(roomState.revealB ?? opponentChoice ?? 0);
             }
+        } catch (fetchErr) {
+            console.warn(`[Forfeit] Không thể lấy dữ liệu phòng ${roomIdStr}:`, fetchErr.message);
         }
 
         if (!creatorAddress) creatorAddress = winnerAddress;
@@ -815,8 +1208,10 @@ async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
             creatorChoice,
             opponentChoice
         });
+        clearRoomCache(roomId);
     } catch (error) {
         console.error(`[Lỗi] Khi xử lý sự kiện Forfeited cho room ${roomIdStr}:`, error.message);
+        clearRoomCache(roomId);
     }
 }
 
