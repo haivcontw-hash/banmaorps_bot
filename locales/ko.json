@@ -31,9 +31,9 @@
   "notify_self_joined": "⚔️ **게임 시작 (방 {roomId})**\n\n당신은:\n`{creator}`\n...님의 방에 💰 **{stake} $BANMAO** 베팅으로 참여했습니다. COMMIT 할 시간입니다!",
   "notify_opponent_committed": "⚡️ **상대방 COMMIT (방 {roomId})**\n\n방 베팅: 💰 **{stake} $BANMAO**.\n상대방:\n`{opponent}`\n...님이 방금 **COMMIT** 했습니다. 당신 차례입니다!",
   "notify_opponent_revealed": "⚡️ **상대방 REVEAL (방 {roomId})**\n\n방 베팅: 💰 **{stake} $BANMAO**.\n상대방:\n`{opponent}`\n...님이 방금 **REVEAL** 했습니다. 당신 차례입니다!",
-  "notify_game_win": "🎉 **승리했습니다 (방 {roomId})** 🎉\n\n**{payout} $BANMAO**를 받았습니다!\n\n*이유: 당신은 **{myChoice}**를 냈고, 상대는 **{opponentChoice}*를 냈습니다.",
-  "notify_game_lose": "😥 **패배했습니다 (방 {roomId})**\n\n승자:\n`{winner}`\n\n*이유: 당신은 **{myChoice}**를 냈고, 상대는 **{opponentChoice}*를 냈습니다.",
-  "notify_game_draw": "🤝 **무승부 (방 {roomId})**\n\n경기가 **무승부**로 종료되었습니다.\n\n*이유: 둘 다 **{choice}*를 냈습니다.",
+  "notify_game_win": "🎉 **승리했습니다 (방 {roomId})** 🎉\n\n**{payout} $BANMAO**를 받았습니다!\n\n*이유: 당신은 **{myChoice}**를 냈고, 상대는 **{opponentChoice}**를 냈습니다.*",
+  "notify_game_lose": "😥 **패배했습니다 (방 {roomId})**\n\n승자:\n`{winner}`\n\n*이유: 당신은 **{myChoice}**를 냈고, 상대는 **{opponentChoice}**를 냈습니다.*",
+  "notify_game_draw": "🤝 **무승부 (방 {roomId})**\n\n경기가 **무승부**로 종료되었습니다.\n\n*이유: 둘 다 **{choice}**를 냈습니다.*",
   "notify_forfeit_win": "🎉 **상대 기권 (방 {roomId})**\n\n상대방:\n`{loser}`\n...님이 **기권**했습니다. 당신이 **승리**했으며 💸 **{payout} $BANMAO**를 받았습니다!",
   "notify_forfeit_lose": "😥 **기권 (방 {roomId})**\n\n당신은 **기권**했습니다. 상대방:\n`{winner}`\n...님이 승리했습니다."
 }

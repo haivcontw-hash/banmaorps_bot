@@ -31,9 +31,9 @@
   "notify_self_joined": "⚔️ **BẮT ĐẦU (Phòng {roomId})**\n\nBạn đã tham gia phòng của:\n`{creator}`\n...với cược 💰 **{stake} $BANMAO**. Hãy vào COMMIT!",
   "notify_opponent_committed": "⚡️ **ĐỐI THỦ ĐÃ COMMIT (Phòng {roomId})**\n\nPhòng cược 💰 **{stake} $BANMAO**.\nĐối thủ của bạn:\n`{opponent}`\n...vừa **COMMIT**. Tới lượt bạn!",
   "notify_opponent_revealed": "⚡️ **ĐỐI THỦ ĐÃ REVEAL (Phòng {roomId})**\n\nPhòng cược 💰 **{stake} $BANMAO**.\nĐối thủ của bạn:\n`{opponent}`\n...vừa **REVEAL**. Tới lượt bạn!",
-  "notify_game_win": "🎉 **BẠN ĐÃ THẮNG (Phòng {roomId})** 🎉\n\nBạn nhận được 💸 **{payout} $BANMAO**!\n\n*Lý do: Bạn ra **{myChoice}**, đối thủ ra **{opponentChoice}*.",
-  "notify_game_lose": "😥 **BẠN ĐÃ THUA (Phòng {roomId})**\n\nĐối thủ:\n`{winner}`\n...đã thắng.\n\n*Lý do: Bạn ra **{myChoice}**, đối thủ ra **{opponentChoice}*.",
-  "notify_game_draw": "🤝 **KẾT QUẢ HÒA (Phòng {roomId})**\n\nVán đấu kết thúc hòa.\n\n*Lý do: Cả hai cùng ra **{choice}*.",
+  "notify_game_win": "🎉 **BẠN ĐÃ THẮNG (Phòng {roomId})** 🎉\n\nBạn nhận được 💸 **{payout} $BANMAO**!\n\n*Lý do: Bạn ra **{myChoice}**, đối thủ ra **{opponentChoice}**.*",
+  "notify_game_lose": "😥 **BẠN ĐÃ THUA (Phòng {roomId})**\n\nĐối thủ:\n`{winner}`\n...đã thắng.\n\n*Lý do: Bạn ra **{myChoice}**, đối thủ ra **{opponentChoice}**.*",
+  "notify_game_draw": "🤝 **KẾT QUẢ HÒA (Phòng {roomId})**\n\nVán đấu kết thúc hòa.\n\n*Lý do: Cả hai cùng ra **{choice}**.*",
   "notify_forfeit_win": "🎉 **ĐỐI THỦ BỎ CUỘC (Phòng {roomId})**\n\nĐối thủ của bạn:\n`{loser}`\n...vừa **BỎ CUỘC**. Bạn đã **THẮNG** và nhận 💸 **{payout} $BANMAO**!",
   "notify_forfeit_lose": "😥 **BẠN ĐÃ BỎ CUỘC (Phòng {roomId})**\n\nBạn đã **BỎ CUỘC**. Đối thủ:\n`{winner}`\n...đã thắng."
 }
