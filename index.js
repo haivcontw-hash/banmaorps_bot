@@ -220,6 +220,90 @@ function clearRoomCache(roomId) {
     roomCache.delete(toRoomIdString(roomId));
 }
 
+async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } = {}) {
+    const roomIdStr = toRoomIdString(roomId);
+
+    if (!roomState) {
+        return false;
+    }
+
+    const creatorAddress = roomState.creator || null;
+    const opponentAddress = roomState.opponent || null;
+
+    if (!creatorAddress || !opponentAddress) {
+        return false;
+    }
+
+    const creatorChoice = Number(roomState.revealA ?? 0);
+    const opponentChoice = Number(roomState.revealB ?? 0);
+
+    if (!creatorChoice || !opponentChoice || creatorChoice !== opponentChoice) {
+        return false;
+    }
+
+    const existingOutcome = getRoomFinalOutcome(roomId);
+    if (existingOutcome && existingOutcome.outcome === 'draw') {
+        console.log(`[${source}] Room ${roomIdStr} đã được đánh dấu hòa trước đó, bỏ qua.`);
+        return true;
+    }
+
+    console.log(`[${source}] Room ${roomIdStr} được xác nhận hòa dựa trên dữ liệu cache.`);
+
+    markRoomFinalOutcome(roomId, 'draw');
+
+    const stakeAmount = roomState.stakeWei !== undefined
+        ? parseFloat(ethers.formatEther(roomState.stakeWei))
+        : 0;
+
+    const [creatorLangs, opponentLangs] = await Promise.all([
+        db.getUsersForWallet(creatorAddress),
+        db.getUsersForWallet(opponentAddress)
+    ]);
+
+    const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
+    const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
+
+    const creatorChoiceStr = getChoiceString(creatorChoice, creatorLang);
+    const opponentChoiceStr = getChoiceString(opponentChoice, opponentLang);
+
+    const notifyTasks = [
+        sendInstantNotification(creatorAddress, 'notify_game_draw', {
+            roomId: roomIdStr,
+            choice: creatorChoiceStr
+        })
+    ];
+
+    if (opponentAddress) {
+        notifyTasks.push(
+            sendInstantNotification(opponentAddress, 'notify_game_draw', {
+                roomId: roomIdStr,
+                choice: opponentChoiceStr
+            })
+        );
+    }
+
+    await Promise.all(notifyTasks);
+
+    if (opponentAddress && stakeAmount > 0) {
+        await Promise.all([
+            db.writeGameResult(creatorAddress, 'draw', stakeAmount),
+            db.writeGameResult(opponentAddress, 'draw', stakeAmount)
+        ]);
+    }
+
+    await broadcastGroupGameUpdate('draw', {
+        roomId: roomIdStr,
+        creatorAddress,
+        opponentAddress,
+        stakeAmount,
+        creatorChoice,
+        opponentChoice
+    });
+
+    clearRoomCache(roomId);
+    return true;
+}
+
 
 // ==========================================================
 // 🚀 PHẦN 1: API SERVER
@@ -786,6 +870,12 @@ async function handleRevealedEvent(roomId, player, choice) {
 async function handleResolvedEvent(roomId, winner, payout, fee) {
     const roomIdStr = toRoomIdString(roomId);
     try {
+        const priorOutcome = getRoomFinalOutcome(roomId);
+        if (priorOutcome && priorOutcome.outcome !== 'timeout') {
+            console.log(`[Resolve] Room ${roomIdStr} đã có kết quả cuối cùng '${priorOutcome.outcome}', bỏ qua sự kiện.`);
+            return;
+        }
+
         const roomState = await getRoomState(roomId, { refresh: true }) || await getRoomState(roomId, { refresh: false });
         if (!roomState) {
             console.warn(`[Resolve] Không tìm thấy dữ liệu phòng ${roomIdStr}.`);
@@ -810,53 +900,10 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
         const isDraw = hasOpponent && (!normalizedWinner || (creatorChoice !== 0 && creatorChoice === opponentChoice));
 
         if (isDraw) {
-            console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả hòa.`);
-
-            markRoomFinalOutcome(roomId, 'draw');
-
-            const creatorLangs = await db.getUsersForWallet(creatorAddress);
-            const opponentLangs = opponentAddress ? await db.getUsersForWallet(opponentAddress) : [];
-            const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
-            const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
-
-            const creatorChoiceStr = getChoiceString(creatorChoice, creatorLang);
-            const opponentChoiceStr = getChoiceString(opponentChoice, opponentLang);
-
-            const notifyTasks = [
-                sendInstantNotification(creatorAddress, 'notify_game_draw', {
-                    roomId: roomIdStr,
-                    choice: creatorChoiceStr
-                })
-            ];
-
-            if (opponentAddress) {
-                notifyTasks.push(
-                    sendInstantNotification(opponentAddress, 'notify_game_draw', {
-                        roomId: roomIdStr,
-                        choice: opponentChoiceStr
-                    })
-                );
+            const handled = await finalizeDrawOutcome(roomId, roomState, { source: 'Resolve' });
+            if (!handled) {
+                console.warn(`[Resolve] Không thể xác nhận kết quả hòa cho phòng ${roomIdStr}.`);
             }
-
-            await Promise.all(notifyTasks);
-
-            if (opponentAddress && stakeAmount > 0) {
-                await Promise.all([
-                    db.writeGameResult(creatorAddress, 'draw', stakeAmount),
-                    db.writeGameResult(opponentAddress, 'draw', stakeAmount)
-                ]);
-            }
-
-            await broadcastGroupGameUpdate('draw', {
-                roomId: roomIdStr,
-                creatorAddress,
-                opponentAddress,
-                stakeAmount,
-                creatorChoice,
-                opponentChoice
-            });
-
-            clearRoomCache(roomId);
             return;
         }
 
@@ -1046,6 +1093,11 @@ async function handleCanceledEvent(roomId) {
         const roomState = await getRoomState(roomId, { refresh: true }) || await getRoomState(roomId, { refresh: false });
         if (!roomState) {
             console.warn(`[Timeout] Không tìm thấy dữ liệu phòng ${roomIdStr}.`);
+            return;
+        }
+
+        const drawHandled = await finalizeDrawOutcome(roomId, roomState, { source: 'Cancel' });
+        if (drawHandled) {
             return;
         }
 
