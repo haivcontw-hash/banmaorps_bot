@@ -1586,7 +1586,14 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
     }
 
     const tasks = users.map(async ({ chatId, lang }) => {
-        const langCode = resolveLangCode(lang);
+        let langCode = null;
+        try {
+            const storedLang = await db.getUserLanguage(chatId);
+            langCode = resolveLangCode(storedLang || lang);
+        } catch (error) {
+            console.warn(`[Notify] Không thể lấy ngôn ngữ đã lưu cho ${chatId}: ${error.message}`);
+            langCode = resolveLangCode(lang);
+        }
         const resolvedVariables = { ...variables };
 
         if (resolvedVariables.reasonInfo) {
