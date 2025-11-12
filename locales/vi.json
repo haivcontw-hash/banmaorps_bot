@@ -35,5 +35,18 @@
   "notify_game_lose": "😥 **BẠN ĐÃ THUA (Phòng {roomId})**\n\nĐối thủ:\n`{winner}`\n...đã thắng.\n\n*Lý do: Bạn ra **{myChoice}**, đối thủ ra **{opponentChoice}**.*",
   "notify_game_draw": "🤝 **KẾT QUẢ HÒA (Phòng {roomId})**\n\nVán đấu kết thúc hòa.\n\n*Lý do: Cả hai cùng ra **{choice}**.*",
   "notify_forfeit_win": "🎉 **ĐỐI THỦ BỎ CUỘC (Phòng {roomId})**\n\nĐối thủ của bạn:\n`{loser}`\n...vừa **BỎ CUỘC**. Bạn đã **THẮNG** và nhận 💸 **{payout} $BANMAO**!",
-  "notify_forfeit_lose": "😥 **BẠN ĐÃ BỎ CUỘC (Phòng {roomId})**\n\nBạn đã **BỎ CUỘC**. Đối thủ:\n`{winner}`\n...đã thắng."
+  "notify_forfeit_lose": "😥 **BẠN ĐÃ BỎ CUỘC (Phòng {roomId})**\n\nBạn đã **BỎ CUỘC**. Đối thủ:\n`{winner}`\n...đã thắng.",
+  "notify_claim_timeout": "⏰ **CLAIM TIMEOUT (Phòng {roomId})**\n\nLý do: {reason}",
+  "timeout_reason_no_opponent": "Không có đối thủ tham gia trước khi hết thời gian.",
+  "timeout_reason_missing_commit": "{subject} không kịp COMMIT trước thời hạn.",
+  "timeout_reason_missing_reveal": "{subject} không kịp REVEAL trước thời hạn.",
+  "timeout_reason_room_expired": "Phòng đã hết hạn do vượt quá thời gian.",
+  "timeout_subject_you": "Bạn",
+  "timeout_subject_opponent": "Đối thủ",
+  "timeout_subject_both": "Cả hai người chơi",
+  "timeout_subject_creator": "Chủ phòng",
+  "timeout_subject_challenger": "Người thách đấu",
+  "timeout_refund_no_opponent": "Phòng đã hết hạn và bạn được hoàn lại 98% tiền cược.",
+  "timeout_refund_missing_commit_both": "100% tiền cược đã được hoàn lại cho cả hai người chơi.",
+  "timeout_refund_missing_reveal_both": "98% tiền cược đã được hoàn lại cho cả hai người chơi."
 }

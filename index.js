@@ -573,40 +573,104 @@ async function handleRevealedEvent(roomId, player, choice) {
 
 async function handleResolvedEvent(roomId, winner, payout, fee) {
     const roomIdStr = toRoomIdString(roomId);
-    console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả: ${winner} thắng`);
     try {
         if (!contract) return;
         const room = await contract.rooms(roomId);
-        const winnerAddress = ethers.getAddress(winner);
         const creatorAddress = ethers.getAddress(room.creator);
-        const opponentAddress = ethers.getAddress(room.opponent);
+        const opponentAddress = room.opponent !== ethers.ZeroAddress ? ethers.getAddress(room.opponent) : null;
         const payoutAmount = ethers.formatEther(payout);
         const stakeAmount = parseFloat(ethers.formatEther(room.stake));
-        const loserAddress = (winnerAddress === creatorAddress) ? opponentAddress : creatorAddress;
+        const creatorChoice = Number(room.revealA);
+        const opponentChoice = Number(room.revealB);
+        const normalizedWinner = winner === ethers.ZeroAddress ? null : ethers.getAddress(winner);
 
-        const winnerIsCreator = (winnerAddress === creatorAddress);
-        const winnerChoice = winnerIsCreator ? room.revealA : room.revealB;
-        const loserChoice = winnerIsCreator ? room.revealB : room.revealA;
+        const isDraw = opponentAddress &&
+            ((creatorChoice !== 0 && creatorChoice === opponentChoice) || !normalizedWinner);
 
-        const winnerLangs = await db.getUsersForWallet(winnerAddress);
+        if (isDraw) {
+            console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả hòa.`);
+
+            const creatorLangs = await db.getUsersForWallet(creatorAddress);
+            const opponentLangs = await db.getUsersForWallet(opponentAddress);
+            const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
+            const opponentLang = (opponentLangs[0] || {}).lang || defaultLang;
+
+            const creatorChoiceStr = getChoiceString(creatorChoice, creatorLang);
+            const opponentChoiceStr = getChoiceString(opponentChoice, opponentLang);
+
+            const notifyTasks = [
+                sendInstantNotification(creatorAddress, 'notify_game_draw', {
+                    roomId: roomIdStr,
+                    choice: creatorChoiceStr
+                })
+            ];
+
+            if (opponentAddress) {
+                notifyTasks.push(
+                    sendInstantNotification(opponentAddress, 'notify_game_draw', {
+                        roomId: roomIdStr,
+                        choice: opponentChoiceStr
+                    })
+                );
+            }
+
+            await Promise.all(notifyTasks);
+
+            if (opponentAddress) {
+                await Promise.all([
+                    db.writeGameResult(creatorAddress, 'draw', stakeAmount),
+                    db.writeGameResult(opponentAddress, 'draw', stakeAmount)
+                ]);
+            }
+
+            await broadcastGroupGameUpdate('draw', {
+                roomId: roomIdStr,
+                creatorAddress,
+                opponentAddress,
+                stakeAmount,
+                creatorChoice,
+                opponentChoice
+            });
+
+            return;
+        }
+
+        if (!normalizedWinner) {
+            console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả nhưng không xác định được người thắng.`);
+            return;
+        }
+
+        console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả: ${normalizedWinner} thắng`);
+
+        const loserAddress = (normalizedWinner === creatorAddress) ? opponentAddress : creatorAddress;
+        if (!loserAddress) {
+            console.warn(`[SỰ KIỆN] Room ${roomIdStr} không xác định được người thua.`);
+            return;
+        }
+
+        const winnerLangs = await db.getUsersForWallet(normalizedWinner);
         const loserLangs = await db.getUsersForWallet(loserAddress);
         const winnerLang = (winnerLangs[0] || {}).lang || defaultLang;
         const loserLang = (loserLangs[0] || {}).lang || defaultLang;
+
+        const winnerIsCreator = (normalizedWinner === creatorAddress);
+        const winnerChoice = winnerIsCreator ? room.revealA : room.revealB;
+        const loserChoice = winnerIsCreator ? room.revealB : room.revealA;
 
         const winnerChoiceStr = getChoiceString(winnerChoice, winnerLang);
         const loserChoiceStr = getChoiceString(loserChoice, loserLang);
 
         await Promise.all([
-            sendInstantNotification(winnerAddress, 'notify_game_win',
+            sendInstantNotification(normalizedWinner, 'notify_game_win',
                 { roomId: roomIdStr, payout: payoutAmount, myChoice: winnerChoiceStr, opponentChoice: loserChoiceStr }
             ),
             sendInstantNotification(loserAddress, 'notify_game_lose',
-                { roomId: roomIdStr, winner: winnerAddress, myChoice: loserChoiceStr, opponentChoice: winnerChoiceStr }
+                { roomId: roomIdStr, winner: normalizedWinner, myChoice: loserChoiceStr, opponentChoice: winnerChoiceStr }
             )
         ]);
 
         await Promise.all([
-            db.writeGameResult(winnerAddress, 'win', stakeAmount),
+            db.writeGameResult(normalizedWinner, 'win', stakeAmount),
             db.writeGameResult(loserAddress, 'lose', stakeAmount)
         ]);
 
@@ -614,12 +678,12 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
             roomId: roomIdStr,
             creatorAddress,
             opponentAddress,
-            winnerAddress,
+            winnerAddress: normalizedWinner,
             loserAddress,
             stakeAmount,
             payoutAmount: parseFloat(payoutAmount),
-            creatorChoice: Number(room.revealA),
-            opponentChoice: Number(room.revealB)
+            creatorChoice,
+            opponentChoice
         });
     } catch (err) {
         console.error(`[Lỗi] Không thể lấy thông tin phòng ${roomIdStr} (sau resolve):`, err.message);
@@ -670,7 +734,9 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
     }
 
     if (reasonInfo.type === 'no_opponent') {
-        return t(lang, 'timeout_reason_no_opponent');
+        const baseReason = t(lang, 'timeout_reason_no_opponent');
+        const refundText = t(lang, 'timeout_refund_no_opponent');
+        return `${baseReason} ${refundText}`.trim();
     }
 
     if (reasonInfo.type === 'room_expired') {
@@ -706,7 +772,21 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
         ? 'timeout_reason_missing_commit'
         : 'timeout_reason_missing_reveal';
 
-    return t(lang, reasonKey, { subject: subjectText });
+    const baseReason = t(lang, reasonKey, { subject: subjectText });
+
+    let refundKey = null;
+    if (reasonInfo.type === 'missing_commit' && reasonInfo.subject === 'both') {
+        refundKey = 'timeout_refund_missing_commit_both';
+    } else if (reasonInfo.type === 'missing_reveal' && reasonInfo.subject === 'both') {
+        refundKey = 'timeout_refund_missing_reveal_both';
+    }
+
+    if (refundKey) {
+        const refundText = t(lang, refundKey);
+        return `${baseReason} ${refundText}`.trim();
+    }
+
+    return baseReason;
 }
 
 async function handleCanceledEvent(roomId) {
