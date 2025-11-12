@@ -1033,6 +1033,8 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
 
     let subjectText;
 
+    let claimerText = null;
+
     if (reasonInfo.subject === 'both') {
         subjectText = t(lang, 'timeout_subject_both');
         if (perspective === 'group') {
@@ -1049,6 +1051,14 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
         if (address) {
             subjectText += ` (${shortAddress(address)})`;
         }
+
+        const claimerRole = reasonInfo.subject === 'creator' ? 'challenger' : 'creator';
+        const claimerKey = claimerRole === 'creator' ? 'timeout_subject_creator' : 'timeout_subject_challenger';
+        claimerText = t(lang, claimerKey);
+        const claimerAddress = claimerRole === 'creator' ? addresses.creator : addresses.opponent;
+        if (claimerAddress) {
+            claimerText += ` (${shortAddress(claimerAddress)})`;
+        }
     } else {
         const isSelf = (reasonInfo.subject === 'creator' && perspective === 'creator') ||
             (reasonInfo.subject === 'opponent' && perspective === 'opponent');
@@ -1063,14 +1073,31 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
     const baseReason = t(lang, reasonKey, { subject: subjectText });
 
     let refundKey = null;
+    let refundVariables = {};
+    const isSelf = (reasonInfo.subject === 'creator' && perspective === 'creator') ||
+        (reasonInfo.subject === 'opponent' && perspective === 'opponent');
+
     if (reasonInfo.type === 'missing_commit' && reasonInfo.subject === 'both') {
         refundKey = 'timeout_refund_missing_commit_both';
     } else if (reasonInfo.type === 'missing_reveal' && reasonInfo.subject === 'both') {
         refundKey = 'timeout_refund_missing_reveal_both';
+    } else if (reasonInfo.type === 'missing_commit' || reasonInfo.type === 'missing_reveal') {
+        if (reasonInfo.subject === 'creator' || reasonInfo.subject === 'opponent') {
+            if (perspective === 'group') {
+                refundKey = reasonInfo.subject === 'creator'
+                    ? 'timeout_refund_missing_single_creator'
+                    : 'timeout_refund_missing_single_challenger';
+                refundVariables = { claimer: claimerText || '' };
+            } else {
+                refundKey = isSelf
+                    ? 'timeout_refund_missing_single_self'
+                    : 'timeout_refund_missing_single_opponent';
+            }
+        }
     }
 
     if (refundKey) {
-        const refundText = t(lang, refundKey);
+        const refundText = t(lang, refundKey, refundVariables);
         return `${baseReason} ${refundText}`.trim();
     }
 
