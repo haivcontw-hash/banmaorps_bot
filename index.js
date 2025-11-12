@@ -20,6 +20,34 @@ const API_PORT = 3000;
 const WEB_URL = "https://www.banmao.fun";
 const defaultLang = 'en';
 const roomCache = new Map();
+const finalRoomOutcomes = new Map();
+
+function markRoomFinalOutcome(roomId, outcome) {
+    const roomIdStr = toRoomIdString(roomId);
+    const record = { outcome, recordedAt: Date.now() };
+    finalRoomOutcomes.set(roomIdStr, record);
+
+    const timeout = setTimeout(() => {
+        const existing = finalRoomOutcomes.get(roomIdStr);
+        if (existing && existing.recordedAt === record.recordedAt) {
+            finalRoomOutcomes.delete(roomIdStr);
+        }
+    }, 60 * 60 * 1000);
+
+    if (typeof timeout.unref === 'function') {
+        timeout.unref();
+    }
+
+    return record;
+}
+
+function getRoomFinalOutcome(roomId) {
+    return finalRoomOutcomes.get(toRoomIdString(roomId)) || null;
+}
+
+function clearRoomFinalOutcome(roomId) {
+    finalRoomOutcomes.delete(toRoomIdString(roomId));
+}
 
 // --- Kiểm tra Cấu hình ---
 if (!TELEGRAM_TOKEN || !RPC_URL || !CONTRACT_ADDRESS) {
@@ -631,6 +659,8 @@ async function handleRoomCreatedEvent(roomId, creator, stake) {
     const roomIdStr = toRoomIdString(roomId);
     console.log(`[SỰ KIỆN] Room ${roomIdStr} được tạo bởi ${creator}`);
     try {
+        clearRoomFinalOutcome(roomId);
+
         const creatorAddress = normalizeAddress(creator);
         let stakeWei;
         if (typeof stake === 'bigint') {
@@ -782,6 +812,8 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
         if (isDraw) {
             console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả hòa.`);
 
+            markRoomFinalOutcome(roomId, 'draw');
+
             const creatorLangs = await db.getUsersForWallet(creatorAddress);
             const opponentLangs = opponentAddress ? await db.getUsersForWallet(opponentAddress) : [];
             const creatorLang = (creatorLangs[0] || {}).lang || defaultLang;
@@ -835,6 +867,8 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
         }
 
         console.log(`[SỰ KIỆN] Room ${roomIdStr} có kết quả: ${normalizedWinner} thắng`);
+
+        markRoomFinalOutcome(roomId, 'win');
 
         const loserAddress = normalizedWinner === creatorAddress ? opponentAddress : creatorAddress;
         if (!loserAddress) {
@@ -999,6 +1033,15 @@ function translateClaimTimeoutReason(lang, reasonInfo, perspective, addresses = 
 async function handleCanceledEvent(roomId) {
     const roomIdStr = toRoomIdString(roomId);
     console.log(`[SỰ KIỆN] Room ${roomIdStr} đã bị hủy (Claim Timeout)`);
+
+    const existingOutcome = getRoomFinalOutcome(roomId);
+    if (existingOutcome && existingOutcome.outcome !== 'timeout') {
+        console.log(`[Timeout] Room ${roomIdStr} đã được đánh dấu '${existingOutcome.outcome}', bỏ qua thông báo claim timeout.`);
+        return;
+    }
+
+    markRoomFinalOutcome(roomId, 'timeout');
+
     try {
         const roomState = await getRoomState(roomId, { refresh: true }) || await getRoomState(roomId, { refresh: false });
         if (!roomState) {
@@ -1063,6 +1106,8 @@ async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
     console.log(`[SỰ KIỆN] Room ${roomIdStr} có người bỏ cuộc: ${loser}`);
     const payoutAmount = ethers.formatEther(winnerPayout);
     const stakeAmount = parseFloat(ethers.formatEther(winnerPayout)) / 1.8;
+
+    markRoomFinalOutcome(roomId, 'forfeit');
 
     try {
         const winnerAddress = ethers.getAddress(winner);
