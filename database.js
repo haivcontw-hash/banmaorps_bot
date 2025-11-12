@@ -72,7 +72,7 @@ async function init() {
 // --- Hàm xử lý User & Wallet ---
 
 async function addWalletToUser(chatId, lang, walletAddress) {
-    const normalizedLang = normalizeLanguageCode(lang);
+    const normalizedLangInput = normalizeLanguageCode(lang);
     const normalizedAddr = ethers.getAddress(walletAddress);
     let user = await dbGet('SELECT * FROM users WHERE chatId = ?', [chatId]);
 
@@ -81,9 +81,12 @@ async function addWalletToUser(chatId, lang, walletAddress) {
         if (!wallets.includes(normalizedAddr)) {
             wallets.push(normalizedAddr);
         }
-        await dbRun('UPDATE users SET lang = ?, wallets = ? WHERE chatId = ?', [normalizedLang, JSON.stringify(wallets), chatId]);
+        const hasStoredLang = typeof user.lang === 'string' && user.lang.trim().length > 0;
+        const normalizedStored = hasStoredLang ? normalizeLanguageCode(user.lang) : null;
+        const langToPersist = normalizedStored || normalizedLangInput;
+        await dbRun('UPDATE users SET lang = ?, wallets = ? WHERE chatId = ?', [langToPersist, JSON.stringify(wallets), chatId]);
     } else {
-        await dbRun('INSERT INTO users (chatId, lang, wallets) VALUES (?, ?, ?)', [chatId, normalizedLang, JSON.stringify([normalizedAddr])]);
+        await dbRun('INSERT INTO users (chatId, lang, wallets) VALUES (?, ?, ?)', [chatId, normalizedLangInput, JSON.stringify([normalizedAddr])]);
     }
     console.log(`[DB] Đã thêm/cập nhật ví ${normalizedAddr} cho chatId ${chatId}`);
 }
