@@ -251,6 +251,10 @@ async function getAllCustomMessages() {
     return dbAll('SELECT lang, messageKey, messageText FROM custom_messages');
 }
 
+async function getCustomMessagesByLang(lang) {
+    return dbAll('SELECT lang, messageKey, messageText, updatedBy, updatedAt FROM custom_messages WHERE lang = ? ORDER BY messageKey ASC', [lang]);
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -272,5 +276,6 @@ module.exports = {
     upsertCustomMessage,
     removeCustomMessage,
     getCustomMessage,
-    getAllCustomMessages
+    getAllCustomMessages,
+    getCustomMessagesByLang
 };

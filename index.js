@@ -119,6 +119,19 @@ const supportedLanguages = fs.readdirSync(localesDir)
     .filter((file) => file.endsWith('.json'))
     .map((file) => file.replace('.json', ''));
 
+const languageLabels = {
+    en: '🇺🇸 English',
+    vi: '🇻🇳 Tiếng Việt',
+    zh: '🇨🇳 中文',
+    ru: '🇷🇺 Русский',
+    id: '🇮🇩 Bahasa Indonesia',
+    ko: '🇰🇷 한국어',
+};
+
+function getLanguageLabel(code) {
+    return languageLabels[code] || code.toUpperCase();
+}
+
 // --- Kiểm tra Cấu hình ---
 if (!TELEGRAM_TOKEN || !RPC_URL || !CONTRACT_ADDRESS) {
     console.error("LỖI NGHIÊM TRỌNG: Thiếu TELEGRAM_TOKEN, RPC_URL, hoặc CONTRACT_ADDRESS trong file .env!");
@@ -134,6 +147,7 @@ let contract = null;
 let reconnectTimeout = null;
 let reconnectAttempts = 0;
 const customMessageCache = new Map();
+const ownerInteractionState = new Map();
 
 const overrideKey = (lang, key) => `${lang}::${key}`;
 
@@ -288,6 +302,79 @@ async function getLang(msg) {
 
 function startTelegramBot() {
 
+    function buildOwnerPanelText(lang) {
+        const lines = [
+            t(lang, 'owner_panel_title'),
+            '',
+            t(lang, 'owner_panel_summary'),
+            '',
+            t(lang, 'owner_panel_table_header'),
+            t(lang, 'owner_panel_row_feed'),
+            t(lang, 'owner_panel_row_custom'),
+            t(lang, 'owner_panel_row_help'),
+            '',
+            t(lang, 'owner_panel_actions_prompt')
+        ];
+        return lines.join('\n');
+    }
+
+    function buildOwnerPanelKeyboard(lang) {
+        return [
+            [{ text: t(lang, 'owner_btn_manage_messages'), callback_data: 'owner|menu|edit' }],
+            [{ text: t(lang, 'owner_btn_reset_messages'), callback_data: 'owner|menu|reset' }],
+            [{ text: t(lang, 'owner_btn_preview_message'), callback_data: 'owner|menu|preview' }],
+            [{ text: t(lang, 'owner_btn_list_overrides'), callback_data: 'owner|menu|list' }],
+            [{ text: t(lang, 'owner_btn_close'), callback_data: 'owner|menu|close' }]
+        ];
+    }
+
+    function buildLanguageKeyboard(userLang, prefix, options = {}) {
+        const keyboard = [];
+        let row = [];
+        const codes = Array.isArray(options.allowedLanguages) && options.allowedLanguages.length > 0
+            ? options.allowedLanguages
+            : supportedLanguages;
+        for (const code of codes) {
+            row.push({ text: getLanguageLabel(code), callback_data: `${prefix}|${code}` });
+            if (row.length === 2) {
+                keyboard.push(row);
+                row = [];
+            }
+        }
+        if (row.length > 0) {
+            keyboard.push(row);
+        }
+
+        const tailRow = [];
+        if (options.includeBack) {
+            const backCallback = options.backCallback || 'owner|menu|back';
+            tailRow.push({ text: t(userLang, 'owner_btn_back'), callback_data: backCallback });
+        }
+        if (options.includeCancel !== false) {
+            tailRow.push({ text: t(userLang, 'owner_btn_cancel'), callback_data: 'owner|cancel' });
+        }
+        if (tailRow.length > 0) {
+            keyboard.push(tailRow);
+        }
+
+        return keyboard;
+    }
+
+    function summarizeOverrideSnippet(text) {
+        if (!text) {
+            return '';
+        }
+        const singleLine = text.replace(/\s+/g, ' ').trim();
+        if (singleLine.length <= 80) {
+            return singleLine;
+        }
+        return `${singleLine.slice(0, 77)}…`;
+    }
+
+    function clearOwnerState(chatId) {
+        ownerInteractionState.delete(chatId);
+    }
+
     async function ensureOwner(msg) {
         if (isBotOwner(msg.from)) {
             return true;
@@ -296,6 +383,73 @@ function startTelegramBot() {
         const lang = await getLang(msg);
         await bot.sendMessage(chatId, t(lang, 'owner_only_command'), { parse_mode: "Markdown" });
         return false;
+    }
+
+    async function ensureOwnerCallback(query, lang) {
+        if (isBotOwner(query.from)) {
+            return true;
+        }
+        await bot.answerCallbackQuery(query.id, { text: t(lang, 'owner_only_command'), show_alert: true });
+        return false;
+    }
+
+    async function sendOwnerPanel(chatId, lang) {
+        const text = buildOwnerPanelText(lang);
+        const options = {
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true,
+            reply_markup: {
+                inline_keyboard: buildOwnerPanelKeyboard(lang)
+            }
+        };
+        return bot.sendMessage(chatId, text, options);
+    }
+
+    async function promptLanguageSelection(chatId, lang, mode, allowedLanguages = []) {
+        const keyboard = buildLanguageKeyboard(lang, `owner|${mode}|lang`, {
+            allowedLanguages,
+            includeBack: false
+        });
+        const promptKey =
+            mode === 'edit'
+                ? 'owner_select_language_prompt'
+                : mode === 'reset'
+                    ? 'owner_select_override_language_prompt'
+                    : 'owner_select_preview_language_prompt';
+        return bot.sendMessage(chatId, t(lang, promptKey), {
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    }
+
+    async function sendOverrideKeySelector(chatId, userLang, targetLang, mode) {
+        const overrides = await db.getCustomMessagesByLang(targetLang);
+        if (!overrides || overrides.length === 0) {
+            return bot.sendMessage(chatId, t(userLang, 'owner_override_list_empty', { lang: targetLang.toUpperCase() }), { parse_mode: 'Markdown' });
+        }
+
+        const prefix = mode === 'reset' ? 'owner|reset|key' : 'owner|preview|key';
+        const keyboard = overrides.map((item) => ([{
+            text: item.messageKey,
+            callback_data: `${prefix}|${targetLang}|${item.messageKey}`
+        }]));
+        keyboard.push([{ text: t(userLang, 'owner_btn_back'), callback_data: `owner|menu|${mode}` }]);
+        keyboard.push([{ text: t(userLang, 'owner_btn_cancel'), callback_data: 'owner|cancel' }]);
+
+        return bot.sendMessage(chatId, t(userLang, 'owner_override_list_header', { lang: targetLang.toUpperCase() }), {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    }
+
+    function groupOverridesByLanguage(overrides) {
+        const map = new Map();
+        for (const entry of overrides) {
+            if (!map.has(entry.lang)) {
+                map.set(entry.lang, []);
+            }
+            map.get(entry.lang).push(entry);
+        }
+        return map;
     }
 
     // Xử lý /start CÓ token (Từ DApp) - Cần async
@@ -391,7 +545,17 @@ function startTelegramBot() {
         message += `• ${t(lang, 'stats_line_3', { amount: totalStats.totalWon.toFixed(2) })}\n`;
         message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
         message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
-            bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+        bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+    });
+
+    bot.onText(/\/ownersettings/, async (msg) => {
+        if (!(await ensureOwner(msg))) {
+            return;
+        }
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+        clearOwnerState(chatId);
+        await sendOwnerPanel(chatId, lang);
     });
 
     bot.onText(/\/help/, async (msg) => {
@@ -415,6 +579,7 @@ function startTelegramBot() {
         lines.push('');
         lines.push(t(lang, 'help_section_owner'));
         if (isBotOwner(msg.from)) {
+            lines.push(`• ${t(lang, 'help_cmd_ownersettings')}`);
             lines.push(`• ${t(lang, 'help_cmd_setmessage')}`);
             lines.push(`• ${t(lang, 'help_cmd_resetmessage')}`);
             lines.push(`• ${t(lang, 'help_cmd_showmessage')}`);
@@ -600,6 +765,59 @@ function startTelegramBot() {
         bot.sendMessage(chatId, text, options);
     });
 
+    bot.on('message', async (msg) => {
+        if (!msg || typeof msg.text === 'undefined') {
+            return;
+        }
+        const chatId = msg.chat.id.toString();
+        const state = ownerInteractionState.get(chatId);
+        if (!state) {
+            return;
+        }
+        if (!isBotOwner(msg.from) || String(msg.from.id) !== String(state.userId)) {
+            return;
+        }
+
+        const userLang = await getLang(msg);
+        const trimmed = msg.text.trim();
+
+        if (trimmed.startsWith('/')) {
+            if (trimmed.toLowerCase() === '/cancel') {
+                clearOwnerState(chatId);
+                bot.sendMessage(chatId, t(userLang, 'owner_override_cancelled'));
+            }
+            return;
+        }
+
+        if (state.stage === 'awaiting_key') {
+            if (!trimmed) {
+                bot.sendMessage(chatId, t(userLang, 'owner_override_missing_key'));
+                return;
+            }
+            state.key = trimmed;
+            state.stage = 'awaiting_text';
+            ownerInteractionState.set(chatId, state);
+            bot.sendMessage(chatId, t(userLang, 'owner_prompt_message_text', {
+                lang: state.lang.toUpperCase(),
+                key: state.key
+            }), { parse_mode: 'Markdown' });
+            return;
+        }
+
+        if (state.stage === 'awaiting_text') {
+            const messageText = msg.text.trim();
+            if (!messageText) {
+                bot.sendMessage(chatId, t(userLang, 'custom_message_missing_text'));
+                return;
+            }
+            await db.upsertCustomMessage(state.lang, state.key, messageText, String(msg.from.id));
+            customMessageCache.set(overrideKey(state.lang, state.key), messageText);
+            clearOwnerState(chatId);
+            bot.sendMessage(chatId, t(userLang, 'custom_message_saved', { lang: state.lang, key: state.key }), { parse_mode: 'Markdown' });
+            return;
+        }
+    });
+
     // Xử lý tất cả CALLBACK QUERY (Nút bấm) - Cần async
     bot.on('callback_query', async (query) => {
         const chatId = query.message.chat.id.toString();
@@ -627,6 +845,150 @@ function startTelegramBot() {
                     const message = t(lang, 'unregister_one_success', { wallet: walletToDelete }); // Dùng lang đã lưu
                     bot.editMessageText(message, { chat_id: chatId, message_id: query.message.message_id });
                     bot.answerCallbackQuery(queryId, { text: message });
+                }
+            }
+            else if (query.data.startsWith('owner|')) {
+                if (!(await ensureOwnerCallback(query, lang))) {
+                    return;
+                }
+
+                const parts = query.data.split('|');
+                const scope = parts[1];
+
+                if (scope === 'menu') {
+                    const menuAction = parts[2];
+                    if (menuAction === 'edit') {
+                        clearOwnerState(chatId);
+                        await bot.answerCallbackQuery(queryId);
+                        await promptLanguageSelection(chatId, lang, 'edit');
+                    } else if (menuAction === 'reset') {
+                        clearOwnerState(chatId);
+                        const overrides = await db.getAllCustomMessages();
+                        const grouped = groupOverridesByLanguage(overrides);
+                        const languages = Array.from(grouped.keys());
+                        if (languages.length === 0) {
+                            await bot.answerCallbackQuery(queryId, { text: t(lang, 'owner_override_none'), show_alert: true });
+                        } else {
+                            await bot.answerCallbackQuery(queryId);
+                            await promptLanguageSelection(chatId, lang, 'reset', languages);
+                        }
+                    } else if (menuAction === 'preview') {
+                        clearOwnerState(chatId);
+                        const overrides = await db.getAllCustomMessages();
+                        const grouped = groupOverridesByLanguage(overrides);
+                        const languages = Array.from(grouped.keys());
+                        if (languages.length === 0) {
+                            await bot.answerCallbackQuery(queryId, { text: t(lang, 'owner_override_none'), show_alert: true });
+                        } else {
+                            await bot.answerCallbackQuery(queryId);
+                            await promptLanguageSelection(chatId, lang, 'preview', languages);
+                        }
+                    } else if (menuAction === 'list') {
+                        clearOwnerState(chatId);
+                        const overrides = await db.getAllCustomMessages();
+                        if (!overrides || overrides.length === 0) {
+                            await bot.answerCallbackQuery(queryId, { text: t(lang, 'owner_override_none'), show_alert: true });
+                            return;
+                        }
+                        const grouped = groupOverridesByLanguage(overrides);
+                        const lines = [t(lang, 'owner_override_summary_title'), ''];
+                        for (const [overrideLang, entries] of grouped.entries()) {
+                            lines.push(`${overrideLang.toUpperCase()} (${entries.length})`);
+                            for (const entry of entries.slice(0, 5)) {
+                                lines.push(` • ${entry.messageKey} → ${summarizeOverrideSnippet(entry.messageText)}`);
+                            }
+                            if (entries.length > 5) {
+                                lines.push(` • … +${entries.length - 5}`);
+                            }
+                            lines.push('');
+                        }
+                        await bot.answerCallbackQuery(queryId);
+                        bot.sendMessage(chatId, lines.join('\n').trim());
+                    } else if (menuAction === 'close') {
+                        clearOwnerState(chatId);
+                        await bot.answerCallbackQuery(queryId);
+                        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+                            chat_id: chatId,
+                            message_id: query.message.message_id
+                        });
+                    }
+                } else if (scope === 'edit') {
+                    const subAction = parts[2];
+                    if (subAction === 'lang') {
+                        const targetLang = parts[3];
+                        if (!isSupportedLanguage(targetLang)) {
+                            await bot.answerCallbackQuery(queryId, { text: t(lang, 'custom_message_invalid_language', { lang: targetLang }) });
+                            return;
+                        }
+                        ownerInteractionState.set(chatId, {
+                            userId: query.from.id,
+                            lang: targetLang,
+                            stage: 'awaiting_key'
+                        });
+                        await bot.answerCallbackQuery(queryId);
+                        bot.sendMessage(chatId, t(lang, 'owner_prompt_message_key', { lang: targetLang.toUpperCase() }), { parse_mode: 'Markdown' });
+                    }
+                } else if (scope === 'reset') {
+                    const subAction = parts[2];
+                    if (subAction === 'lang') {
+                        const targetLang = parts[3];
+                        if (!isSupportedLanguage(targetLang)) {
+                            await bot.answerCallbackQuery(queryId, { text: t(lang, 'custom_message_invalid_language', { lang: targetLang }) });
+                            return;
+                        }
+                        clearOwnerState(chatId);
+                        await bot.answerCallbackQuery(queryId);
+                        await sendOverrideKeySelector(chatId, lang, targetLang, 'reset');
+                    } else if (subAction === 'key') {
+                        const targetLang = parts[3];
+                        const messageKey = parts.slice(4).join('|');
+                        const removed = await db.removeCustomMessage(targetLang, messageKey);
+                        if (removed) {
+                            customMessageCache.delete(overrideKey(targetLang, messageKey));
+                            const langLabel = targetLang.toUpperCase();
+                            await bot.answerCallbackQuery(queryId, { text: t(lang, 'owner_override_reset_done', { lang: langLabel, key: messageKey }) });
+                            bot.sendMessage(chatId, t(lang, 'owner_override_reset_done', { lang: langLabel, key: messageKey }), { parse_mode: 'Markdown' });
+                            const remaining = await db.getCustomMessagesByLang(targetLang);
+                            if (remaining.length > 0) {
+                                await sendOverrideKeySelector(chatId, lang, targetLang, 'reset');
+                            } else {
+                                bot.sendMessage(chatId, t(lang, 'owner_override_list_empty', { lang: langLabel }), { parse_mode: 'Markdown' });
+                            }
+                        } else {
+                            await bot.answerCallbackQuery(queryId, { text: t(lang, 'owner_override_reset_missing', { lang: targetLang.toUpperCase(), key: messageKey }), show_alert: true });
+                        }
+                    }
+                } else if (scope === 'preview') {
+                    const subAction = parts[2];
+                    if (subAction === 'lang') {
+                        const targetLang = parts[3];
+                        if (!isSupportedLanguage(targetLang)) {
+                            await bot.answerCallbackQuery(queryId, { text: t(lang, 'custom_message_invalid_language', { lang: targetLang }) });
+                            return;
+                        }
+                        await bot.answerCallbackQuery(queryId);
+                        await sendOverrideKeySelector(chatId, lang, targetLang, 'preview');
+                    } else if (subAction === 'key') {
+                        const targetLang = parts[3];
+                        const messageKey = parts.slice(4).join('|');
+                        const cacheKey = overrideKey(targetLang, messageKey);
+                        const overrideText = customMessageCache.get(cacheKey);
+                        const lines = [t(lang, 'owner_override_preview_title', { lang: targetLang.toUpperCase(), key: messageKey })];
+                        if (overrideText) {
+                            lines.push('', t(lang, 'custom_message_preview_override', { lang: targetLang, key: messageKey }), '', overrideText);
+                        }
+                        const defaultText = t_(targetLang, messageKey, {});
+                        if (defaultText === messageKey && !overrideText) {
+                            lines.push('', t(lang, 'custom_message_not_found', { lang: targetLang, key: messageKey }));
+                        } else if (defaultText !== messageKey) {
+                            lines.push('', t(lang, 'custom_message_preview_default', { lang: targetLang, key: messageKey }), '', defaultText);
+                        }
+                        await bot.answerCallbackQuery(queryId);
+                        bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
+                    }
+                } else if (scope === 'cancel') {
+                    clearOwnerState(chatId);
+                    await bot.answerCallbackQuery(queryId, { text: t(lang, 'owner_override_cancelled') });
                 }
             }
         } catch (error) {
