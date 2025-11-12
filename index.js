@@ -1171,16 +1171,18 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
         const winnerChoice = winnerIsCreator ? creatorChoice : opponentChoice;
         const loserChoice = winnerIsCreator ? opponentChoice : creatorChoice;
 
-        const winnerChoiceStr = getChoiceString(winnerChoice, winnerLang);
-        const loserChoiceStr = getChoiceString(loserChoice, loserLang);
+        const winnerChoiceForWinnerLang = getChoiceString(winnerChoice, winnerLang);
+        const loserChoiceForWinnerLang = getChoiceString(loserChoice, winnerLang);
+        const winnerChoiceForLoserLang = getChoiceString(winnerChoice, loserLang);
+        const loserChoiceForLoserLang = getChoiceString(loserChoice, loserLang);
 
         await Promise.all([
             sendInstantNotification(normalizedWinner, 'notify_game_win', {
                 __messageBuilder: buildWinNotificationMessage,
                 roomId: roomIdStr,
                 payout: winnerPayoutText,
-                myChoice: winnerChoiceStr,
-                opponentChoice: loserChoiceStr,
+                myChoice: winnerChoiceForWinnerLang,
+                opponentChoice: loserChoiceForWinnerLang,
                 winnerPercent: '98%',
                 totalPot: totalPotText,
                 feePercent: '2%',
@@ -1192,8 +1194,8 @@ async function handleResolvedEvent(roomId, winner, payout, fee) {
                 __messageBuilder: buildLoseNotificationMessage,
                 roomId: roomIdStr,
                 winner: normalizedWinner,
-                myChoice: loserChoiceStr,
-                opponentChoice: winnerChoiceStr,
+                myChoice: loserChoiceForLoserLang,
+                opponentChoice: winnerChoiceForLoserLang,
                 lostAmount: loserLossText,
                 lostPercent: '100%',
                 opponentPayout: winnerPayoutText,
