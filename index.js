@@ -8,7 +8,7 @@ const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
-const { t_ } = require('./i18n.js');
+const { t_, normalizeLanguageCode } = require('./i18n.js');
 const db = require('./database.js'); 
 
 // --- CẤU HÌNH ---
@@ -67,6 +67,10 @@ let reconnectAttempts = 0;
 // Hàm 't' (translate) nội bộ
 function t(lang_code, key, variables = {}) {
     return t_(lang_code, key, variables);
+}
+
+function resolveLangCode(lang_code) {
+    return normalizeLanguageCode(lang_code || defaultLang);
 }
 
 // ===== HÀM HELPER: Dịch Lựa chọn (Kéo/Búa/Bao) =====
@@ -600,14 +604,17 @@ function startApiServer() {
 // Lấy ngôn ngữ ĐÃ LƯU của user, nếu không có thì set ngôn ngữ mặc định
 async function getLang(msg) {
     const chatId = msg.chat.id.toString();
-    const detectedLang = msg.from.language_code || defaultLang; // Ngôn ngữ từ TG
+    const detectedLang = resolveLangCode(msg.from.language_code); // Ngôn ngữ từ TG
 
     let savedLang = await db.getUserLanguage(chatId); // Thử đọc từ DB
-    
+
     if (savedLang) {
-        return savedLang; // Đã tìm thấy, trả về ngôn ngữ đã lưu
+        const normalizedSaved = resolveLangCode(savedLang);
+        if (normalizedSaved !== savedLang) {
+            await db.setLanguage(chatId, normalizedSaved);
+        }
+        return normalizedSaved;
     } else {
-        // User mới, hoặc user cũ nhưng chưa có lang
         await db.setLanguage(chatId, detectedLang); // Lưu ngôn ngữ mặc định
         return detectedLang; // Trả về ngôn ngữ mặc định
     }
@@ -621,7 +628,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
-        const lang = msg.from.language_code || defaultLang; 
+        const lang = resolveLangCode(msg.from.language_code);
         const walletAddress = await db.getPendingWallet(token); 
         if (walletAddress) {
             await db.addWalletToUser(chatId, lang, walletAddress);
@@ -716,7 +723,7 @@ function startTelegramBot() {
     bot.onText(/\/banmaofeed(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
-        const userLang = msg.from.language_code || defaultLang;
+        const userLang = resolveLangCode(msg.from.language_code);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
             bot.sendMessage(chatId, t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
@@ -832,7 +839,7 @@ function startTelegramBot() {
         
         try {
             if (query.data.startsWith('lang_')) {
-                const newLang = query.data.split('_')[1];
+                const newLang = resolveLangCode(query.data.split('_')[1]);
                 await db.setLanguage(chatId, newLang);
                 const message = t(newLang, 'language_changed_success'); // Dùng newLang
                 bot.sendMessage(chatId, message);
@@ -1579,32 +1586,33 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
     }
 
     const tasks = users.map(async ({ chatId, lang }) => {
+        const langCode = resolveLangCode(lang);
         const resolvedVariables = { ...variables };
 
         if (resolvedVariables.reasonInfo) {
             const info = resolvedVariables.reasonInfo.info;
             const perspective = resolvedVariables.reasonInfo.perspective || 'creator';
             const addresses = resolvedVariables.reasonInfo.addresses || {};
-            resolvedVariables.reason = translateClaimTimeoutReason(lang, info, perspective, addresses);
+            resolvedVariables.reason = translateClaimTimeoutReason(langCode, info, perspective, addresses);
             delete resolvedVariables.reasonInfo;
         }
 
-        applyChoiceTranslations(lang, resolvedVariables);
+        applyChoiceTranslations(langCode, resolvedVariables);
 
         let message;
 
         if (typeof resolvedVariables.__messageBuilder === 'function') {
             const builder = resolvedVariables.__messageBuilder;
             delete resolvedVariables.__messageBuilder;
-            message = builder(lang, resolvedVariables);
+            message = builder(langCode, resolvedVariables);
         }
 
         if (!message) {
-            message = t(lang, langKey, resolvedVariables);
+            message = t(langCode, langKey, resolvedVariables);
         }
 
         const button = {
-            text: `🎮 ${t(lang, 'action_button_play')}`,
+            text: `🎮 ${t(langCode, 'action_button_play')}`,
             url: `${WEB_URL}/?join=${variables.roomId || ''}`
         };
 
@@ -1648,7 +1656,7 @@ async function broadcastGroupGameUpdate(eventType, payload) {
             return;
         }
 
-        const lang = group.lang || defaultLang;
+        const lang = resolveLangCode(group.lang);
         const messagePayload = buildGroupBroadcastMessage(eventType, lang, payload);
         if (!messagePayload) {
             return;
