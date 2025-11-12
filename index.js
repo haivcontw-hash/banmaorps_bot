@@ -79,6 +79,33 @@ function getChoiceString(choice, lang) {
 }
 // =======================================================
 
+function buildDrawNotificationMessage(lang, variables) {
+    const lines = [
+        t(lang, 'notify_game_draw_header', { roomId: variables.roomId }),
+        '',
+        t(lang, 'notify_game_draw_overview', {
+            refundPercent: variables.refundPercent,
+            feePercent: variables.feePercent
+        }),
+        '',
+        t(lang, 'notify_game_draw_breakdown_title'),
+        t(lang, 'notify_game_draw_breakdown_you', {
+            refundAmount: variables.refundAmount,
+            refundPercent: variables.refundPercent,
+            stakeAmount: variables.stakeAmount
+        }),
+        t(lang, 'notify_game_draw_breakdown_fee', {
+            feeAmount: variables.feeAmount,
+            feePercent: variables.feePercent
+        }),
+        '',
+        t(lang, 'notify_game_draw_reason', { choice: variables.choice })
+    ];
+
+    return lines.join('\n');
+}
+
+
 function shortAddress(address) {
     if (!address) return '-';
     try {
@@ -339,28 +366,29 @@ async function finalizeDrawOutcome(roomId, roomState, { source = 'DrawCheck' } =
     const creatorChoiceStr = getChoiceString(creatorChoice, creatorLang);
     const opponentChoiceStr = getChoiceString(opponentChoice, opponentLang);
 
+    const baseDrawVariables = {
+        roomId: roomIdStr,
+        refundAmount: refundAmountText,
+        refundPercent: '98%',
+        stakeAmount: stakeAmountText,
+        feePercent: '2%',
+        feeAmount: feeAmountText
+    };
+
     const notifyTasks = [
         sendInstantNotification(creatorAddress, 'notify_game_draw', {
-            roomId: roomIdStr,
+            ...baseDrawVariables,
             choice: creatorChoiceStr,
-            refundAmount: refundAmountText,
-            refundPercent: '98%',
-            stakeAmount: stakeAmountText,
-            feePercent: '2%',
-            feeAmount: feeAmountText
+            __messageBuilder: (lang, vars) => buildDrawNotificationMessage(lang, vars)
         })
     ];
 
     if (opponentAddress) {
         notifyTasks.push(
             sendInstantNotification(opponentAddress, 'notify_game_draw', {
-                roomId: roomIdStr,
+                ...baseDrawVariables,
                 choice: opponentChoiceStr,
-                refundAmount: refundAmountText,
-                refundPercent: '98%',
-                stakeAmount: stakeAmountText,
-                feePercent: '2%',
-                feeAmount: feeAmountText
+                __messageBuilder: (lang, vars) => buildDrawNotificationMessage(lang, vars)
             })
         );
     }
@@ -1384,7 +1412,17 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
             delete resolvedVariables.reasonInfo;
         }
 
-        const message = t(lang, langKey, resolvedVariables);
+        let message;
+
+        if (typeof resolvedVariables.__messageBuilder === 'function') {
+            const builder = resolvedVariables.__messageBuilder;
+            delete resolvedVariables.__messageBuilder;
+            message = builder(lang, resolvedVariables);
+        }
+
+        if (!message) {
+            message = t(lang, langKey, resolvedVariables);
+        }
 
         const button = {
             text: `🎮 ${t(lang, 'action_button_play')}`,
