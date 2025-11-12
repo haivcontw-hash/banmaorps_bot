@@ -173,6 +173,17 @@ function mergeRoomData(existing = {}, incoming = {}) {
             }
         }
 
+        if ((key === 'commitA' || key === 'commitB') && existing) {
+            const existingValue = existing[key];
+            const incomingValue = value;
+            const isExistingSet = Boolean(existingValue && existingValue !== ethers.ZeroHash);
+            const isIncomingUnset = !incomingValue || incomingValue === ethers.ZeroHash;
+
+            if (isExistingSet && isIncomingUnset) {
+                continue;
+            }
+        }
+
         if ((key === 'revealA' || key === 'revealB') && value === 0 && existing && typeof existing[key] === 'number' && existing[key] !== 0) {
             continue;
         }
