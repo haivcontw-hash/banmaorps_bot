@@ -69,6 +69,7 @@
   "help_cmd_setmessage": "/setmessage <lang> <key> <text> — 拥有者自定义任意通知文案。",
   "help_cmd_resetmessage": "/resetmessage <lang> <key> — 拥有者删除自定义文案。",
   "help_cmd_showmessage": "/showmessage <lang> <key> — 拥有者查看当前文案。",
+  "help_owner_only_hint": "仅限机器人拥有者使用，请联系拥有者以取得权限。",
   "owner_only_command": "❌ 只有机器人拥有者可以使用该指令。",
   "custom_message_invalid_language": "❌ 尚未支持 `{lang}` 语言。",
   "custom_message_missing_text": "❌ 请填写要替换的文本。",

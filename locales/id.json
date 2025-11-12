@@ -69,6 +69,7 @@
   "help_cmd_setmessage": "/setmessage <lang> <key> <text> — Pemilik mengganti teks notifikasi.",
   "help_cmd_resetmessage": "/resetmessage <lang> <key> — Pemilik menghapus teks kustom.",
   "help_cmd_showmessage": "/showmessage <lang> <key> — Pemilik melihat teks yang dipakai.",
+  "help_owner_only_hint": "Perintah khusus pemilik bot. Hubungi pemilik untuk akses.",
   "owner_only_command": "❌ Hanya pemilik bot yang boleh memakai perintah ini.",
   "custom_message_invalid_language": "❌ Bahasa `{lang}` belum didukung.",
   "custom_message_missing_text": "❌ Silakan isi teks pengganti.",

@@ -69,6 +69,7 @@
   "help_cmd_setmessage": "/setmessage <lang> <key> <text> — Owner override for any notification text.",
   "help_cmd_resetmessage": "/resetmessage <lang> <key> — Owner removes a custom override.",
   "help_cmd_showmessage": "/showmessage <lang> <key> — Owner previews the current text.",
+  "help_owner_only_hint": "Owner-only commands. Ask the bot owner for access.",
   "owner_only_command": "❌ Only the bot owner can use this command.",
   "custom_message_invalid_language": "❌ Language `{lang}` is not supported.",
   "custom_message_missing_text": "❌ Please provide the replacement text.",

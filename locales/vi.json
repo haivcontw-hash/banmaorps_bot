@@ -69,6 +69,7 @@
   "help_cmd_setmessage": "/setmessage <lang> <key> <text> — Chủ bot thay nội dung thông báo.",
   "help_cmd_resetmessage": "/resetmessage <lang> <key> — Chủ bot bỏ tùy chỉnh thông báo.",
   "help_cmd_showmessage": "/showmessage <lang> <key> — Chủ bot xem nội dung hiện tại.",
+  "help_owner_only_hint": "Chỉ chủ bot mới dùng được. Liên hệ chủ bot để cấp quyền.",
   "owner_only_command": "❌ Chỉ chủ sở hữu bot mới được dùng lệnh này.",
   "custom_message_invalid_language": "❌ Ngôn ngữ `{lang}` hiện chưa được hỗ trợ.",
   "custom_message_missing_text": "❌ Vui lòng nhập nội dung thay thế.",

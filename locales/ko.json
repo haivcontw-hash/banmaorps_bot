@@ -69,6 +69,7 @@
   "help_cmd_setmessage": "/setmessage <lang> <key> <text> — 소유자가 알림 문구를 덮어씁니다.",
   "help_cmd_resetmessage": "/resetmessage <lang> <key> — 소유자가 맞춤 문구를 삭제합니다.",
   "help_cmd_showmessage": "/showmessage <lang> <key> — 소유자가 현재 문구를 확인합니다.",
+  "help_owner_only_hint": "봇 소유자 전용 명령입니다. 권한이 필요하면 소유자에게 문의하세요.",
   "owner_only_command": "❌ 이 명령어는 봇 소유자만 사용할 수 있습니다.",
   "custom_message_invalid_language": "❌ `{lang}` 언어는 아직 지원되지 않습니다.",
   "custom_message_missing_text": "❌ 대체할 문구를 입력하세요.",

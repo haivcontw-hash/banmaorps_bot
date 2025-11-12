@@ -20,10 +20,55 @@ const contractABI = require('./BanmaoRPS_ABI.json');
 const API_PORT = 3000;
 const WEB_URL = "https://www.banmao.fun";
 const defaultLang = 'en';
-const BOT_OWNER_IDS = (process.env.BOT_OWNER_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter((id) => id.length > 0);
+
+function normalizeOwnerToken(token) {
+    if (!token) {
+        return null;
+    }
+    const trimmed = token.trim().replace(/^['"\[]+|['"\]]+$/g, '');
+    if (!trimmed) {
+        return null;
+    }
+    return trimmed;
+}
+
+function collectOwnerEntries(rawValue, collector) {
+    if (!rawValue) {
+        return;
+    }
+    const parts = rawValue.split(/[,\s]+/);
+    for (const part of parts) {
+        const cleaned = normalizeOwnerToken(part);
+        if (!cleaned) {
+            continue;
+        }
+        collector(cleaned);
+    }
+}
+
+const ownerIdSet = new Set();
+const ownerUsernameSet = new Set();
+
+function registerOwnerEntry(entry, options = { allowUsername: true }) {
+    if (!entry) {
+        return;
+    }
+    if (/^-?\d+$/.test(entry)) {
+        ownerIdSet.add(entry.replace(/^[+]/, ''));
+        return;
+    }
+    if (!options.allowUsername) {
+        return;
+    }
+    ownerUsernameSet.add(entry.replace(/^@/, '').toLowerCase());
+}
+
+collectOwnerEntries(process.env.BOT_OWNER_IDS, (entry) => registerOwnerEntry(entry));
+collectOwnerEntries(process.env.BOT_OWNER_ID, (entry) => registerOwnerEntry(entry));
+collectOwnerEntries(process.env.BOT_OWNER_USERNAMES, (entry) => registerOwnerEntry(entry));
+collectOwnerEntries(process.env.BOT_OWNER_USERNAME, (entry) => registerOwnerEntry(entry));
+collectOwnerEntries(process.env.OWNER_TELEGRAM_ID, (entry) => registerOwnerEntry(entry, { allowUsername: false }));
+collectOwnerEntries(process.env.OWNER_TG_ID, (entry) => registerOwnerEntry(entry, { allowUsername: false }));
 
 const localesDir = path.join(__dirname, 'locales');
 const supportedLanguages = fs.readdirSync(localesDir)
@@ -85,8 +130,19 @@ function isSupportedLanguage(lang) {
     return supportedLanguages.includes(lang);
 }
 
-function isBotOwner(userId) {
-    return BOT_OWNER_IDS.includes(String(userId));
+function isBotOwner(user) {
+    if (!user) {
+        return false;
+    }
+    const userId = String(user.id);
+    if (ownerIdSet.has(userId) || ownerIdSet.has(userId.replace(/^[+]/, ''))) {
+        return true;
+    }
+    const username = (user.username || '').toLowerCase();
+    if (username && ownerUsernameSet.has(username)) {
+        return true;
+    }
+    return false;
 }
 
 // ===== HÀM HELPER: Dịch Lựa chọn (Kéo/Búa/Bao) =====
@@ -186,7 +242,7 @@ async function getLang(msg) {
 function startTelegramBot() {
 
     async function ensureOwner(msg) {
-        if (isBotOwner(msg.from.id)) {
+        if (isBotOwner(msg.from)) {
             return true;
         }
         const chatId = msg.chat.id.toString();
@@ -311,9 +367,13 @@ function startTelegramBot() {
 
         lines.push('');
         lines.push(t(lang, 'help_section_owner'));
-        lines.push(`• ${t(lang, 'help_cmd_setmessage')}`);
-        lines.push(`• ${t(lang, 'help_cmd_resetmessage')}`);
-        lines.push(`• ${t(lang, 'help_cmd_showmessage')}`);
+        if (isBotOwner(msg.from)) {
+            lines.push(`• ${t(lang, 'help_cmd_setmessage')}`);
+            lines.push(`• ${t(lang, 'help_cmd_resetmessage')}`);
+            lines.push(`• ${t(lang, 'help_cmd_showmessage')}`);
+        } else {
+            lines.push(`• ${t(lang, 'help_owner_only_hint')}`);
+        }
 
         const message = lines.join('\n');
         bot.sendMessage(chatId, message, { parse_mode: "Markdown", disable_web_page_preview: true });

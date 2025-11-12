@@ -69,6 +69,7 @@
   "help_cmd_setmessage": "/setmessage <lang> <key> <text> — Владелец переопределяет текст уведомления.",
   "help_cmd_resetmessage": "/resetmessage <lang> <key> — Владелец удаляет собственный текст.",
   "help_cmd_showmessage": "/showmessage <lang> <key> — Владелец просматривает текущий текст.",
+  "help_owner_only_hint": "Команды только для владельца бота. Попросите владельца открыть доступ.",
   "owner_only_command": "❌ Эту команду может использовать только владелец бота.",
   "custom_message_invalid_language": "❌ Язык `{lang}` не поддерживается.",
   "custom_message_missing_text": "❌ Пожалуйста, введите текст замены.",
