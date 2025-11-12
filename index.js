@@ -606,18 +606,18 @@ async function getLang(msg) {
     const chatId = msg.chat.id.toString();
     const detectedLang = resolveLangCode(msg.from.language_code); // Ngôn ngữ từ TG
 
-    let savedLang = await db.getUserLanguage(chatId); // Thử đọc từ DB
-
-    if (savedLang) {
-        const normalizedSaved = resolveLangCode(savedLang);
-        if (normalizedSaved !== savedLang) {
-            await db.setLanguage(chatId, normalizedSaved);
+    const info = await db.getUserLanguageInfo(chatId);
+    if (info) {
+        const savedLang = resolveLangCode(info.lang);
+        if (info.source !== 'manual' && savedLang !== detectedLang) {
+            await db.setLanguageAuto(chatId, detectedLang);
+            return detectedLang;
         }
-        return normalizedSaved;
-    } else {
-        await db.setLanguage(chatId, detectedLang); // Lưu ngôn ngữ mặc định
-        return detectedLang; // Trả về ngôn ngữ mặc định
+        return savedLang;
     }
+
+    await db.setLanguageAuto(chatId, detectedLang);
+    return detectedLang;
 }
 // ======================================
 
