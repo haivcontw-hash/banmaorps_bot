@@ -603,17 +603,35 @@ function startApiServer() {
 // ===== HÀM HELPER MỚI (SỬA LỖI) =====
 // Lấy ngôn ngữ ĐÃ LƯU của user, nếu không có thì set ngôn ngữ mặc định
 async function getLang(msg) {
+    if (!msg || !msg.chat) {
+        return defaultLang;
+    }
+
     const chatId = msg.chat.id.toString();
-    const detectedLang = resolveLangCode(msg.from.language_code); // Ngôn ngữ từ TG
+    const detectedLang = resolveLangCode(msg?.from?.language_code);
 
     const info = await db.getUserLanguageInfo(chatId);
     if (info) {
         const savedLang = resolveLangCode(info.lang);
-        if (info.source !== 'manual' && savedLang !== detectedLang) {
-            await db.setLanguageAuto(chatId, detectedLang);
-            return detectedLang;
+        const source = info.source || 'auto';
+
+        if (source === 'manual') {
+            if (savedLang !== info.lang) {
+                await db.setLanguage(chatId, savedLang);
+            }
+            return savedLang;
         }
-        return savedLang;
+
+        if (savedLang !== detectedLang) {
+            await db.setLanguage(chatId, savedLang);
+            return savedLang;
+        }
+
+        if (savedLang !== info.lang || source !== info.source) {
+            await db.setLanguageAuto(chatId, savedLang);
+        }
+
+        return detectedLang;
     }
 
     await db.setLanguageAuto(chatId, detectedLang);
