@@ -78,6 +78,34 @@ function resolveLangCode(lang_code) {
     return normalizeLanguageCode(lang_code || defaultLang);
 }
 
+function escapeHtml(text) {
+    if (typeof text !== 'string') {
+        return '';
+    }
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function buildUserMention(user) {
+    if (!user) {
+        return { text: 'user', parseMode: null };
+    }
+
+    if (user.username) {
+        return { text: `@${user.username}`, parseMode: null };
+    }
+
+    const displayName = escapeHtml(user.first_name || user.last_name || 'user');
+    return {
+        text: `<a href="tg://user?id=${user.id}">${displayName}</a>`,
+        parseMode: 'HTML'
+    };
+}
+
 // ===== HÀM HELPER: Dịch Lựa chọn (Kéo/Búa/Bao) =====
 function getChoiceString(choice, lang) {
     const choiceNum = Number(choice);
@@ -817,6 +845,51 @@ function startTelegramBot() {
         }
     });
 
+    // COMMAND: /feedlang - Cấu hình ngôn ngữ cá nhân cho thông báo nhóm
+    bot.onText(/\/feedlang/, async (msg) => {
+        const chatId = msg.chat.id.toString();
+        const chatType = msg.chat.type;
+        const userId = msg.from.id.toString();
+        const fallbackLang = resolveLangCode(msg.from.language_code);
+
+        if (chatType !== 'group' && chatType !== 'supergroup') {
+            bot.sendMessage(chatId, t(fallbackLang, 'group_feed_member_language_group_only'), { parse_mode: "Markdown" });
+            return;
+        }
+
+        let preferredLang = fallbackLang;
+        try {
+            const savedLang = await db.getGroupMemberLanguage(chatId, userId);
+            if (savedLang) {
+                preferredLang = resolveLangCode(savedLang);
+            }
+        } catch (error) {
+            console.warn(`[GroupFeed] Không thể đọc ngôn ngữ cá nhân cho ${userId} trong ${chatId}: ${error.message}`);
+        }
+
+        const keyboard = [
+            [
+                { text: "🇻🇳 Tiếng Việt", callback_data: `feedlang|vi|${chatId}` },
+                { text: "🇺🇸 English", callback_data: `feedlang|en|${chatId}` }
+            ],
+            [
+                { text: "🇨🇳 中文", callback_data: `feedlang|zh|${chatId}` },
+                { text: "🇷🇺 Русский", callback_data: `feedlang|ru|${chatId}` }
+            ],
+            [
+                { text: "🇰🇷 한국어", callback_data: `feedlang|ko|${chatId}` },
+                { text: "🇮🇩 Indonesia", callback_data: `feedlang|id|${chatId}` }
+            ]
+        ];
+
+        const message = t(preferredLang, 'group_feed_member_language_prompt');
+        bot.sendMessage(chatId, message, {
+            reply_markup: { inline_keyboard: keyboard },
+            reply_to_message_id: msg.message_id,
+            parse_mode: "Markdown"
+        });
+    });
+
     // COMMAND: /unregister - Cần async
     bot.onText(/\/unregister/, async (msg) => {
         const chatId = msg.chat.id.toString();
@@ -865,6 +938,7 @@ function startTelegramBot() {
             t(lang, 'help_command_unregister'),
             t(lang, 'help_command_language'),
             t(lang, 'help_command_banmaofeed'),
+            t(lang, 'help_command_feedlang'),
             t(lang, 'help_command_help')
         ].join('\n')}`;
         bot.sendMessage(chatId, helpMessage, { parse_mode: "Markdown" });
@@ -884,6 +958,51 @@ function startTelegramBot() {
                 bot.sendMessage(chatId, message);
                 console.log(`[BOT] ChatID ${chatId} đã đổi ngôn ngữ sang: ${newLang}`);
                 bot.answerCallbackQuery(queryId, { text: message });
+            }
+            else if (query.data.startsWith('feedlang|')) {
+                const parts = query.data.split('|');
+                const selectedLang = resolveLangCode(parts[1] || defaultLang);
+                const targetGroupId = (parts[2] || query.message.chat?.id || '').toString();
+                if (!targetGroupId) {
+                    bot.answerCallbackQuery(queryId, { text: t(selectedLang, 'group_feed_member_language_error') || 'Error' });
+                    return;
+                }
+
+                await db.setGroupMemberLanguage(targetGroupId, query.from.id.toString(), selectedLang);
+
+                const successMessage = t(selectedLang, 'group_feed_member_language_saved');
+                try {
+                    await bot.answerCallbackQuery(queryId, { text: successMessage });
+                } catch (answerErr) {
+                    console.warn(`[GroupFeed] Không thể phản hồi callback: ${answerErr.message}`);
+                }
+
+                try {
+                    await sendTelegramMessageWithRetry(query.from.id.toString(), successMessage, { parse_mode: "Markdown" });
+                } catch (error) {
+                    const errorCode = error?.response?.body?.error_code;
+                    console.warn(`[GroupFeed] Không thể gửi tin nhắn riêng cho ${query.from.id}: ${error.message}`);
+                    if (errorCode === 403) {
+                        let groupLang = selectedLang;
+                        try {
+                            const subscription = await db.getGroupSubscription(targetGroupId);
+                            if (subscription?.lang) {
+                                groupLang = resolveLangCode(subscription.lang);
+                            }
+                        } catch (langErr) {
+                            console.warn(`[GroupFeed] Không thể lấy ngôn ngữ nhóm ${targetGroupId}: ${langErr.message}`);
+                        }
+
+                        const mentionInfo = buildUserMention(query.from);
+                        const warnMessage = t(groupLang, 'group_feed_member_language_dm_required', { user: mentionInfo.text });
+                        const sendOptions = mentionInfo.parseMode ? { parse_mode: mentionInfo.parseMode } : undefined;
+                        if (sendOptions) {
+                            bot.sendMessage(targetGroupId, warnMessage, sendOptions);
+                        } else {
+                            bot.sendMessage(targetGroupId, warnMessage);
+                        }
+                    }
+                }
             }
             else if (query.data.startsWith('delete_')) {
                 const walletToDelete = query.data.substring(7);
@@ -1745,6 +1864,60 @@ async function broadcastGroupGameUpdate(eventType, payload) {
             if (errorCode === 403 || errorCode === 400) {
                 await db.removeGroupSubscription(group.chatId);
                 console.warn(`[Group Broadcast] Đã xóa đăng ký nhóm ${group.chatId} (bot bị chặn/rời nhóm).`);
+            }
+        }
+
+        let memberLanguages = [];
+        try {
+            memberLanguages = await db.getGroupMemberLanguages(group.chatId);
+        } catch (error) {
+            console.warn(`[Group Broadcast] Không thể lấy danh sách ngôn ngữ thành viên của nhóm ${group.chatId}: ${error.message}`);
+        }
+
+        if (Array.isArray(memberLanguages) && memberLanguages.length > 0) {
+            const seenMembers = new Set();
+            const payloadCache = new Map();
+
+            for (const member of memberLanguages) {
+                if (!member || !member.userId) {
+                    continue;
+                }
+
+                const memberId = member.userId.toString();
+                if (seenMembers.has(memberId)) {
+                    continue;
+                }
+                seenMembers.add(memberId);
+
+                const memberLang = resolveLangCode(member.lang || group.lang);
+                if (!payloadCache.has(memberLang)) {
+                    const built = buildGroupBroadcastMessage(eventType, memberLang, payload);
+                    if (!built) {
+                        continue;
+                    }
+                    payloadCache.set(memberLang, built);
+                }
+
+                const personalPayload = payloadCache.get(memberLang);
+                if (!personalPayload) {
+                    continue;
+                }
+
+                const dmOptions = { parse_mode: "Markdown", disable_web_page_preview: true };
+                if (personalPayload.withButton) {
+                    dmOptions.reply_markup = { inline_keyboard: [[{ text: `🔥 ${t(memberLang, 'group_broadcast_cta')}`, url: WEB_URL }]] };
+                }
+
+                try {
+                    await sendTelegramMessageWithRetry(memberId, personalPayload.text, dmOptions);
+                } catch (error) {
+                    const errorCode = error?.response?.body?.error_code;
+                    if (errorCode === 403) {
+                        console.warn(`[Group Broadcast] Thành viên ${memberId} đã chặn bot khi gửi DM.`);
+                    } else {
+                        console.error(`[Group Broadcast] Lỗi gửi DM tới ${memberId}: ${error.message}`);
+                    }
+                }
             }
         }
     });

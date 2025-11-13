@@ -96,6 +96,11 @@
   "group_feed_error": "⚠️ 当前无法更新设置，请稍后再试。",
   "group_feed_current_threshold": "📡 当前播报门槛：**{amount} $BANMAO**。",
   "group_feed_not_configured": "📡 自动播报目前处于**关闭**状态。",
+  "group_feed_member_language_prompt": "请选择你希望接收管理员推送通知的语言：",
+  "group_feed_member_language_saved": "✅ 已保存你的个人推送语言！之后会用此语言发送私聊通知。",
+  "group_feed_member_language_group_only": "❌ 该指令只能在群组中使用。",
+  "group_feed_member_language_dm_required": "{user}，请先私聊机器人，才能收到个性化通知。",
+  "group_feed_member_language_error": "⚠️ 暂时无法保存你的设置，请稍后再试。",
   "group_broadcast_header": "BANMAO 战斗焦点",
   "group_broadcast_room": "房间 #{roomId}",
   "group_broadcast_players": "{creator} vs {opponent}",
@@ -115,5 +120,6 @@
   "help_command_unregister": "• `/unregister` — 选择要移除的钱包或一次性全部移除。",
   "help_command_language": "• `/language` — 切换机器人的界面语言。",
   "help_command_banmaofeed": "• `/banmaofeed <金额|off>` — 配置群组自动播报（仅限群组）。",
+  "help_command_feedlang": "• `/feedlang` — 为群组播报选择个人语言（仅限群组）。",
   "help_command_help": "• `/help` — 再次显示此指令列表。"
 }

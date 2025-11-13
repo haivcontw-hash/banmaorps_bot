@@ -75,6 +75,15 @@ async function init() {
             updatedAt INTEGER
         );
     `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS group_member_languages (
+            groupChatId TEXT NOT NULL,
+            userId TEXT NOT NULL,
+            lang TEXT NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            PRIMARY KEY (groupChatId, userId)
+        );
+    `);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -272,6 +281,31 @@ async function getGroupSubscriptions() {
     return dbAll('SELECT chatId, lang, minStake FROM group_subscriptions');
 }
 
+async function getGroupMemberLanguage(groupChatId, userId) {
+    const row = await dbGet('SELECT lang FROM group_member_languages WHERE groupChatId = ? AND userId = ?', [groupChatId, userId]);
+    if (!row) return null;
+    return normalizeLanguageCode(row.lang);
+}
+
+async function getGroupMemberLanguages(groupChatId) {
+    const rows = await dbAll('SELECT userId, lang FROM group_member_languages WHERE groupChatId = ?', [groupChatId]);
+    return rows.map(row => ({
+        userId: row.userId,
+        lang: normalizeLanguageCode(row.lang)
+    }));
+}
+
+async function setGroupMemberLanguage(groupChatId, userId, lang) {
+    const normalizedLang = normalizeLanguageCode(lang);
+    const now = Math.floor(Date.now() / 1000);
+    const existing = await dbGet('SELECT userId FROM group_member_languages WHERE groupChatId = ? AND userId = ?', [groupChatId, userId]);
+    if (existing) {
+        await dbRun('UPDATE group_member_languages SET lang = ?, updatedAt = ? WHERE groupChatId = ? AND userId = ?', [normalizedLang, now, groupChatId, userId]);
+    } else {
+        await dbRun('INSERT INTO group_member_languages (groupChatId, userId, lang, updatedAt) VALUES (?, ?, ?, ?)', [groupChatId, userId, normalizedLang, now]);
+    }
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -291,5 +325,8 @@ module.exports = {
     upsertGroupSubscription,
     removeGroupSubscription,
     getGroupSubscription,
-    getGroupSubscriptions
+    getGroupSubscriptions,
+    getGroupMemberLanguage,
+    getGroupMemberLanguages,
+    setGroupMemberLanguage
 };

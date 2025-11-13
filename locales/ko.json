@@ -96,6 +96,11 @@
   "group_feed_error": "⚠️ 지금은 설정을 업데이트할 수 없습니다. 잠시 후 다시 시도하세요.",
   "group_feed_current_threshold": "📡 현재 방송 기준: **{amount} $BANMAO**.",
   "group_feed_not_configured": "📡 자동 방송이 현재 **꺼져** 있습니다.",
+  "group_feed_member_language_prompt": "관리자 피드 알림을 받을 언어를 선택해 주세요.",
+  "group_feed_member_language_saved": "✅ 개인 피드 알림 언어가 저장되었습니다! 이제 이 언어로 알림을 보내드릴게요.",
+  "group_feed_member_language_group_only": "❌ 이 명령어는 그룹 채팅에서만 사용할 수 있어요.",
+  "group_feed_member_language_dm_required": "{user}님, 개인화된 알림을 받으려면 먼저 봇과의 개인 채팅을 시작해 주세요.",
+  "group_feed_member_language_error": "⚠️ 지금은 설정을 저장할 수 없습니다. 잠시 후 다시 시도해 주세요.",
   "group_broadcast_header": "BANMAO 하이라이트",
   "group_broadcast_room": "방 #{roomId}",
   "group_broadcast_players": "{creator} vs {opponent}",
@@ -115,5 +120,6 @@
   "help_command_unregister": "• `/unregister` — 선택한 지갑(또는 모두)을 모니터링 목록에서 제거합니다.",
   "help_command_language": "• `/language` — 봇 인터페이스 언어를 변경합니다.",
   "help_command_banmaofeed": "• `/banmaofeed <금액|off>` — 그룹 채팅 자동 방송을 설정합니다 (그룹 전용).",
+  "help_command_feedlang": "• `/feedlang` — 그룹 피드 알림의 개인 언어를 선택합니다 (그룹 전용).",
   "help_command_help": "• `/help` — 이 명령어 목록을 다시 표시합니다."
 }

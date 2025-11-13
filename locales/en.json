@@ -96,6 +96,11 @@
   "group_feed_error": "⚠️ Unable to update the broadcast settings right now. Please try again later.",
   "group_feed_current_threshold": "📡 Current broadcast threshold: **{amount} $BANMAO**.",
   "group_feed_not_configured": "📡 Auto broadcast is currently **disabled**.",
+  "group_feed_member_language_prompt": "Please choose the language for your personal admin feed alerts:",
+  "group_feed_member_language_saved": "✅ Language preference saved! You will receive personal feed alerts in this language.",
+  "group_feed_member_language_group_only": "❌ This command can only be used inside a group chat.",
+  "group_feed_member_language_dm_required": "{user}, please start a private chat with the bot so we can deliver personal alerts.",
+  "group_feed_member_language_error": "⚠️ Unable to save your preference right now. Please try again later.",
   "group_broadcast_header": "BANMAO Battle Spotlight",
   "group_broadcast_room": "Room #{roomId}",
   "group_broadcast_players": "{creator} vs {opponent}",
@@ -115,5 +120,6 @@
   "help_command_unregister": "• `/unregister` — Remove selected wallets (or all) from monitoring.",
   "help_command_language": "• `/language` — Change the bot interface language.",
   "help_command_banmaofeed": "• `/banmaofeed <amount|off>` — Configure automatic broadcasts in group chats (group only).",
+  "help_command_feedlang": "• `/feedlang` — Choose your personal language for group feed alerts (group only).",
   "help_command_help": "• `/help` — Show this list of commands again."
 }

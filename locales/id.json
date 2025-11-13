@@ -96,6 +96,11 @@
   "group_feed_error": "⚠️ Pengaturan belum dapat diperbarui sekarang. Coba lagi nanti.",
   "group_feed_current_threshold": "📡 Ambang siaran saat ini: **{amount} $BANMAO**.",
   "group_feed_not_configured": "📡 Siaran otomatis sedang **nonaktif**.",
+  "group_feed_member_language_prompt": "Pilih bahasa untuk menerima notifikasi feed admin pribadi:",
+  "group_feed_member_language_saved": "✅ Preferensi bahasa disimpan! Kamu akan menerima notifikasi pribadi dalam bahasa ini.",
+  "group_feed_member_language_group_only": "❌ Perintah ini hanya bisa digunakan di grup.",
+  "group_feed_member_language_dm_required": "{user}, silakan mulai chat pribadi dengan bot agar kami bisa mengirim notifikasi personal.",
+  "group_feed_member_language_error": "⚠️ Tidak dapat menyimpan pengaturan sekarang. Coba lagi nanti.",
   "group_broadcast_header": "Sorotan Arena BANMAO",
   "group_broadcast_room": "Room #{roomId}",
   "group_broadcast_players": "{creator} vs {opponent}",
@@ -115,5 +120,6 @@
   "help_command_unregister": "• `/unregister` — Hapus dompet yang dipilih (atau semua) dari pemantauan.",
   "help_command_language": "• `/language` — Ganti bahasa antarmuka bot.",
   "help_command_banmaofeed": "• `/banmaofeed <jumlah|off>` — Atur siaran otomatis di obrolan grup (khusus grup).",
+  "help_command_feedlang": "• `/feedlang` — Pilih bahasa pribadi untuk notifikasi feed grup (khusus grup).",
   "help_command_help": "• `/help` — Tampilkan kembali daftar perintah ini."
 }
