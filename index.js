@@ -790,7 +790,7 @@ function startTelegramBot() {
     bot.onText(/\/banmaofeed(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
-        const userLang = resolveLangCode(msg.from.language_code);
+        const userLang = await getLang(msg);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
             bot.sendMessage(chatId, t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
@@ -846,7 +846,7 @@ function startTelegramBot() {
     });
 
     // COMMAND: /feedlang - Cấu hình ngôn ngữ cá nhân cho thông báo nhóm
-    bot.onText(/\/feedlang/, async (msg) => {
+    bot.onText(/\/feedlang(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const userId = msg.from.id.toString();
@@ -857,14 +857,31 @@ function startTelegramBot() {
             return;
         }
 
+        let storedLang = null;
         let preferredLang = fallbackLang;
         try {
-            const savedLang = await db.getGroupMemberLanguage(chatId, userId);
-            if (savedLang) {
-                preferredLang = resolveLangCode(savedLang);
+            storedLang = await db.getGroupMemberLanguage(chatId, userId);
+            if (storedLang) {
+                preferredLang = resolveLangCode(storedLang);
             }
         } catch (error) {
             console.warn(`[GroupFeed] Không thể đọc ngôn ngữ cá nhân cho ${userId} trong ${chatId}: ${error.message}`);
+        }
+
+        const arg = (match && match[1]) ? match[1].trim() : '';
+
+        if (arg) {
+            const lowered = arg.toLowerCase();
+            if (['off', 'disable', 'stop', 'cancel', 'clear', 'remove'].includes(lowered)) {
+                try {
+                    await db.removeGroupMemberLanguage(chatId, userId);
+                    bot.sendMessage(chatId, t(preferredLang, 'group_feed_member_language_removed'), { parse_mode: "Markdown" });
+                } catch (error) {
+                    console.warn(`[GroupFeed] Không thể xóa ngôn ngữ cá nhân cho ${userId} trong ${chatId}: ${error.message}`);
+                    bot.sendMessage(chatId, t(preferredLang, 'group_feed_member_language_error'), { parse_mode: "Markdown" });
+                }
+                return;
+            }
         }
 
         const keyboard = [
@@ -881,6 +898,10 @@ function startTelegramBot() {
                 { text: "🇮🇩 Indonesia", callback_data: `feedlang|id|${chatId}` }
             ]
         ];
+
+        keyboard.push([
+            { text: t(preferredLang, 'group_feed_member_language_disable_button'), callback_data: `feedlang|clear|${chatId}` }
+        ]);
 
         const message = t(preferredLang, 'group_feed_member_language_prompt');
         bot.sendMessage(chatId, message, {
@@ -912,8 +933,28 @@ function startTelegramBot() {
     // LỆNH: /language - Cần async
     bot.onText(/\/language/, async (msg) => {
         const chatId = msg.chat.id.toString();
+        const chatType = msg.chat.type;
         const lang = await getLang(msg); // <-- SỬA LỖI
-        const text = t(lang, 'select_language');
+        const isGroupChat = chatType === 'group' || chatType === 'supergroup';
+
+        if (isGroupChat) {
+            let memberInfo = null;
+            try {
+                memberInfo = await bot.getChatMember(chatId, msg.from.id);
+            } catch (error) {
+                console.warn(`[GroupLanguage] Không thể kiểm tra quyền admin cho ${chatId}: ${error.message}`);
+            }
+
+            const isAdmin = memberInfo && ['administrator', 'creator'].includes(memberInfo.status);
+            if (!isAdmin) {
+                const feedbackLang = resolveLangCode(msg.from.language_code || lang);
+                bot.sendMessage(chatId, t(feedbackLang, 'group_language_admin_only'), { parse_mode: "Markdown" });
+                return;
+            }
+        }
+
+        const textKey = isGroupChat ? 'select_group_language' : 'select_language';
+        const text = t(lang, textKey);
         const options = {
             reply_markup: {
                 inline_keyboard: [
@@ -953,22 +994,85 @@ function startTelegramBot() {
         try {
             if (query.data.startsWith('lang_')) {
                 const newLang = resolveLangCode(query.data.split('_')[1]);
+                const chatType = query.message.chat?.type;
+                const isGroupChat = chatType === 'group' || chatType === 'supergroup';
+
+                if (isGroupChat) {
+                    let memberInfo = null;
+                    try {
+                        memberInfo = await bot.getChatMember(chatId, query.from.id);
+                    } catch (error) {
+                        console.warn(`[GroupLanguage] Không thể kiểm tra quyền admin cho ${chatId}: ${error.message}`);
+                    }
+
+                    const isAdmin = memberInfo && ['administrator', 'creator'].includes(memberInfo.status);
+                    if (!isAdmin) {
+                        const feedbackLang = resolveLangCode(query.from.language_code || newLang);
+                        bot.answerCallbackQuery(queryId, { text: t(feedbackLang, 'group_language_admin_only'), show_alert: true });
+                        return;
+                    }
+                }
+
                 await db.setLanguage(chatId, newLang);
-                const message = t(newLang, 'language_changed_success'); // Dùng newLang
+
+                if (isGroupChat) {
+                    try {
+                        const subscription = await db.getGroupSubscription(chatId);
+                        if (subscription) {
+                            await db.updateGroupSubscriptionLanguage(chatId, newLang);
+                        }
+                    } catch (error) {
+                        console.warn(`[GroupLanguage] Không thể cập nhật ngôn ngữ broadcast cho nhóm ${chatId}: ${error.message}`);
+                    }
+                }
+
+                const messageKey = isGroupChat ? 'group_language_changed_success' : 'language_changed_success';
+                const message = t(newLang, messageKey); // Dùng newLang
                 bot.sendMessage(chatId, message);
                 console.log(`[BOT] ChatID ${chatId} đã đổi ngôn ngữ sang: ${newLang}`);
                 bot.answerCallbackQuery(queryId, { text: message });
             }
             else if (query.data.startsWith('feedlang|')) {
                 const parts = query.data.split('|');
-                const selectedLang = resolveLangCode(parts[1] || defaultLang);
+                const actionOrLang = parts[1] || '';
                 const targetGroupId = (parts[2] || query.message.chat?.id || '').toString();
+                const memberId = query.from.id.toString();
+                const fallbackMemberLang = resolveLangCode(query.from.language_code || defaultLang);
+
                 if (!targetGroupId) {
-                    bot.answerCallbackQuery(queryId, { text: t(selectedLang, 'group_feed_member_language_error') || 'Error' });
+                    bot.answerCallbackQuery(queryId, { text: t(fallbackMemberLang, 'group_feed_member_language_error') || 'Error' });
                     return;
                 }
 
-                await db.setGroupMemberLanguage(targetGroupId, query.from.id.toString(), selectedLang);
+                if (actionOrLang === 'clear') {
+                    try {
+                        await db.removeGroupMemberLanguage(targetGroupId, memberId);
+                        const clearedMessage = t(fallbackMemberLang, 'group_feed_member_language_removed');
+                        try {
+                            await bot.answerCallbackQuery(queryId, { text: clearedMessage });
+                        } catch (answerErr) {
+                            console.warn(`[GroupFeed] Không thể phản hồi callback: ${answerErr.message}`);
+                        }
+
+                        try {
+                            await sendTelegramMessageWithRetry(memberId, clearedMessage, { parse_mode: "Markdown" });
+                        } catch (error) {
+                            const errorCode = error?.response?.body?.error_code;
+                            if (errorCode === 403) {
+                                console.warn(`[GroupFeed] Thành viên ${memberId} đã chặn bot khi thông báo hủy ngôn ngữ cá nhân.`);
+                            } else {
+                                console.warn(`[GroupFeed] Không thể gửi xác nhận hủy cho ${memberId}: ${error.message}`);
+                            }
+                        }
+                    } catch (error) {
+                        console.error(`[GroupFeed] Không thể xóa ngôn ngữ cá nhân cho ${memberId} tại ${targetGroupId}: ${error.message}`);
+                        bot.answerCallbackQuery(queryId, { text: t(fallbackMemberLang, 'group_feed_member_language_error') || 'Error' });
+                    }
+                    return;
+                }
+
+                const selectedLang = resolveLangCode(actionOrLang || defaultLang);
+                await db.setGroupMemberLanguage(targetGroupId, memberId, selectedLang);
 
                 const successMessage = t(selectedLang, 'group_feed_member_language_saved');
                 try {
@@ -978,10 +1082,10 @@ function startTelegramBot() {
                 }
 
                 try {
-                    await sendTelegramMessageWithRetry(query.from.id.toString(), successMessage, { parse_mode: "Markdown" });
+                    await sendTelegramMessageWithRetry(memberId, successMessage, { parse_mode: "Markdown" });
                 } catch (error) {
                     const errorCode = error?.response?.body?.error_code;
-                    console.warn(`[GroupFeed] Không thể gửi tin nhắn riêng cho ${query.from.id}: ${error.message}`);
+                    console.warn(`[GroupFeed] Không thể gửi tin nhắn riêng cho ${memberId}: ${error.message}`);
                     if (errorCode === 403) {
                         let groupLang = selectedLang;
                         try {

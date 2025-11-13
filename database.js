@@ -306,6 +306,16 @@ async function setGroupMemberLanguage(groupChatId, userId, lang) {
     }
 }
 
+async function removeGroupMemberLanguage(groupChatId, userId) {
+    await dbRun('DELETE FROM group_member_languages WHERE groupChatId = ? AND userId = ?', [groupChatId, userId]);
+}
+
+async function updateGroupSubscriptionLanguage(chatId, lang) {
+    const normalizedLang = normalizeLanguageCode(lang);
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun('UPDATE group_subscriptions SET lang = ?, updatedAt = ? WHERE chatId = ?', [normalizedLang, now, chatId]);
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -328,5 +338,7 @@ module.exports = {
     getGroupSubscriptions,
     getGroupMemberLanguage,
     getGroupMemberLanguages,
-    setGroupMemberLanguage
+    setGroupMemberLanguage,
+    removeGroupMemberLanguage,
+    updateGroupSubscriptionLanguage
 };
