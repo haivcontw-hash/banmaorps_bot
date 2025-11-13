@@ -350,6 +350,18 @@ async function updateGroupSubscriptionLanguage(chatId, lang) {
     await dbRun('UPDATE group_subscriptions SET lang = ?, updatedAt = ? WHERE chatId = ?', [normalizedLang, now, chatId]);
 }
 
+async function updateGroupSubscriptionTopic(chatId, messageThreadId) {
+    const now = Math.floor(Date.now() / 1000);
+    const normalizedThreadId =
+        messageThreadId === undefined || messageThreadId === null
+            ? null
+            : messageThreadId.toString();
+    await dbRun(
+        'UPDATE group_subscriptions SET messageThreadId = ?, updatedAt = ? WHERE chatId = ?',
+        [normalizedThreadId, now, chatId]
+    );
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -374,5 +386,6 @@ module.exports = {
     getGroupMemberLanguages,
     setGroupMemberLanguage,
     removeGroupMemberLanguage,
-    updateGroupSubscriptionLanguage
+    updateGroupSubscriptionLanguage,
+    updateGroupSubscriptionTopic
 };

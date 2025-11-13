@@ -90,6 +90,43 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+function extractThreadId(source) {
+    if (!source) {
+        return null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(source, 'message_thread_id') && source.message_thread_id !== undefined && source.message_thread_id !== null) {
+        return source.message_thread_id;
+    }
+
+    if (source.message && Object.prototype.hasOwnProperty.call(source.message, 'message_thread_id') && source.message.message_thread_id !== undefined && source.message.message_thread_id !== null) {
+        return source.message.message_thread_id;
+    }
+
+    return null;
+}
+
+function buildThreadedOptions(source, options = {}) {
+    const threadId = extractThreadId(source);
+    if (threadId === undefined || threadId === null) {
+        return { ...options };
+    }
+
+    return { ...options, message_thread_id: threadId };
+}
+
+function sendMessageRespectingThread(chatId, source, text, options = {}) {
+    return bot.sendMessage(chatId, text, buildThreadedOptions(source, options));
+}
+
+function sendReply(sourceMessage, text, options = {}) {
+    if (!sourceMessage || !sourceMessage.chat) {
+        throw new Error('sendReply requires a message with chat information');
+    }
+
+    return sendMessageRespectingThread(sourceMessage.chat.id, sourceMessage, text, options);
+}
+
 function buildUserMention(user) {
     if (!user) {
         return { text: 'user', parseMode: null };
@@ -701,11 +738,11 @@ function startTelegramBot() {
             await db.addWalletToUser(chatId, lang, walletAddress);
             await db.deletePendingToken(token);
             const message = t(lang, 'connect_success', { walletAddress: walletAddress });
-            bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            sendReply(msg, message, { parse_mode: "Markdown" });
             console.log(`[BOT] Liên kết (DApp): ${walletAddress} -> ${chatId} (lang: ${lang})`);
         } else {
             const message = t(lang, 'connect_fail_token');
-            bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            sendReply(msg, message, { parse_mode: "Markdown" });
             console.log(`[BOT] Token không hợp lệ: ${token}`);
         }
     });
@@ -716,7 +753,7 @@ function startTelegramBot() {
         // Lấy ngôn ngữ (hoặc tạo user mới nếu chưa có)
         const lang = await getLang(msg); // <-- SỬA LỖI
         const message = t(lang, 'welcome_generic');
-        bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+        sendReply(msg, message, { parse_mode: "Markdown" });
     });
 
     // COMMAND: /register - Cần async
@@ -728,11 +765,11 @@ function startTelegramBot() {
             const normalizedAddr = ethers.getAddress(address);
             await db.addWalletToUser(chatId, lang, normalizedAddr);
             const message = t(lang, 'register_success', { walletAddress: normalizedAddr });
-            bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            sendReply(msg, message, { parse_mode: "Markdown" });
             console.log(`[BOT] Thêm ví (Manual): ${normalizedAddr} -> ${chatId} (lang: ${lang})`);
         } catch (error) {
             const message = t(lang, 'register_invalid_address');
-            bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            sendReply(msg, message, { parse_mode: "Markdown" });
         }
     });
 
@@ -745,10 +782,10 @@ function startTelegramBot() {
             let message = t(lang, 'mywallet_list_header', { count: wallets.length }) + "\n\n";
             wallets.forEach(wallet => { message += `• \`${wallet}\`\n`; });
             message += `\n` + t(lang, 'mywallet_list_footer');
-            bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            sendReply(msg, message, { parse_mode: "Markdown" });
         } else {
             const message = t(lang, 'mywallet_not_linked');
-            bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            sendReply(msg, message, { parse_mode: "Markdown" });
         }
     });
 
@@ -758,7 +795,7 @@ function startTelegramBot() {
         const lang = await getLang(msg); // <-- SỬA LỖI
         const wallets = await db.getWalletsForUser(chatId);
         if (wallets.length === 0) {
-            bot.sendMessage(chatId, t(lang, 'stats_no_wallet'));
+            sendReply(msg, t(lang, 'stats_no_wallet'));
             return;
         }
         let totalStats = { games: 0, wins: 0, losses: 0, draws: 0, totalWon: 0, totalLost: 0 };
@@ -772,7 +809,7 @@ function startTelegramBot() {
             totalStats.totalLost += stats.totalLost;
         };
         if (totalStats.games === 0) {
-            bot.sendMessage(chatId, t(lang, 'stats_no_games'));
+            sendReply(msg, t(lang, 'stats_no_games'));
             return;
         }
         const winRate = (totalStats.games > 0) ? (totalStats.wins / totalStats.games * 100).toFixed(0) : 0;
@@ -783,7 +820,7 @@ function startTelegramBot() {
         message += `• ${t(lang, 'stats_line_3', { amount: totalStats.totalWon.toFixed(2) })}\n`;
         message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
         message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
-        bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+        sendReply(msg, message, { parse_mode: "Markdown" });
     });
 
     // COMMAND: /banmaofeed - Chỉ dùng cho group
@@ -791,9 +828,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const userLang = await getLang(msg);
-        const threadId = msg.message_thread_id;
-        const threadOptions = (threadId === undefined || threadId === null) ? {} : { message_thread_id: threadId };
-        const sendInThread = (text, options = {}) => bot.sendMessage(chatId, text, { ...threadOptions, ...options });
+        const sendInThread = (text, options = {}) => sendReply(msg, text, options);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
             await sendInThread(t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
@@ -840,12 +875,110 @@ function startTelegramBot() {
                 return;
             }
 
+            const threadId = msg.message_thread_id;
             await db.upsertGroupSubscription(chatId, userLang, minStake, threadId);
             await sendInThread(t(userLang, 'group_feed_enabled', { amount: formatBanmao(minStake) }), { parse_mode: "Markdown" });
         } catch (error) {
             console.error(`[GroupFeed] Lỗi cấu hình cho nhóm ${chatId}:`, error.message);
             await sendInThread(t(userLang, 'group_feed_error'), { parse_mode: "Markdown" });
         }
+    });
+
+    // COMMAND: /feedtopic - cấu hình topic nhận thông báo nhóm
+    bot.onText(/\/feedtopic(?:\s+(.+))?/, async (msg, match) => {
+        const chatId = msg.chat.id.toString();
+        const chatType = msg.chat.type;
+        const lang = await getLang(msg);
+        const sendInThread = (text, options = {}) => sendReply(msg, text, options);
+
+        if (chatType !== 'group' && chatType !== 'supergroup') {
+            await sendInThread(t(lang, 'feedtopic_group_only'), { parse_mode: "Markdown" });
+            return;
+        }
+
+        let memberInfo = null;
+        try {
+            memberInfo = await bot.getChatMember(chatId, msg.from.id);
+        } catch (error) {
+            console.warn(`[FeedTopic] Không thể kiểm tra quyền admin cho ${chatId}: ${error.message}`);
+        }
+
+        const isAdmin = memberInfo && ['administrator', 'creator'].includes(memberInfo.status);
+        if (!isAdmin) {
+            await sendInThread(t(lang, 'feedtopic_admin_only'), { parse_mode: "Markdown" });
+            return;
+        }
+
+        let subscription = null;
+        try {
+            subscription = await db.getGroupSubscription(chatId);
+        } catch (error) {
+            console.warn(`[FeedTopic] Không thể đọc cấu hình nhóm ${chatId}: ${error.message}`);
+        }
+
+        if (!subscription) {
+            await sendInThread(t(lang, 'feedtopic_not_configured'), { parse_mode: "Markdown" });
+            return;
+        }
+
+        const arg = (match && match[1]) ? match[1].trim() : '';
+        if (!arg) {
+            const currentThread = subscription.messageThreadId;
+            const status = currentThread
+                ? t(lang, 'feedtopic_current_set', { threadId: currentThread })
+                : t(lang, 'feedtopic_current_default');
+            const usageKey = msg.message_thread_id === undefined || msg.message_thread_id === null
+                ? 'feedtopic_usage_no_thread'
+                : 'feedtopic_usage_with_thread';
+            const usage = t(lang, usageKey);
+            await sendInThread(`${status}\n\n${usage}`, { parse_mode: "Markdown" });
+            return;
+        }
+
+        const lowered = arg.toLowerCase();
+        let desiredThread;
+        let resolved = true;
+
+        if (['general', 'default', 'clear', 'reset', 'off', 'none'].includes(lowered)) {
+            desiredThread = null;
+        } else if (['here', 'this', 'topic', 'thread'].includes(lowered)) {
+            const currentThread = msg.message_thread_id;
+            desiredThread = currentThread === undefined ? null : currentThread;
+        } else {
+            const trimmed = arg.replace(/^#/, '');
+            if (/^\d+$/.test(trimmed)) {
+                const parsed = Number(trimmed);
+                if (Number.isInteger(parsed) && parsed > 0) {
+                    desiredThread = parsed;
+                } else {
+                    resolved = false;
+                }
+            } else {
+                resolved = false;
+            }
+        }
+
+        if (!resolved) {
+            await sendInThread(t(lang, 'feedtopic_invalid'), { parse_mode: "Markdown" });
+            return;
+        }
+
+        try {
+            await db.updateGroupSubscriptionTopic(chatId, desiredThread);
+        } catch (error) {
+            console.error(`[FeedTopic] Không thể cập nhật topic cho ${chatId}: ${error.message}`);
+            await sendInThread(t(lang, 'feedtopic_error'), { parse_mode: "Markdown" });
+            return;
+        }
+
+        const currentThread = desiredThread === null ? null : desiredThread.toString();
+        const successMessage = desiredThread === null
+            ? t(lang, 'feedtopic_cleared')
+            : (msg.message_thread_id !== undefined && msg.message_thread_id !== null && desiredThread === msg.message_thread_id)
+                ? t(lang, 'feedtopic_set_success_here')
+                : t(lang, 'feedtopic_set_success_id', { threadId: currentThread });
+
+        await sendInThread(successMessage, { parse_mode: "Markdown" });
     });
 
     // COMMAND: /feedlang - Cấu hình ngôn ngữ cá nhân cho thông báo nhóm
@@ -856,7 +989,7 @@ function startTelegramBot() {
         const fallbackLang = resolveLangCode(msg.from.language_code);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
-            bot.sendMessage(chatId, t(fallbackLang, 'group_feed_member_language_group_only'), { parse_mode: "Markdown" });
+            sendReply(msg, t(fallbackLang, 'group_feed_member_language_group_only'), { parse_mode: "Markdown" });
             return;
         }
 
@@ -878,10 +1011,10 @@ function startTelegramBot() {
             if (['off', 'disable', 'stop', 'cancel', 'clear', 'remove'].includes(lowered)) {
                 try {
                     await db.removeGroupMemberLanguage(chatId, userId);
-                    bot.sendMessage(chatId, t(preferredLang, 'group_feed_member_language_removed'), { parse_mode: "Markdown" });
+                    sendReply(msg, t(preferredLang, 'group_feed_member_language_removed'), { parse_mode: "Markdown" });
                 } catch (error) {
                     console.warn(`[GroupFeed] Không thể xóa ngôn ngữ cá nhân cho ${userId} trong ${chatId}: ${error.message}`);
-                    bot.sendMessage(chatId, t(preferredLang, 'group_feed_member_language_error'), { parse_mode: "Markdown" });
+                    sendReply(msg, t(preferredLang, 'group_feed_member_language_error'), { parse_mode: "Markdown" });
                 }
                 return;
             }
@@ -907,7 +1040,7 @@ function startTelegramBot() {
         ]);
 
         const message = t(preferredLang, 'group_feed_member_language_prompt');
-        bot.sendMessage(chatId, message, {
+        sendReply(msg, message, {
             reply_markup: { inline_keyboard: keyboard },
             reply_to_message_id: msg.message_id,
             parse_mode: "Markdown"
@@ -920,7 +1053,7 @@ function startTelegramBot() {
         const lang = await getLang(msg); // <-- SỬA LỖI
         const wallets = await db.getWalletsForUser(chatId);
         if (wallets.length === 0) {
-            bot.sendMessage(chatId, t(lang, 'mywallet_not_linked'));
+            sendReply(msg, t(lang, 'mywallet_not_linked'));
             return;
         }
         const keyboard = wallets.map(wallet => {
@@ -928,7 +1061,7 @@ function startTelegramBot() {
             return [{ text: `❌ ${shortWallet}`, callback_data: `delete_${wallet}` }];
         });
         keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'delete_all' }]);
-        bot.sendMessage(chatId, t(lang, 'unregister_header'), {
+        sendReply(msg, t(lang, 'unregister_header'), {
             reply_markup: { inline_keyboard: keyboard }
         });
     });
@@ -951,7 +1084,7 @@ function startTelegramBot() {
             const isAdmin = memberInfo && ['administrator', 'creator'].includes(memberInfo.status);
             if (!isAdmin) {
                 const feedbackLang = resolveLangCode(msg.from.language_code || lang);
-                bot.sendMessage(chatId, t(feedbackLang, 'group_language_admin_only'), { parse_mode: "Markdown" });
+                sendReply(msg, t(feedbackLang, 'group_language_admin_only'), { parse_mode: "Markdown" });
                 return;
             }
         }
@@ -967,7 +1100,7 @@ function startTelegramBot() {
                 ]
             }
         };
-        bot.sendMessage(chatId, text, options);
+        sendReply(msg, text, options);
     });
 
     // LỆNH: /help - Cần async
@@ -983,9 +1116,10 @@ function startTelegramBot() {
             t(lang, 'help_command_language'),
             t(lang, 'help_command_banmaofeed'),
             t(lang, 'help_command_feedlang'),
+            t(lang, 'help_command_feedtopic'),
             t(lang, 'help_command_help')
         ].join('\n')}`;
-        bot.sendMessage(chatId, helpMessage, { parse_mode: "Markdown" });
+        sendReply(msg, helpMessage, { parse_mode: "Markdown" });
     });
 
     // Xử lý tất cả CALLBACK QUERY (Nút bấm) - Cần async
@@ -1031,7 +1165,7 @@ function startTelegramBot() {
 
                 const messageKey = isGroupChat ? 'group_language_changed_success' : 'language_changed_success';
                 const message = t(newLang, messageKey); // Dùng newLang
-                bot.sendMessage(chatId, message);
+                sendReply(query.message, message);
                 console.log(`[BOT] ChatID ${chatId} đã đổi ngôn ngữ sang: ${newLang}`);
                 bot.answerCallbackQuery(queryId, { text: message });
             }
