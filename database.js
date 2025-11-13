@@ -71,10 +71,18 @@ async function init() {
             chatId TEXT PRIMARY KEY,
             lang TEXT,
             minStake REAL,
+            messageThreadId TEXT,
             createdAt INTEGER,
             updatedAt INTEGER
         );
     `);
+    try {
+        await dbRun(`ALTER TABLE group_subscriptions ADD COLUMN messageThreadId TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
     await dbRun(`
         CREATE TABLE IF NOT EXISTS group_member_languages (
             groupChatId TEXT NOT NULL,
@@ -259,13 +267,23 @@ async function getStats(walletAddress) {
     return stats;
 }
 
-async function upsertGroupSubscription(chatId, lang, minStake) {
+async function upsertGroupSubscription(chatId, lang, minStake, messageThreadId = null) {
     const now = Math.floor(Date.now() / 1000);
+    const normalizedThreadId =
+        messageThreadId === undefined || messageThreadId === null
+            ? null
+            : messageThreadId.toString();
     const existing = await dbGet('SELECT chatId FROM group_subscriptions WHERE chatId = ?', [chatId]);
     if (existing) {
-        await dbRun('UPDATE group_subscriptions SET lang = ?, minStake = ?, updatedAt = ? WHERE chatId = ?', [lang, minStake, now, chatId]);
+        await dbRun(
+            'UPDATE group_subscriptions SET lang = ?, minStake = ?, messageThreadId = ?, updatedAt = ? WHERE chatId = ?',
+            [lang, minStake, normalizedThreadId, now, chatId]
+        );
     } else {
-        await dbRun('INSERT INTO group_subscriptions (chatId, lang, minStake, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)', [chatId, lang, minStake, now, now]);
+        await dbRun(
+            'INSERT INTO group_subscriptions (chatId, lang, minStake, messageThreadId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
+            [chatId, lang, minStake, normalizedThreadId, now, now]
+        );
     }
 }
 
@@ -274,11 +292,27 @@ async function removeGroupSubscription(chatId) {
 }
 
 async function getGroupSubscription(chatId) {
-    return dbGet('SELECT chatId, lang, minStake FROM group_subscriptions WHERE chatId = ?', [chatId]);
+    const row = await dbGet('SELECT chatId, lang, minStake, messageThreadId FROM group_subscriptions WHERE chatId = ?', [chatId]);
+    if (!row) {
+        return null;
+    }
+
+    return {
+        chatId: row.chatId,
+        lang: row.lang,
+        minStake: row.minStake,
+        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString()
+    };
 }
 
 async function getGroupSubscriptions() {
-    return dbAll('SELECT chatId, lang, minStake FROM group_subscriptions');
+    const rows = await dbAll('SELECT chatId, lang, minStake, messageThreadId FROM group_subscriptions');
+    return rows.map(row => ({
+        chatId: row.chatId,
+        lang: row.lang,
+        minStake: row.minStake,
+        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString()
+    }));
 }
 
 async function getGroupMemberLanguage(groupChatId, userId) {

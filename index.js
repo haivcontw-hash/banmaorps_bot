@@ -791,9 +791,12 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const userLang = await getLang(msg);
+        const threadId = msg.message_thread_id;
+        const threadOptions = (threadId === undefined || threadId === null) ? {} : { message_thread_id: threadId };
+        const sendInThread = (text, options = {}) => bot.sendMessage(chatId, text, { ...threadOptions, ...options });
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
-            bot.sendMessage(chatId, t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
+            await sendInThread(t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
             return;
         }
 
@@ -806,7 +809,7 @@ function startTelegramBot() {
 
         const isAdmin = memberInfo && ['administrator', 'creator'].includes(memberInfo.status);
         if (!isAdmin) {
-            bot.sendMessage(chatId, t(userLang, 'group_feed_admin_only'), { parse_mode: "Markdown" });
+            await sendInThread(t(userLang, 'group_feed_admin_only'), { parse_mode: "Markdown" });
             return;
         }
 
@@ -819,29 +822,29 @@ function startTelegramBot() {
                     ? t(userLang, 'group_feed_current_threshold', { amount: formatBanmao(current.minStake || 0) })
                     : t(userLang, 'group_feed_not_configured');
                 const usage = t(userLang, 'group_feed_usage');
-                bot.sendMessage(chatId, `${statusLine}\n\n${usage}`, { parse_mode: "Markdown" });
+                await sendInThread(`${statusLine}\n\n${usage}`, { parse_mode: "Markdown" });
                 return;
             }
 
             const lowered = arg.toLowerCase();
             if (['off', 'disable', 'stop', 'cancel'].includes(lowered)) {
                 await db.removeGroupSubscription(chatId);
-                bot.sendMessage(chatId, t(userLang, 'group_feed_disabled'), { parse_mode: "Markdown" });
+                await sendInThread(t(userLang, 'group_feed_disabled'), { parse_mode: "Markdown" });
                 return;
             }
 
             const normalizedArg = arg.replace(',', '.');
             const minStake = parseFloat(normalizedArg);
             if (!Number.isFinite(minStake) || minStake < 0) {
-                bot.sendMessage(chatId, t(userLang, 'group_feed_invalid_amount'), { parse_mode: "Markdown" });
+                await sendInThread(t(userLang, 'group_feed_invalid_amount'), { parse_mode: "Markdown" });
                 return;
             }
 
-            await db.upsertGroupSubscription(chatId, userLang, minStake);
-            bot.sendMessage(chatId, t(userLang, 'group_feed_enabled', { amount: formatBanmao(minStake) }), { parse_mode: "Markdown" });
+            await db.upsertGroupSubscription(chatId, userLang, minStake, threadId);
+            await sendInThread(t(userLang, 'group_feed_enabled', { amount: formatBanmao(minStake) }), { parse_mode: "Markdown" });
         } catch (error) {
             console.error(`[GroupFeed] Lỗi cấu hình cho nhóm ${chatId}:`, error.message);
-            bot.sendMessage(chatId, t(userLang, 'group_feed_error'), { parse_mode: "Markdown" });
+            await sendInThread(t(userLang, 'group_feed_error'), { parse_mode: "Markdown" });
         }
     });
 
@@ -1952,6 +1955,13 @@ async function broadcastGroupGameUpdate(eventType, payload) {
             parse_mode: "Markdown",
             disable_web_page_preview: true
         };
+
+        if (group.messageThreadId !== undefined && group.messageThreadId !== null) {
+            const numericThreadId = Number(group.messageThreadId);
+            if (Number.isInteger(numericThreadId)) {
+                options.message_thread_id = numericThreadId;
+            }
+        }
 
         if (messagePayload.withButton) {
             options.reply_markup = {
