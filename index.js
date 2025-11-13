@@ -21,6 +21,11 @@ const WEB_URL = "https://www.banmao.fun";
 const defaultLang = 'en';
 const roomCache = new Map();
 const finalRoomOutcomes = new Map();
+const MAX_TELEGRAM_RETRIES = 5;
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function markRoomFinalOutcome(roomId, outcome) {
     const roomIdStr = toRoomIdString(roomId);
@@ -1602,6 +1607,32 @@ async function handleForfeitedEvent(roomId, loser, winner, winnerPayout) {
 // ==========================================================
 // 🚀 PHẦN 5: HÀM GỬI THÔNG BÁO (CHỈ GỬI TEXT)
 // ==========================================================
+async function sendTelegramMessageWithRetry(chatId, message, options, attempt = 1) {
+    try {
+        return await bot.sendMessage(chatId, message, options);
+    } catch (error) {
+        const errorCode = error?.response?.body?.error_code;
+        const parameters = error?.response?.body?.parameters || {};
+        const shouldRetry = (errorCode === 429 || errorCode === 500) && attempt < MAX_TELEGRAM_RETRIES;
+
+        if (shouldRetry) {
+            let waitSeconds = 1;
+            if (typeof parameters.retry_after === 'number') {
+                waitSeconds = parameters.retry_after;
+            } else {
+                waitSeconds = Math.min(2 ** attempt, 30);
+            }
+
+            const waitMs = Math.max(waitSeconds, 1) * 1000;
+            console.warn(`[Notify] Gửi tin tới ${chatId} thất bại (mã ${errorCode}). Thử lại sau ${Math.round(waitMs / 1000)}s (lần ${attempt + 1}/${MAX_TELEGRAM_RETRIES}).`);
+            await delay(waitMs);
+            return sendTelegramMessageWithRetry(chatId, message, options, attempt + 1);
+        }
+
+        throw error;
+    }
+}
+
 async function sendInstantNotification(playerAddress, langKey, variables = {}) {
     if (!playerAddress || playerAddress === ethers.ZeroAddress) return;
 
@@ -1619,7 +1650,7 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
         return;
     }
 
-    const tasks = users.map(async ({ chatId, lang }) => {
+    for (const { chatId, lang } of users) {
         const langCode = await resolveNotificationLanguage(chatId, lang);
         const resolvedVariables = { ...variables };
 
@@ -1650,7 +1681,7 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
             url: `${WEB_URL}/?join=${variables.roomId || ''}`
         };
 
-        let options = {
+        const options = {
             parse_mode: "Markdown",
             reply_markup: {
                 inline_keyboard: [[button]]
@@ -1666,14 +1697,12 @@ async function sendInstantNotification(playerAddress, langKey, variables = {}) {
         }
 
         try {
-            await bot.sendMessage(chatId, message, options);
+            await sendTelegramMessageWithRetry(chatId, message, options);
             console.log(`[Notify] Đã gửi thông báo TEXT '${langKey}' tới ${chatId}`);
         } catch (error) {
             console.error(`[Lỗi Gửi Text]: ${error.message}`);
         }
-    });
-
-    await Promise.allSettled(tasks);
+    }
 }
 
 async function broadcastGroupGameUpdate(eventType, payload) {
