@@ -8,8 +8,9 @@ const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const https = require('https');
 const { t_, normalizeLanguageCode } = require('./i18n.js');
-const db = require('./database.js'); 
+const db = require('./database.js');
 
 // --- CẤU HÌNH ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -717,31 +718,104 @@ async function tryFetchOkxMarketTicker() {
 }
 
 async function fetchOkxJson(url) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), OKX_FETCH_TIMEOUT);
+    const urlString = typeof url === 'string' ? url : url.toString();
+    const headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'banmao-bot/1.0 (+https://www.banmao.fun)'
+    };
 
-    try {
-        const response = await fetch(url.toString(), {
-            method: 'GET',
-            signal: controller.signal,
-            headers: {
-                'Accept': 'application/json'
-            }
+    if (typeof fetch === 'function') {
+        const supportsAbort = typeof AbortController === 'function';
+        const controller = supportsAbort ? new AbortController() : null;
+        let timeoutId = null;
+        let timedOut = false;
+
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+                timedOut = true;
+                if (controller) {
+                    controller.abort();
+                }
+                reject(new Error('Request timed out'));
+            }, OKX_FETCH_TIMEOUT);
         });
 
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
+        try {
+            const response = await Promise.race([
+                fetch(urlString, {
+                    method: 'GET',
+                    headers,
+                    ...(controller ? { signal: controller.signal } : {})
+                }),
+                timeoutPromise
+            ]);
 
-        return await response.json();
-    } catch (error) {
-        if (error && error.name === 'AbortError') {
-            throw new Error('Request timed out');
+            if (!response || typeof response.json !== 'function') {
+                throw new Error('Invalid response from fetch');
+            }
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            if (timedOut || (controller && error && error.name === 'AbortError')) {
+                throw new Error('Request timed out');
+            }
+            throw error;
+        } finally {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
         }
-        throw error;
-    } finally {
-        clearTimeout(timeout);
     }
+
+    return await fetchOkxJsonWithHttps(urlString, headers);
+}
+
+function fetchOkxJsonWithHttps(urlString, headers) {
+    return new Promise((resolve, reject) => {
+        const request = https.get(urlString, { headers }, (response) => {
+            const { statusCode } = response;
+            const chunks = [];
+
+            response.setEncoding('utf8');
+            response.on('error', reject);
+
+            if (!statusCode || statusCode < 200 || statusCode >= 300) {
+                if (typeof response.resume === 'function') {
+                    response.resume();
+                }
+                reject(new Error(`HTTP ${statusCode || 'ERR'}`));
+                return;
+            }
+
+            response.on('data', (chunk) => chunks.push(chunk));
+            response.on('end', () => {
+                const body = chunks.join('');
+
+                if (!body) {
+                    resolve(null);
+                    return;
+                }
+
+                try {
+                    resolve(JSON.parse(body));
+                } catch (error) {
+                    reject(error);
+                }
+            });
+        });
+
+        request.on('error', (error) => {
+            reject(error);
+        });
+
+        request.setTimeout(OKX_FETCH_TIMEOUT, () => {
+            request.destroy(new Error('Request timed out'));
+        });
+    });
 }
 
 function extractOkxPriceValue(entry) {
