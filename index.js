@@ -24,7 +24,7 @@ const defaultLang = 'en';
 const roomCache = new Map();
 const finalRoomOutcomes = new Map();
 const MAX_TELEGRAM_RETRIES = 5;
-const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://www.okx.com';
+const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
 const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'x-layer';
 const OKX_BANMAO_TOKEN_ADDRESS =
     normalizeOkxConfigAddress(process.env.OKX_BANMAO_TOKEN_ADDRESS) ||
@@ -80,6 +80,10 @@ const OKX_CHAIN_INDEX = (() => {
     return Number.isFinite(numeric) ? numeric : null;
 })();
 const OKX_CHAIN_CONTEXT_TTL = Number(process.env.OKX_CHAIN_CONTEXT_TTL || 10 * 60 * 1000);
+const OKX_CHAIN_INDEX_FALLBACK = Number.isFinite(Number(process.env.OKX_CHAIN_INDEX_FALLBACK))
+    ? Number(process.env.OKX_CHAIN_INDEX_FALLBACK)
+    : 196;
+const OKX_TOKEN_DIRECTORY_TTL = Number(process.env.OKX_TOKEN_DIRECTORY_TTL || 10 * 60 * 1000);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
@@ -94,6 +98,7 @@ const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
 let banmaoDecimalsCache = null;
 let banmaoDecimalsFetchedAt = 0;
 const tokenDecimalsCache = new Map();
+const okxTokenDirectoryCache = new Map();
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -882,18 +887,31 @@ async function getBanmaoTokenDecimals(chainName) {
         console.warn(`[BanmaoDecimals] Failed to load token profile: ${error.message}`);
     }
 
+    try {
+        const directory = await fetchOkxTokenDirectory(chainName);
+        const match = directory?.byAddressLower?.get(BANMAO_ADDRESS_LOWER);
+        if (match && Number.isFinite(match.decimals)) {
+            banmaoDecimalsCache = Math.max(0, Math.trunc(match.decimals));
+            banmaoDecimalsFetchedAt = now;
+            return banmaoDecimalsCache;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoDecimals] Failed to load token directory: ${error.message}`);
+    }
+
     return banmaoDecimalsCache !== null ? banmaoDecimalsCache : BANMAO_DECIMALS_DEFAULT;
 }
 
 async function resolveTokenDecimals(tokenAddress, options = {}) {
-    const { chainName, fallback = null } = options;
+    const { chainName, chainIndex, fallback = null } = options;
 
     if (!tokenAddress || typeof tokenAddress !== 'string') {
         return fallback;
     }
 
     const normalized = normalizeOkxConfigAddress(tokenAddress);
-    const lower = normalized ? normalized.toLowerCase() : tokenAddress.toLowerCase();
+    const addressText = normalized || tokenAddress;
+    const lower = addressText.toLowerCase();
 
     if (BANMAO_ADDRESS_LOWER && lower === BANMAO_ADDRESS_LOWER) {
         return getBanmaoTokenDecimals(chainName);
@@ -914,7 +932,7 @@ async function resolveTokenDecimals(tokenAddress, options = {}) {
     }
 
     try {
-        const profile = await fetchBanmaoTokenProfile({ chainName, tokenAddress: normalized || tokenAddress });
+        const profile = await fetchBanmaoTokenProfile({ chainName, tokenAddress: addressText });
         const decimals = pickOkxNumeric(profile || {}, ['decimals', 'tokenDecimals', 'tokenDecimal', 'decimal']);
         if (Number.isFinite(decimals)) {
             tokenDecimalsCache.set(lower, { value: Math.max(0, Math.trunc(decimals)), expiresAt: now + BANMAO_DECIMALS_CACHE_TTL });
@@ -922,6 +940,18 @@ async function resolveTokenDecimals(tokenAddress, options = {}) {
         }
     } catch (error) {
         console.warn(`[TokenDecimals] Failed to resolve decimals for ${tokenAddress}: ${error.message}`);
+    }
+
+    try {
+        const directory = await fetchOkxTokenDirectory(chainName, { chainIndex });
+        const match = directory?.byAddressLower?.get(lower);
+        if (match && Number.isFinite(match.decimals)) {
+            const normalizedDecimals = Math.max(0, Math.trunc(match.decimals));
+            tokenDecimalsCache.set(lower, { value: normalizedDecimals, expiresAt: now + BANMAO_DECIMALS_CACHE_TTL });
+            return normalizedDecimals;
+        }
+    } catch (error) {
+        console.warn(`[TokenDecimals] Failed to query directory for ${tokenAddress}: ${error.message}`);
     }
 
     tokenDecimalsCache.set(lower, { value: fallback, expiresAt: now + (BANMAO_DECIMALS_CACHE_TTL / 2) });
@@ -1604,10 +1634,61 @@ async function fetchBanmaoTokenProfile(options = {}) {
 
     if (normalizedAddress) {
         query.tokenAddress = normalizedAddress;
+        query.tokenContractAddress = normalizedAddress;
     }
 
     const payload = await okxJsonRequest('GET', '/api/v6/dex/market/token/basic-info', { query });
     return unwrapOkxFirst(payload);
+}
+
+async function fetchOkxTokenDirectory(chainName, options = {}) {
+    const { chainIndex } = options;
+    const query = await buildOkxDexQuery(chainName, {
+        includeToken: false,
+        includeQuote: false,
+        explicitChainIndex: chainIndex
+    });
+
+    const cacheKey = `${query.chainIndex || 'na'}|${(query.chainShortName || '').toLowerCase()}`;
+    const now = Date.now();
+    const cached = okxTokenDirectoryCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/all-tokens', { query });
+    const rows = unwrapOkxData(payload);
+
+    const tokens = [];
+    const byAddressLower = new Map();
+
+    if (Array.isArray(rows)) {
+        for (const row of rows) {
+            const token = normalizeOkxTokenDirectoryToken(row);
+            if (!token) {
+                continue;
+            }
+
+            tokens.push(token);
+            if (!byAddressLower.has(token.addressLower)) {
+                byAddressLower.set(token.addressLower, token);
+            }
+        }
+    }
+
+    const directory = {
+        tokens,
+        byAddressLower,
+        chainIndex: query.chainIndex ?? null,
+        chainShortName: query.chainShortName || null
+    };
+
+    okxTokenDirectoryCache.set(cacheKey, {
+        value: directory,
+        expiresAt: now + OKX_TOKEN_DIRECTORY_TTL
+    });
+
+    return directory;
 }
 
 async function fetchBanmaoRecentTrades(options = {}) {
@@ -2107,7 +2188,13 @@ async function resolveOkxChainContext(chainName) {
         return cached.value;
     }
 
-    const directory = await ensureOkxChainDirectory();
+    let directory = null;
+    try {
+        directory = await ensureOkxChainDirectory();
+    } catch (error) {
+        console.warn(`[OKX] Failed to load chain directory: ${error.message}`);
+    }
+
     const aggregator = directory?.aggregator || [];
     const market = directory?.market || [];
 
@@ -2135,6 +2222,23 @@ async function resolveOkxChainContext(chainName) {
         match = aggregator[0] || market[0] || null;
     }
 
+    if (!match) {
+        const fallbackShortName = OKX_CHAIN_SHORT_NAME || 'x-layer';
+        const fallbackKeys = collectChainSearchKeys(fallbackShortName);
+        match = {
+            chainShortName: fallbackShortName,
+            chainName: fallbackShortName,
+            chainIndex: Number.isFinite(OKX_CHAIN_INDEX)
+                ? Number(OKX_CHAIN_INDEX)
+                : OKX_CHAIN_INDEX_FALLBACK,
+            chainId: null,
+            aliases: [fallbackShortName],
+            keys: fallbackKeys,
+            primaryKey: fallbackKeys[0] || null,
+            raw: null
+        };
+    }
+
     if (okxResolvedChainCache.size > 50) {
         okxResolvedChainCache.clear();
     }
@@ -2150,25 +2254,51 @@ async function resolveOkxChainContext(chainName) {
 async function buildOkxDexQuery(chainName, options = {}) {
     const query = {};
     const context = await resolveOkxChainContext(chainName);
+    const explicitChainIndex = options.explicitChainIndex;
+    const explicitChainShortName = options.explicitChainShortName;
+
+    if (explicitChainShortName) {
+        query.chainShortName = explicitChainShortName;
+    }
+
+    if (Number.isFinite(explicitChainIndex)) {
+        query.chainIndex = Number(explicitChainIndex);
+    }
 
     if (context) {
-        if (context.chainShortName) {
-            query.chainShortName = context.chainShortName;
-        } else if (chainName) {
-            query.chainShortName = chainName;
+        if (!query.chainShortName) {
+            if (context.chainShortName) {
+                query.chainShortName = context.chainShortName;
+            } else if (chainName) {
+                query.chainShortName = chainName;
+            }
         }
 
-        if (Number.isFinite(context.chainIndex)) {
-            query.chainIndex = context.chainIndex;
-        } else if (Number.isFinite(OKX_CHAIN_INDEX)) {
-            query.chainIndex = Number(OKX_CHAIN_INDEX);
+        if (!Number.isFinite(query.chainIndex)) {
+            if (Number.isFinite(context.chainIndex)) {
+                query.chainIndex = Number(context.chainIndex);
+            } else if (Number.isFinite(OKX_CHAIN_INDEX)) {
+                query.chainIndex = Number(OKX_CHAIN_INDEX);
+            }
         }
 
         if (Number.isFinite(context.chainId)) {
             query.chainId = context.chainId;
         }
-    } else if (chainName) {
+    } else if (chainName && !query.chainShortName) {
         query.chainShortName = chainName;
+    }
+
+    if (!query.chainShortName) {
+        query.chainShortName = OKX_CHAIN_SHORT_NAME || 'x-layer';
+    }
+
+    if (!Number.isFinite(query.chainIndex)) {
+        if (Number.isFinite(OKX_CHAIN_INDEX)) {
+            query.chainIndex = Number(OKX_CHAIN_INDEX);
+        } else if (Number.isFinite(OKX_CHAIN_INDEX_FALLBACK)) {
+            query.chainIndex = OKX_CHAIN_INDEX_FALLBACK;
+        }
     }
 
     const includeToken = options.includeToken !== false;
@@ -2176,10 +2306,19 @@ async function buildOkxDexQuery(chainName, options = {}) {
 
     if (includeToken && OKX_BANMAO_TOKEN_ADDRESS) {
         query.tokenAddress = OKX_BANMAO_TOKEN_ADDRESS;
+        query.baseTokenAddress = query.baseTokenAddress || OKX_BANMAO_TOKEN_ADDRESS;
+        query.baseCurrency = query.baseCurrency || OKX_BANMAO_TOKEN_ADDRESS;
+        query.baseToken = query.baseToken || OKX_BANMAO_TOKEN_ADDRESS;
+        query.tokenContractAddress = query.tokenContractAddress || OKX_BANMAO_TOKEN_ADDRESS;
     }
 
     if (includeQuote && OKX_QUOTE_TOKEN_ADDRESS) {
         query.quoteTokenAddress = OKX_QUOTE_TOKEN_ADDRESS;
+        query.quoteCurrency = query.quoteCurrency || OKX_QUOTE_TOKEN_ADDRESS;
+        query.quoteToken = query.quoteToken || OKX_QUOTE_TOKEN_ADDRESS;
+        if (!query.toTokenAddress) {
+            query.toTokenAddress = OKX_QUOTE_TOKEN_ADDRESS;
+        }
     }
 
     return query;
@@ -2480,7 +2619,20 @@ function unwrapOkxData(payload) {
     }
 
     if (directData && typeof directData === 'object') {
-        const candidates = [directData.data, directData.items, directData.list, directData.rows, directData.result];
+        const candidates = [
+            directData.data,
+            directData.items,
+            directData.list,
+            directData.rows,
+            directData.result,
+            directData.candles,
+            directData.records,
+            directData.trades,
+            directData.pools,
+            directData.liquidityList,
+            directData.tokens,
+            directData.tokenList
+        ];
         for (const candidate of candidates) {
             if (Array.isArray(candidate)) {
                 return candidate;
@@ -2620,6 +2772,49 @@ function normalizeNumeric(value) {
     }
 
     return null;
+}
+
+function normalizeOkxTokenDirectoryToken(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+
+    const addressCandidate = entry.tokenContractAddress
+        || entry.tokenAddress
+        || entry.contractAddress
+        || entry.address
+        || entry.baseTokenAddress
+        || entry.token;
+
+    if (!addressCandidate || typeof addressCandidate !== 'string') {
+        return null;
+    }
+
+    const normalizedAddress = normalizeOkxConfigAddress(addressCandidate) || addressCandidate.trim();
+    if (!normalizedAddress) {
+        return null;
+    }
+
+    const decimals = pickOkxNumeric(entry, ['decimals', 'decimal', 'tokenDecimal']);
+    const symbolCandidate = typeof entry.tokenSymbol === 'string'
+        ? entry.tokenSymbol
+        : (typeof entry.symbol === 'string' ? entry.symbol : null);
+    const nameCandidate = typeof entry.tokenName === 'string'
+        ? entry.tokenName
+        : (typeof entry.name === 'string' ? entry.name : null);
+    const logoCandidate = typeof entry.tokenLogoUrl === 'string'
+        ? entry.tokenLogoUrl
+        : (typeof entry.logoUrl === 'string' ? entry.logoUrl : (typeof entry.logo === 'string' ? entry.logo : null));
+
+    return {
+        address: normalizedAddress,
+        addressLower: normalizedAddress.toLowerCase(),
+        decimals: Number.isFinite(decimals) ? Math.max(0, Math.trunc(decimals)) : null,
+        symbol: symbolCandidate ? symbolCandidate.trim() : null,
+        name: nameCandidate ? nameCandidate.trim() : null,
+        logo: logoCandidate ? logoCandidate.trim() : null,
+        raw: entry
+    };
 }
 
 function toRoomIdString(roomId) {
@@ -3219,9 +3414,19 @@ function startTelegramBot() {
                 fail: `❌ ${t(lang, 'banmaostatus_state_failed')}`
             }[statusKey] || `ℹ️ ${status.status || t(lang, 'banmaostatus_state_unknown')}`;
 
+            const toDetailArray = (value) => {
+                if (Array.isArray(value)) {
+                    return value;
+                }
+                if (value && typeof value === 'object') {
+                    return [value];
+                }
+                return [];
+            };
+
             const mapDetails = async (details) => {
                 const parts = [];
-                for (const detail of details) {
+                for (const detail of toDetailArray(details)) {
                     if (!detail) {
                         continue;
                     }
@@ -3231,7 +3436,10 @@ function startTelegramBot() {
                     if (Number.isFinite(decimals)) {
                         decimals = Math.max(0, Math.trunc(decimals));
                     } else {
-                        const resolvedDecimals = await resolveTokenDecimals(address);
+                        const resolvedDecimals = await resolveTokenDecimals(address, {
+                            chainName: status.chain,
+                            chainIndex: status.chainIndex
+                        });
                         decimals = Number.isFinite(resolvedDecimals) ? Math.max(0, Math.trunc(resolvedDecimals)) : null;
                     }
 
@@ -3253,8 +3461,8 @@ function startTelegramBot() {
                 return parts;
             };
 
-            const fromDetails = await mapDetails(status.fromTokenDetails || []);
-            const toDetails = await mapDetails(status.toTokenDetails || []);
+            const fromDetails = await mapDetails(status.fromTokenDetails);
+            const toDetails = await mapDetails(status.toTokenDetails);
 
             const timeIso = status.txTime ? new Date(status.txTime).toISOString().replace('T', ' ').slice(0, 19) : null;
             const lines = [
