@@ -115,8 +115,38 @@ function buildThreadedOptions(source, options = {}) {
     return { ...options, message_thread_id: threadId };
 }
 
-function sendMessageRespectingThread(chatId, source, text, options = {}) {
-    return bot.sendMessage(chatId, text, buildThreadedOptions(source, options));
+async function sendMessageRespectingThread(chatId, source, text, options = {}) {
+    const threadedOptions = buildThreadedOptions(source, options);
+
+    try {
+        return await bot.sendMessage(chatId, text, threadedOptions);
+    } catch (error) {
+        const errorCode = error?.response?.body?.error_code;
+        const description = error?.response?.body?.description || '';
+        const hasThread = Object.prototype.hasOwnProperty.call(threadedOptions, 'message_thread_id');
+
+        if (hasThread && errorCode === 400) {
+            const lowered = description.toLowerCase();
+            const shouldFallback =
+                lowered.includes('message thread not found') ||
+                lowered.includes('topic is closed') ||
+                lowered.includes('forum topic is closed') ||
+                lowered.includes('forum topics are disabled') ||
+                lowered.includes('forum is disabled') ||
+                lowered.includes('wrong message thread id specified') ||
+                lowered.includes("can't send messages to the topic") ||
+                lowered.includes('not enough rights to send in the topic') ||
+                lowered.includes('not enough rights to send messages in the topic');
+
+            if (shouldFallback) {
+                console.warn(`[ThreadFallback] Gửi tin nhắn tới thread ${threadedOptions.message_thread_id} thất bại (${description}). Thử gửi không chỉ định thread.`);
+                const fallbackOptions = { ...options };
+                return bot.sendMessage(chatId, text, fallbackOptions);
+            }
+        }
+
+        throw error;
+    }
 }
 
 function sendReply(sourceMessage, text, options = {}) {
@@ -1107,18 +1137,34 @@ function startTelegramBot() {
     bot.onText(/\/help/, async (msg) => {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const helpMessage = `${t(lang, 'help_header')}\n\n${[
+        const generalCommands = [
             t(lang, 'help_command_start'),
             t(lang, 'help_command_register'),
             t(lang, 'help_command_mywallet'),
             t(lang, 'help_command_stats'),
             t(lang, 'help_command_unregister'),
             t(lang, 'help_command_language'),
-            t(lang, 'help_command_banmaofeed'),
             t(lang, 'help_command_feedlang'),
-            t(lang, 'help_command_feedtopic'),
             t(lang, 'help_command_help')
-        ].join('\n')}`;
+        ];
+
+        const adminCommands = [
+            t(lang, 'help_command_banmaofeed'),
+            t(lang, 'help_command_feedtopic')
+        ];
+
+        const sections = [
+            t(lang, 'help_header'),
+            '',
+            t(lang, 'help_section_general_title'),
+            generalCommands.join('\n')
+        ];
+
+        if (adminCommands.length > 0) {
+            sections.push('', t(lang, 'help_section_admin_title'), adminCommands.join('\n'));
+        }
+
+        const helpMessage = sections.join('\n');
         sendReply(msg, helpMessage, { parse_mode: "Markdown" });
     });
 

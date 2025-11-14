@@ -130,6 +130,8 @@
   "group_broadcast_cta": "Chơi ngay",
   "group_broadcast_footer": "Nhấn nút bên dưới để tham gia trận tiếp theo!",
   "help_header": "📖 **Danh sách lệnh của Bot Banmao RPS**",
+  "help_section_general_title": "👥 **Dành cho mọi người**",
+  "help_section_admin_title": "🛡️ **Công cụ cho admin nhóm**",
   "help_command_start": "• `/start` — Mở lại tin nhắn chào mừng và liên kết từ DApp khi bạn nhấn *Mở bot*.",
   "help_command_register": "• `/register <địa_chỉ_ví>` — Thêm ví vào danh sách theo dõi.",
   "help_command_mywallet": "• `/mywallet` — Xem tất cả ví bạn đang theo dõi.",

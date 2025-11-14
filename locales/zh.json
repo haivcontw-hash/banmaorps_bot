@@ -130,6 +130,8 @@
   "group_broadcast_cta": "立即加入",
   "group_broadcast_footer": "点击下方按钮，加入下一场大战！",
   "help_header": "📖 **Banmao RPS 机器人指令**",
+  "help_section_general_title": "👥 **适用于所有成员**",
+  "help_section_admin_title": "🛡️ **群管理员专用工具**",
   "help_command_start": "• `/start` — 点击 *Open bot* 时重新显示欢迎信息并连接 DApp。",
   "help_command_register": "• `/register <钱包地址>` — 手动将钱包加入监控列表。",
   "help_command_mywallet": "• `/mywallet` — 查看当前监控的所有钱包。",

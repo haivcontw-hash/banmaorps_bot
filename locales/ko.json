@@ -130,6 +130,8 @@
   "group_broadcast_cta": "지금 참여",
   "group_broadcast_footer": "아래 버튼을 눌러 다음 전투에 합류하세요!",
   "help_header": "📖 **Banmao RPS 봇 명령어**",
+  "help_section_general_title": "👥 **모두에게**",
+  "help_section_admin_title": "🛡️ **그룹 관리자 도구**",
   "help_command_start": "• `/start` — *Open bot*을 눌렀을 때 환영 메시지를 다시 보고 DApp과 연결합니다.",
   "help_command_register": "• `/register <지갑주소>` — 지갑을 수동으로 연결합니다.",
   "help_command_mywallet": "• `/mywallet` — 현재 모니터링 중인 모든 지갑을 확인합니다.",

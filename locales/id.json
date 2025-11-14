@@ -130,6 +130,8 @@
   "group_broadcast_cta": "Main sekarang",
   "group_broadcast_footer": "Tekan tombol di bawah dan ramaikan duel berikutnya!",
   "help_header": "📖 **Perintah Banmao RPS Bot**",
+  "help_section_general_title": "👥 **Untuk semua orang**",
+  "help_section_admin_title": "🛡️ **Alat admin grup**",
   "help_command_start": "• `/start` — Buka lagi pesan sambutan dan hubungkan dari DApp saat menekan *Open bot*.",
   "help_command_register": "• `/register <alamat_dompet>` — Tambahkan dompet secara manual ke daftar pantauan Anda.",
   "help_command_mywallet": "• `/mywallet` — Lihat semua dompet yang sedang Anda pantau.",
