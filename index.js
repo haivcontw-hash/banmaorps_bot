@@ -8,8 +8,10 @@ const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const https = require('https');
+const crypto = require('crypto');
 const { t_, normalizeLanguageCode } = require('./i18n.js');
-const db = require('./database.js'); 
+const db = require('./database.js');
 
 // --- CẤU HÌNH ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -22,9 +24,106 @@ const defaultLang = 'en';
 const roomCache = new Map();
 const finalRoomOutcomes = new Map();
 const MAX_TELEGRAM_RETRIES = 5;
+const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://web3.okx.com';
+const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'x-layer';
+const OKX_BANMAO_TOKEN_ADDRESS =
+    normalizeOkxConfigAddress(process.env.OKX_BANMAO_TOKEN_ADDRESS) ||
+    '0x16d91d1615FC55B76d5f92365Bd60C069B46ef78';
+const OKX_QUOTE_TOKEN_ADDRESS =
+    normalizeOkxConfigAddress(process.env.OKX_QUOTE_TOKEN_ADDRESS) ||
+    '0x779Ded0c9e1022225f8E0630b35a9b54bE713736';
+const BANMAO_ADDRESS_LOWER = OKX_BANMAO_TOKEN_ADDRESS ? OKX_BANMAO_TOKEN_ADDRESS.toLowerCase() : null;
+const OKX_QUOTE_ADDRESS_LOWER = OKX_QUOTE_TOKEN_ADDRESS ? OKX_QUOTE_TOKEN_ADDRESS.toLowerCase() : null;
+const OKX_MARKET_INSTRUMENT = process.env.OKX_MARKET_INSTRUMENT || 'BANMAO-USDT';
+const OKX_FETCH_TIMEOUT = Number(process.env.OKX_FETCH_TIMEOUT || 10000);
+const OKX_API_KEY = process.env.OKX_API_KEY || null;
+const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || null;
+const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || null;
+const OKX_API_PROJECT = process.env.OKX_API_PROJECT || null;
+const OKX_API_SIMULATED = String(process.env.OKX_API_SIMULATED || '').toLowerCase() === 'true';
+const OKX_OKB_TOKEN_ADDRESSES = (() => {
+    const raw = process.env.OKX_OKB_TOKEN_ADDRESSES
+        || '0xe538905cf8410324e03a5a23c1c177a474d59b2b';
+
+    const seen = new Set();
+    const result = [];
+
+    for (const value of raw.split(/[|,\s]+/)) {
+        if (!value) {
+            continue;
+        }
+
+        const normalized = normalizeOkxConfigAddress(value);
+        if (!normalized) {
+            continue;
+        }
+
+        const lowered = normalized.toLowerCase();
+        if (seen.has(lowered)) {
+            continue;
+        }
+
+        seen.add(lowered);
+        result.push(lowered);
+    }
+
+    return result;
+})();
+const OKX_OKB_SYMBOL_KEYS = ['okb', 'wokb'];
+const OKX_CHAIN_INDEX = (() => {
+    const value = process.env.OKX_CHAIN_INDEX;
+    if (value === undefined || value === null || value === '') {
+        return null;
+    }
+
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+})();
+const OKX_CHAIN_CONTEXT_TTL = Number(process.env.OKX_CHAIN_CONTEXT_TTL || 10 * 60 * 1000);
+const OKX_CHAIN_INDEX_FALLBACK = Number.isFinite(Number(process.env.OKX_CHAIN_INDEX_FALLBACK))
+    ? Number(process.env.OKX_CHAIN_INDEX_FALLBACK)
+    : 196;
+const OKX_TOKEN_DIRECTORY_TTL = Number(process.env.OKX_TOKEN_DIRECTORY_TTL || 10 * 60 * 1000);
+const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
+const OKX_BANMAO_TOKEN_URL =
+    process.env.OKX_BANMAO_TOKEN_URL ||
+    'https://web3.okx.com/token/x-layer/0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
+
+let okxChainDirectoryCache = null;
+let okxChainDirectoryExpiresAt = 0;
+let okxChainDirectoryPromise = null;
+const okxResolvedChainCache = new Map();
+const BANMAO_DECIMALS_DEFAULT = 18;
+const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
+let banmaoDecimalsCache = null;
+let banmaoDecimalsFetchedAt = 0;
+const tokenDecimalsCache = new Map();
+const okxTokenDirectoryCache = new Map();
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeOkxConfigAddress(value) {
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    try {
+        return ethers.getAddress(trimmed);
+    } catch (error) {
+        const basicHexPattern = /^0x[0-9a-fA-F]{40}$/;
+        if (basicHexPattern.test(trimmed)) {
+            return trimmed;
+        }
+    }
+
+    return null;
 }
 
 function markRoomFinalOutcome(roomId, outcome) {
@@ -115,8 +214,38 @@ function buildThreadedOptions(source, options = {}) {
     return { ...options, message_thread_id: threadId };
 }
 
-function sendMessageRespectingThread(chatId, source, text, options = {}) {
-    return bot.sendMessage(chatId, text, buildThreadedOptions(source, options));
+async function sendMessageRespectingThread(chatId, source, text, options = {}) {
+    const threadedOptions = buildThreadedOptions(source, options);
+
+    try {
+        return await bot.sendMessage(chatId, text, threadedOptions);
+    } catch (error) {
+        const errorCode = error?.response?.body?.error_code;
+        const description = error?.response?.body?.description || '';
+        const hasThread = Object.prototype.hasOwnProperty.call(threadedOptions, 'message_thread_id');
+
+        if (hasThread && errorCode === 400) {
+            const lowered = description.toLowerCase();
+            const shouldFallback =
+                lowered.includes('message thread not found') ||
+                lowered.includes('topic is closed') ||
+                lowered.includes('forum topic is closed') ||
+                lowered.includes('forum topics are disabled') ||
+                lowered.includes('forum is disabled') ||
+                lowered.includes('wrong message thread id specified') ||
+                lowered.includes("can't send messages to the topic") ||
+                lowered.includes('not enough rights to send in the topic') ||
+                lowered.includes('not enough rights to send messages in the topic');
+
+            if (shouldFallback) {
+                console.warn(`[ThreadFallback] Gửi tin nhắn tới thread ${threadedOptions.message_thread_id} thất bại (${description}). Thử gửi không chỉ định thread.`);
+                const fallbackOptions = { ...options };
+                return bot.sendMessage(chatId, text, fallbackOptions);
+            }
+        }
+
+        throw error;
+    }
 }
 
 function sendReply(sourceMessage, text, options = {}) {
@@ -417,6 +546,2148 @@ function formatBanmaoFromWei(weiValue) {
     } catch (error) {
         return '0.00';
     }
+}
+
+function formatUsdPrice(amount) {
+    const numeric = Number(amount);
+    if (!Number.isFinite(numeric)) {
+        return '0.0000';
+    }
+
+    let minimumFractionDigits = 2;
+    let maximumFractionDigits = 2;
+
+    if (numeric < 1 && numeric >= 0.01) {
+        minimumFractionDigits = 4;
+        maximumFractionDigits = 4;
+    } else if (numeric < 0.01 && numeric >= 0.0001) {
+        minimumFractionDigits = 6;
+        maximumFractionDigits = 6;
+    } else if (numeric < 0.0001) {
+        minimumFractionDigits = 8;
+        maximumFractionDigits = 8;
+    }
+
+    return numeric.toLocaleString('en-US', {
+        minimumFractionDigits,
+        maximumFractionDigits
+    });
+}
+
+function formatUsdCompact(amount) {
+    const numeric = Number(amount);
+    if (!Number.isFinite(numeric) || numeric === 0) {
+        return '—';
+    }
+
+    try {
+        return numeric.toLocaleString('en-US', {
+            style: 'currency',
+            currency: 'USD',
+            notation: 'compact',
+            maximumFractionDigits: 2
+        });
+    } catch (error) {
+        const abs = Math.abs(numeric);
+        if (abs >= 1e9) {
+            return `$${(numeric / 1e9).toFixed(2)}B`;
+        }
+        if (abs >= 1e6) {
+            return `$${(numeric / 1e6).toFixed(2)}M`;
+        }
+        if (abs >= 1e3) {
+            return `$${(numeric / 1e3).toFixed(2)}K`;
+        }
+        return `$${numeric.toFixed(2)}`;
+    }
+}
+
+function formatPercentage(value, options = {}) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return '0.00%';
+    }
+
+    const { minimumFractionDigits = 2, maximumFractionDigits = 2, includeSign = true } = options;
+    const formatter = new Intl.NumberFormat('en-US', {
+        minimumFractionDigits,
+        maximumFractionDigits
+    });
+
+    const formatted = formatter.format(Math.abs(numeric));
+    const sign = includeSign ? (numeric >= 0 ? '+' : '-') : '';
+    return `${sign}${formatted}%`;
+}
+
+function normalizePercentageValue(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return null;
+    }
+
+    if (Math.abs(numeric) <= 1) {
+        return numeric * 100;
+    }
+
+    return numeric;
+}
+
+function formatTokenQuantity(amount, options = {}) {
+    const numeric = Number(amount);
+    if (!Number.isFinite(numeric)) {
+        return '—';
+    }
+
+    const { minimumFractionDigits = 2, maximumFractionDigits = 4 } = options;
+    return numeric.toLocaleString('en-US', {
+        minimumFractionDigits,
+        maximumFractionDigits
+    });
+}
+
+function formatTokenAmountFromUnits(amount, decimals, options = {}) {
+    const bigIntValue = parseBigIntValue(amount);
+    if (bigIntValue === null) {
+        return null;
+    }
+
+    const digits = Number.isFinite(decimals) ? Math.max(0, Math.trunc(decimals)) : 0;
+
+    try {
+        const formatted = ethers.formatUnits(bigIntValue, digits);
+        const numeric = Number(formatted);
+        if (Number.isFinite(numeric)) {
+            const minimumFractionDigits = Number.isFinite(options.minimumFractionDigits)
+                ? options.minimumFractionDigits
+                : (Math.abs(numeric) < 1 ? 6 : 2);
+            const maximumFractionDigits = Number.isFinite(options.maximumFractionDigits)
+                ? options.maximumFractionDigits
+                : Math.max(minimumFractionDigits, Math.abs(numeric) < 1 ? 8 : 6);
+
+            return numeric.toLocaleString('en-US', {
+                minimumFractionDigits,
+                maximumFractionDigits
+            });
+        }
+
+        return formatted;
+    } catch (error) {
+        return null;
+    }
+}
+
+function formatTimestampRange(startMs, endMs) {
+    const start = startMs ? new Date(startMs) : null;
+    const end = endMs ? new Date(endMs) : null;
+
+    const format = (date) => {
+        if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+            return '—';
+        }
+        return date.toISOString().replace('T', ' ').slice(0, 16);
+    };
+
+    return { start: format(start), end: format(end) };
+}
+
+function formatRelativeTime(timestampMs) {
+    if (!Number.isFinite(Number(timestampMs))) {
+        return null;
+    }
+
+    const now = Date.now();
+    const diffMs = now - Number(timestampMs);
+    if (!Number.isFinite(diffMs)) {
+        return null;
+    }
+
+    const diffSeconds = Math.max(Math.round(diffMs / 1000), 0);
+    if (diffSeconds < 60) {
+        return `${diffSeconds}s`;
+    }
+
+    const diffMinutes = Math.floor(diffSeconds / 60);
+    if (diffMinutes < 60) {
+        return `${diffMinutes}m`;
+    }
+
+    const diffHours = Math.floor(diffMinutes / 60);
+    if (diffHours < 48) {
+        return `${diffHours}h`;
+    }
+
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffDays < 30) {
+        return `${diffDays}d`;
+    }
+
+    const diffMonths = Math.floor(diffDays / 30);
+    if (diffMonths < 12) {
+        return `${diffMonths}mo`;
+    }
+
+    const diffYears = Math.floor(diffMonths / 12);
+    return `${diffYears}y`;
+}
+
+function renderSparkline(values) {
+    if (!Array.isArray(values) || values.length === 0) {
+        return null;
+    }
+
+    const numericValues = values
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value));
+
+    if (numericValues.length === 0) {
+        return null;
+    }
+
+    const min = Math.min(...numericValues);
+    const max = Math.max(...numericValues);
+
+    if (min === max) {
+        return '▅'.repeat(numericValues.length);
+    }
+
+    const blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    const scale = (value) => {
+        const normalized = (value - min) / (max - min);
+        const index = Math.min(blocks.length - 1, Math.max(0, Math.round(normalized * (blocks.length - 1))));
+        return blocks[index];
+    };
+
+    return numericValues.map((value) => scale(value)).join('');
+}
+
+async function fetchBanmaoQuoteSnapshot(options = {}) {
+    if (!OKX_BANMAO_TOKEN_ADDRESS || !OKX_QUOTE_TOKEN_ADDRESS) {
+        throw new Error('Missing OKX token addresses');
+    }
+
+    const { chainName, slippagePercent = '0.5', amount: amountOverride } = options;
+    const query = await buildOkxDexQuery(chainName, { includeToken: false, includeQuote: false });
+    const context = await resolveOkxChainContext(chainName);
+
+    const chainIndex = Number.isFinite(query.chainIndex)
+        ? Number(query.chainIndex)
+        : (Number.isFinite(context?.chainIndex) ? Number(context.chainIndex) : null);
+
+    if (!Number.isFinite(chainIndex)) {
+        throw new Error('Unable to resolve OKX chain index');
+    }
+
+    const amount = amountOverride || await resolveBanmaoQuoteAmount(chainName);
+    const requestQuery = {
+        chainIndex,
+        fromTokenAddress: OKX_BANMAO_TOKEN_ADDRESS,
+        toTokenAddress: OKX_QUOTE_TOKEN_ADDRESS,
+        amount,
+        swapMode: 'exactIn',
+        slippagePercent
+    };
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/quote', {
+        query: requestQuery
+    });
+
+    const quoteEntries = unwrapOkxData(payload);
+    const quoteEntry = selectOkxQuoteByLiquidity(quoteEntries) || unwrapOkxFirst(payload);
+    if (!quoteEntry) {
+        return null;
+    }
+
+    const priceInfo = extractOkxQuotePrice(quoteEntry, { requestAmount: amount });
+    if (!Number.isFinite(priceInfo.price) || priceInfo.price <= 0) {
+        return null;
+    }
+
+    const chainLabel = context?.chainName || context?.chainShortName || query.chainShortName || chainName || '(default)';
+    const okbUsd = resolveOkbUsdPrice(priceInfo.tokenUnitPrices);
+    const priceOkb = Number.isFinite(priceInfo.price) && Number.isFinite(okbUsd) && okbUsd > 0
+        ? priceInfo.price / okbUsd
+        : null;
+
+    const extractSymbol = (token, fallback) => {
+        if (!token || typeof token !== 'object') {
+            return fallback;
+        }
+
+        const candidate = typeof token.tokenSymbol === 'string'
+            ? token.tokenSymbol
+            : (typeof token.symbol === 'string' ? token.symbol : null);
+
+        if (candidate && candidate.trim()) {
+            return candidate.trim().toUpperCase();
+        }
+
+        return fallback;
+    };
+
+    const routerList = Array.isArray(quoteEntry.dexRouterList) ? quoteEntry.dexRouterList : [];
+    const firstRoute = routerList[0] || null;
+    const lastRoute = routerList.length > 0 ? routerList[routerList.length - 1] : null;
+
+    const fromSymbol = extractSymbol(quoteEntry.fromToken, extractSymbol(firstRoute?.fromToken, 'BANMAO'));
+    const toSymbol = extractSymbol(quoteEntry.toToken, extractSymbol(lastRoute?.toToken, 'USDT'));
+
+    const tradeFeeUsd = normalizeNumeric(quoteEntry.tradeFee);
+    const priceImpactPercent = normalizeNumeric(quoteEntry.priceImpactPercent);
+    const routeLabel = summarizeOkxQuoteRoute(quoteEntry);
+
+    return {
+        price: priceInfo.price,
+        priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
+        okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
+        chain: chainLabel,
+        chainIndex,
+        source: 'OKX DEX quote',
+        amount,
+        decimals: priceInfo.fromDecimals,
+        quoteDecimals: priceInfo.toDecimals,
+        fromAmount: priceInfo.fromAmount,
+        toAmount: priceInfo.toAmount,
+        fromSymbol,
+        toSymbol,
+        tradeFeeUsd: Number.isFinite(tradeFeeUsd) ? tradeFeeUsd : null,
+        priceImpactPercent: Number.isFinite(priceImpactPercent) ? priceImpactPercent : null,
+        routeLabel,
+        tokenPrices: priceInfo.tokenUnitPrices,
+        derivedPrice: priceInfo.amountPrice,
+        raw: quoteEntry
+    };
+}
+
+async function resolveBanmaoQuoteAmount(chainName) {
+    const decimals = await getBanmaoTokenDecimals(chainName);
+    const safeDecimals = Number.isFinite(decimals) ? Math.max(0, Math.min(36, Math.trunc(decimals))) : BANMAO_DECIMALS_DEFAULT;
+
+    try {
+        return (BigInt(10) ** BigInt(safeDecimals)).toString();
+    } catch (error) {
+        // Fallback to 1 * 10^18 if exponentiation fails for any reason
+        return '1000000000000000000';
+    }
+}
+
+async function getBanmaoTokenDecimals(chainName) {
+    const now = Date.now();
+    if (banmaoDecimalsCache !== null && banmaoDecimalsFetchedAt > 0 && now - banmaoDecimalsFetchedAt < BANMAO_DECIMALS_CACHE_TTL) {
+        return banmaoDecimalsCache;
+    }
+
+    try {
+        const profile = await fetchBanmaoTokenProfile({ chainName });
+        const decimals = pickOkxNumeric(profile || {}, ['decimals', 'tokenDecimals', 'tokenDecimal', 'decimal']);
+        if (Number.isFinite(decimals)) {
+            banmaoDecimalsCache = Math.max(0, Math.trunc(decimals));
+            banmaoDecimalsFetchedAt = now;
+            return banmaoDecimalsCache;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoDecimals] Failed to load token profile: ${error.message}`);
+    }
+
+    try {
+        const directory = await fetchOkxTokenDirectory(chainName);
+        const match = directory?.byAddressLower?.get(BANMAO_ADDRESS_LOWER);
+        if (match && Number.isFinite(match.decimals)) {
+            banmaoDecimalsCache = Math.max(0, Math.trunc(match.decimals));
+            banmaoDecimalsFetchedAt = now;
+            return banmaoDecimalsCache;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoDecimals] Failed to load token directory: ${error.message}`);
+    }
+
+    return banmaoDecimalsCache !== null ? banmaoDecimalsCache : BANMAO_DECIMALS_DEFAULT;
+}
+
+async function resolveTokenDecimals(tokenAddress, options = {}) {
+    const { chainName, chainIndex, fallback = null } = options;
+
+    if (!tokenAddress || typeof tokenAddress !== 'string') {
+        return fallback;
+    }
+
+    const normalized = normalizeOkxConfigAddress(tokenAddress);
+    const addressText = normalized || tokenAddress;
+    const lower = addressText.toLowerCase();
+
+    if (BANMAO_ADDRESS_LOWER && lower === BANMAO_ADDRESS_LOWER) {
+        return getBanmaoTokenDecimals(chainName);
+    }
+
+    if (OKX_QUOTE_ADDRESS_LOWER && lower === OKX_QUOTE_ADDRESS_LOWER) {
+        return 6;
+    }
+
+    if (OKX_OKB_TOKEN_ADDRESSES.includes(lower)) {
+        return 18;
+    }
+
+    const cached = tokenDecimalsCache.get(lower);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    try {
+        const profile = await fetchBanmaoTokenProfile({ chainName, tokenAddress: addressText });
+        const decimals = pickOkxNumeric(profile || {}, ['decimals', 'tokenDecimals', 'tokenDecimal', 'decimal']);
+        if (Number.isFinite(decimals)) {
+            tokenDecimalsCache.set(lower, { value: Math.max(0, Math.trunc(decimals)), expiresAt: now + BANMAO_DECIMALS_CACHE_TTL });
+            return Math.max(0, Math.trunc(decimals));
+        }
+    } catch (error) {
+        console.warn(`[TokenDecimals] Failed to resolve decimals for ${tokenAddress}: ${error.message}`);
+    }
+
+    try {
+        const directory = await fetchOkxTokenDirectory(chainName, { chainIndex });
+        const match = directory?.byAddressLower?.get(lower);
+        if (match && Number.isFinite(match.decimals)) {
+            const normalizedDecimals = Math.max(0, Math.trunc(match.decimals));
+            tokenDecimalsCache.set(lower, { value: normalizedDecimals, expiresAt: now + BANMAO_DECIMALS_CACHE_TTL });
+            return normalizedDecimals;
+        }
+    } catch (error) {
+        console.warn(`[TokenDecimals] Failed to query directory for ${tokenAddress}: ${error.message}`);
+    }
+
+    tokenDecimalsCache.set(lower, { value: fallback, expiresAt: now + (BANMAO_DECIMALS_CACHE_TTL / 2) });
+    return fallback;
+}
+
+function parseBigIntValue(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+
+    if (typeof value === 'bigint') {
+        return value;
+    }
+
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value)) {
+            return null;
+        }
+        return BigInt(Math.trunc(value));
+    }
+
+    if (typeof value === 'string') {
+        const cleaned = value.replace(/[,_\s]/g, '');
+        if (!cleaned) {
+            return null;
+        }
+
+        if (/^-?\d+$/.test(cleaned)) {
+            try {
+                return BigInt(cleaned);
+            } catch (error) {
+                return null;
+            }
+        }
+    }
+
+    return null;
+}
+
+function extractOkxTokenUnitPrice(token) {
+    if (!token || typeof token !== 'object') {
+        return null;
+    }
+
+    const keys = ['tokenUnitPrice', 'unitPrice', 'priceUsd', 'usdPrice', 'price'];
+    for (const key of keys) {
+        if (!Object.prototype.hasOwnProperty.call(token, key)) {
+            continue;
+        }
+
+        const numeric = normalizeNumeric(token[key]);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+    }
+
+    return null;
+}
+
+function normalizeOkxTokenAddress(value) {
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+
+    const normalized = normalizeOkxConfigAddress(value);
+    if (normalized) {
+        return normalized.toLowerCase();
+    }
+
+    const trimmed = value.trim();
+    return trimmed ? trimmed.toLowerCase() : null;
+}
+
+function collectOkxTokenUnitPrices(entry, routerList = []) {
+    const tokens = [];
+    const byAddress = new Map();
+    const bySymbol = new Map();
+
+    const register = (token, meta = {}) => {
+        if (!token || typeof token !== 'object') {
+            return;
+        }
+
+        const unitPrice = extractOkxTokenUnitPrice(token);
+        if (!Number.isFinite(unitPrice)) {
+            return;
+        }
+
+        const symbolRaw = typeof token.tokenSymbol === 'string'
+            ? token.tokenSymbol
+            : (typeof token.symbol === 'string' ? token.symbol : null);
+        const symbol = symbolRaw ? symbolRaw.trim() : null;
+
+        const addressCandidates = [
+            token.tokenContractAddress,
+            token.tokenAddress,
+            token.contractAddress,
+            token.address,
+            token.contract,
+            token.mintAddress
+        ];
+
+        let normalizedAddress = null;
+        for (const candidate of addressCandidates) {
+            const normalized = normalizeOkxTokenAddress(candidate);
+            if (normalized) {
+                normalizedAddress = normalized;
+                break;
+            }
+        }
+
+        const record = {
+            unitPrice,
+            symbol,
+            address: normalizedAddress,
+            meta,
+            raw: token
+        };
+
+        tokens.push(record);
+
+        if (normalizedAddress && !byAddress.has(normalizedAddress)) {
+            byAddress.set(normalizedAddress, record);
+        }
+
+        if (symbol) {
+            const symbolKey = symbol.toLowerCase();
+            if (!bySymbol.has(symbolKey)) {
+                bySymbol.set(symbolKey, record);
+            }
+        }
+    };
+
+    register(entry?.fromToken, { source: 'fromToken' });
+    register(entry?.toToken, { source: 'toToken' });
+    register(entry?.sellToken, { source: 'sellToken' });
+    register(entry?.buyToken, { source: 'buyToken' });
+
+    routerList.forEach((route, index) => {
+        register(route?.fromToken, { source: 'router', hop: index, side: 'from' });
+        register(route?.toToken, { source: 'router', hop: index, side: 'to' });
+    });
+
+    const fromTokenEntry = BANMAO_ADDRESS_LOWER && byAddress.has(BANMAO_ADDRESS_LOWER)
+        ? byAddress.get(BANMAO_ADDRESS_LOWER)
+        : null;
+    const quoteTokenEntry = OKX_QUOTE_ADDRESS_LOWER && byAddress.has(OKX_QUOTE_ADDRESS_LOWER)
+        ? byAddress.get(OKX_QUOTE_ADDRESS_LOWER)
+        : null;
+
+    return {
+        list: tokens,
+        byAddress,
+        bySymbol,
+        fromTokenUsd: fromTokenEntry && Number.isFinite(fromTokenEntry.unitPrice)
+            ? fromTokenEntry.unitPrice
+            : null,
+        quoteTokenUsd: quoteTokenEntry && Number.isFinite(quoteTokenEntry.unitPrice)
+            ? quoteTokenEntry.unitPrice
+            : null
+    };
+}
+
+function summarizeOkxQuoteRoute(entry) {
+    const list = Array.isArray(entry?.dexRouterList) ? entry.dexRouterList : [];
+    if (list.length === 0) {
+        return null;
+    }
+
+    const seen = new Set();
+    const names = [];
+
+    const normalizeName = (value) => {
+        if (!value || typeof value !== 'string') {
+            return null;
+        }
+
+        const trimmed = value.trim();
+        return trimmed ? trimmed : null;
+    };
+
+    const extractDexName = (hop) => {
+        const nameCandidates = [
+            hop?.dexProtocol?.dexName,
+            hop?.dexProtocol?.name,
+            hop?.dexName
+        ];
+
+        for (const candidate of nameCandidates) {
+            const normalized = normalizeName(candidate);
+            if (normalized) {
+                return normalized;
+            }
+        }
+
+        return null;
+    };
+
+    const extractTokenAddress = (token) => {
+        if (!token || typeof token !== 'object') {
+            return null;
+        }
+
+        const candidates = [
+            token.tokenContractAddress,
+            token.tokenAddress,
+            token.contractAddress,
+            token.address
+        ];
+
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate) {
+                return candidate.trim().toLowerCase();
+            }
+        }
+
+        return null;
+    };
+
+    const pushName = (name) => {
+        if (!name) {
+            return;
+        }
+
+        const key = name.toLowerCase();
+        if (seen.has(key)) {
+            return;
+        }
+
+        seen.add(key);
+        names.push(name);
+    };
+
+    // Prioritize the hop that handles BANMAO so the main route highlights DYOR Swap.
+    if (BANMAO_ADDRESS_LOWER) {
+        for (const hop of list) {
+            const fromAddress = extractTokenAddress(hop?.fromToken);
+            if (fromAddress && fromAddress === BANMAO_ADDRESS_LOWER) {
+                pushName(extractDexName(hop));
+                break;
+            }
+        }
+    }
+
+    for (const hop of list) {
+        pushName(extractDexName(hop));
+    }
+
+    if (names.length === 0) {
+        return null;
+    }
+
+    return names.join(' → ');
+}
+
+function resolveOkbUsdPrice(tokenPrices) {
+    if (!tokenPrices) {
+        return null;
+    }
+
+    const { byAddress, bySymbol, list } = tokenPrices;
+
+    if (byAddress instanceof Map) {
+        for (const address of OKX_OKB_TOKEN_ADDRESSES) {
+            if (!address) {
+                continue;
+            }
+
+            const entry = byAddress.get(address);
+            if (entry && Number.isFinite(entry.unitPrice)) {
+                return entry.unitPrice;
+            }
+        }
+    }
+
+    if (bySymbol instanceof Map) {
+        for (const key of OKX_OKB_SYMBOL_KEYS) {
+            if (!key) {
+                continue;
+            }
+
+            const entry = bySymbol.get(key);
+            if (entry && Number.isFinite(entry.unitPrice)) {
+                return entry.unitPrice;
+            }
+        }
+    }
+
+    if (Array.isArray(list)) {
+        for (const entry of list) {
+            if (!entry || !Number.isFinite(entry.unitPrice)) {
+                continue;
+            }
+
+            const symbol = typeof entry.symbol === 'string' ? entry.symbol.toUpperCase() : '';
+            if (symbol.includes('OKB')) {
+                return entry.unitPrice;
+            }
+        }
+    }
+
+    return null;
+}
+
+function selectOkxQuoteByLiquidity(quotes) {
+    if (!Array.isArray(quotes) || quotes.length === 0) {
+        return null;
+    }
+
+    let bestEntry = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (const entry of quotes) {
+        if (!entry || typeof entry !== 'object') {
+            continue;
+        }
+
+        const score = computeOkxQuoteLiquidityScore(entry);
+        if (Number.isFinite(score)) {
+            if (!Number.isFinite(bestScore) || score > bestScore) {
+                bestScore = score;
+                bestEntry = entry;
+            }
+        } else if (bestEntry === null) {
+            bestEntry = entry;
+        }
+    }
+
+    return bestEntry;
+}
+
+function computeOkxQuoteLiquidityScore(entry) {
+    const routerList = Array.isArray(entry?.dexRouterList) ? entry.dexRouterList : [];
+    let bestLiquidity = null;
+
+    for (const hop of routerList) {
+        const hopLiquidity = pickOkxNumeric(hop, [
+            'liquidityUsd',
+            'usdLiquidity',
+            'poolLiquidity',
+            'liquidity',
+            'reserveUsd',
+            'valueUsd'
+        ]);
+
+        if (Number.isFinite(hopLiquidity)) {
+            bestLiquidity = Number.isFinite(bestLiquidity)
+                ? Math.max(bestLiquidity, hopLiquidity)
+                : hopLiquidity;
+        }
+    }
+
+    if (Number.isFinite(bestLiquidity)) {
+        return bestLiquidity;
+    }
+
+    const decimalsCandidates = [
+        pickOkxNumeric(entry, ['toTokenDecimals', 'buyTokenDecimals', 'toDecimals', 'toTokenDecimal']),
+        pickOkxNumeric(entry?.toToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(entry?.buyToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(routerList.length > 0 ? routerList[routerList.length - 1]?.toToken : null, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal'])
+    ];
+
+    const toDecimals = normalizeDecimalsCandidate(decimalsCandidates);
+    const toAmount = parseBigIntValue(
+        entry?.toTokenAmount
+        ?? entry?.buyTokenAmount
+        ?? entry?.toAmount
+        ?? entry?.outputAmount
+    );
+
+    if (toAmount === null) {
+        return null;
+    }
+
+    const decimals = Number.isFinite(toDecimals) ? Math.max(0, Math.trunc(toDecimals)) : 0;
+    let quantity = null;
+
+    try {
+        quantity = Number(ethers.formatUnits(toAmount, decimals));
+    } catch (error) {
+        quantity = null;
+    }
+
+    if (!Number.isFinite(quantity)) {
+        const numeric = Number(toAmount);
+        if (Number.isFinite(numeric)) {
+            quantity = numeric / Math.pow(10, decimals);
+        }
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+        return null;
+    }
+
+    const tokenPrices = collectOkxTokenUnitPrices(entry, routerList);
+    const quoteUsd = Number.isFinite(tokenPrices?.quoteTokenUsd) && tokenPrices.quoteTokenUsd > 0
+        ? tokenPrices.quoteTokenUsd
+        : 1;
+
+    return quantity * quoteUsd;
+}
+
+function extractOkxQuotePrice(entry, options = {}) {
+    if (!entry || typeof entry !== 'object') {
+        return {
+            price: null,
+            fromDecimals: null,
+            toDecimals: null,
+            fromAmount: null,
+            toAmount: null,
+            tokenUnitPrices: null,
+            quotePrice: null,
+            amountPrice: null
+        };
+    }
+
+    const directPrice = extractOkxPriceValue(entry);
+    const routerList = Array.isArray(entry.dexRouterList) ? entry.dexRouterList : [];
+    const firstRoute = routerList[0] || null;
+    const lastRoute = routerList.length > 0 ? routerList[routerList.length - 1] : null;
+
+    const fromDecimalsCandidates = [
+        pickOkxNumeric(entry, ['fromTokenDecimals', 'sellTokenDecimals', 'fromDecimals', 'fromTokenDecimal']),
+        pickOkxNumeric(entry.fromToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(entry.sellToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(firstRoute?.fromToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal'])
+    ];
+
+    const toDecimalsCandidates = [
+        pickOkxNumeric(entry, ['toTokenDecimals', 'buyTokenDecimals', 'toDecimals', 'toTokenDecimal']),
+        pickOkxNumeric(entry.toToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(entry.buyToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(lastRoute?.toToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal'])
+    ];
+
+    const fromDecimals = normalizeDecimalsCandidate(fromDecimalsCandidates);
+    const toDecimals = normalizeDecimalsCandidate(toDecimalsCandidates);
+
+    const tokenPrices = collectOkxTokenUnitPrices(entry, routerList);
+
+    const fromAmount = parseBigIntValue(
+        entry.fromTokenAmount
+        ?? entry.sellTokenAmount
+        ?? entry.fromAmount
+        ?? entry.inputAmount
+        ?? options.requestAmount
+    );
+
+    const toAmount = parseBigIntValue(
+        entry.toTokenAmount
+        ?? entry.buyTokenAmount
+        ?? entry.toAmount
+        ?? entry.outputAmount
+    );
+
+    const priceFromAmounts = (fromAmount !== null && toAmount !== null)
+        ? computePriceFromTokenAmounts(fromAmount, toAmount, fromDecimals, toDecimals)
+        : null;
+
+    let price = tokenPrices && Number.isFinite(tokenPrices.fromTokenUsd)
+        ? tokenPrices.fromTokenUsd
+        : null;
+
+    if (!Number.isFinite(price) && Number.isFinite(directPrice)) {
+        price = Number(directPrice);
+    }
+
+    if (!Number.isFinite(price) && Number.isFinite(priceFromAmounts)) {
+        price = priceFromAmounts;
+    }
+
+    const toAmountUsd = pickOkxNumeric(entry, ['toAmountUsd', 'toUsdAmount', 'toAmountInUsd', 'usdAmount']);
+    if (!Number.isFinite(price) && Number.isFinite(toAmountUsd) && fromAmount !== null) {
+        const decimals = Number.isFinite(fromDecimals) ? fromDecimals : 0;
+        const fromNumeric = Number(fromAmount);
+        if (Number.isFinite(fromNumeric) && fromNumeric > 0) {
+            const scale = Math.pow(10, decimals);
+            price = (toAmountUsd / fromNumeric) * scale;
+        }
+    }
+
+    if (!Number.isFinite(price)) {
+        price = null;
+    }
+
+    return {
+        price,
+        fromDecimals,
+        toDecimals,
+        fromAmount,
+        toAmount,
+        tokenUnitPrices: tokenPrices,
+        quotePrice: Number.isFinite(directPrice) ? Number(directPrice) : null,
+        amountPrice: Number.isFinite(priceFromAmounts) ? priceFromAmounts : null
+    };
+}
+
+function normalizeDecimalsCandidate(candidates) {
+    if (!Array.isArray(candidates)) {
+        return null;
+    }
+
+    for (const candidate of candidates) {
+        const numeric = normalizeNumeric(candidate);
+        if (Number.isFinite(numeric)) {
+            return Math.max(0, Math.trunc(numeric));
+        }
+    }
+
+    return null;
+}
+
+function computePriceFromTokenAmounts(fromAmount, toAmount, fromDecimals, toDecimals) {
+    if (fromAmount === null || toAmount === null) {
+        return null;
+    }
+
+    const hasFromDecimals = Number.isFinite(fromDecimals);
+    const hasToDecimals = Number.isFinite(toDecimals);
+    const fromDigits = hasFromDecimals ? Math.max(0, Math.trunc(fromDecimals)) : 0;
+    const toDigits = hasToDecimals ? Math.max(0, Math.trunc(toDecimals)) : 0;
+
+    try {
+        const numerator = toAmount * (BigInt(10) ** BigInt(fromDigits));
+        const denominator = fromAmount * (BigInt(10) ** BigInt(toDigits));
+        if (denominator === 0n) {
+            return null;
+        }
+
+        const ratio = Number(numerator) / Number(denominator);
+        if (Number.isFinite(ratio)) {
+            return ratio;
+        }
+    } catch (error) {
+        // Fallback to floating point math below
+    }
+
+    const fromNumeric = Number(fromAmount);
+    const toNumeric = Number(toAmount);
+    if (Number.isFinite(fromNumeric) && fromNumeric > 0 && Number.isFinite(toNumeric)) {
+        let ratio = toNumeric / fromNumeric;
+        if (hasFromDecimals || hasToDecimals) {
+            const decimalsDiff = fromDigits - toDigits;
+            if (decimalsDiff !== 0) {
+                ratio *= Math.pow(10, decimalsDiff);
+            }
+        }
+        return Number.isFinite(ratio) ? ratio : null;
+    }
+
+    return null;
+}
+
+async function fetchBanmaoPrice() {
+    const errors = [];
+
+    try {
+        const quoteSnapshot = await fetchBanmaoQuoteSnapshot();
+        if (quoteSnapshot && Number.isFinite(quoteSnapshot.price)) {
+            return quoteSnapshot;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoPrice] Quote snapshot failed: ${error.message}`);
+        errors.push(error);
+    }
+
+    try {
+        const snapshot = await fetchBanmaoMarketSnapshot();
+        if (snapshot && Number.isFinite(snapshot.price)) {
+            return snapshot;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoPrice] Market snapshot failed: ${error.message}`);
+        errors.push(error);
+    }
+
+    try {
+        const fallbackTicker = await tryFetchOkxMarketTicker();
+        if (fallbackTicker) {
+            return fallbackTicker;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoPrice] Market ticker fallback failed: ${error.message}`);
+        errors.push(error);
+    }
+
+    if (errors.length > 0) {
+        throw errors[errors.length - 1];
+    }
+
+    throw new Error('No price data available');
+}
+
+async function fetchBanmaoMarketSnapshot() {
+    const chainNames = getOkxChainShortNameCandidates();
+    const errors = [];
+
+    for (const chainName of chainNames) {
+        try {
+            const snapshot = await fetchBanmaoMarketSnapshotForChain(chainName);
+            if (snapshot) {
+                return snapshot;
+            }
+        } catch (error) {
+            errors.push(error);
+        }
+    }
+
+    try {
+        const fallbackSnapshot = await fetchBanmaoMarketSnapshotForChain();
+        if (fallbackSnapshot) {
+            return fallbackSnapshot;
+        }
+    } catch (error) {
+        errors.push(error);
+    }
+
+    if (errors.length > 0) {
+        throw errors[errors.length - 1];
+    }
+
+    return null;
+}
+
+async function fetchBanmaoMarketSnapshotForChain(chainName) {
+    const query = await buildOkxDexQuery(chainName);
+    const chainLabel = query.chainShortName || chainName || '(default)';
+    const errors = [];
+
+    let priceInfoEntry = null;
+    try {
+        const payload = await okxJsonRequest('GET', '/api/v6/dex/market/price-info', { query });
+        priceInfoEntry = unwrapOkxFirst(payload);
+    } catch (error) {
+        errors.push(new Error(`[price-info:${chainLabel}] ${error.message}`));
+    }
+
+    let priceEntry = priceInfoEntry;
+    let source = 'OKX DEX price-info';
+
+    if (!Number.isFinite(extractOkxPriceValue(priceEntry))) {
+        try {
+            const payload = await okxJsonRequest('GET', '/api/v6/dex/market/price', { query });
+            priceEntry = unwrapOkxFirst(payload);
+            source = 'OKX DEX price';
+        } catch (error) {
+            errors.push(new Error(`[price:${chainLabel}] ${error.message}`));
+        }
+    }
+
+    if (!Number.isFinite(extractOkxPriceValue(priceEntry))) {
+        try {
+            const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/tokenPrice', { query });
+            priceEntry = unwrapOkxFirst(payload);
+            source = 'OKX DEX tokenPrice';
+        } catch (error) {
+            errors.push(new Error(`[tokenPrice:${chainLabel}] ${error.message}`));
+        }
+    }
+
+    const tokenPrices = collectOkxTokenUnitPrices(priceEntry || priceInfoEntry);
+
+    let price = extractOkxPriceValue(priceEntry);
+    if (!Number.isFinite(price) && tokenPrices && Number.isFinite(tokenPrices.fromTokenUsd)) {
+        price = tokenPrices.fromTokenUsd;
+    }
+
+    if (!Number.isFinite(price)) {
+        if (errors.length > 0) {
+            throw errors[errors.length - 1];
+        }
+        return null;
+    }
+
+    const metricsSource = priceInfoEntry || priceEntry || {};
+    const changeAbs = pickOkxNumeric(metricsSource, ['usdChange24h', 'change24h', 'priceChangeUsd', 'priceChange', 'usdChange']);
+    const changePercent = pickOkxNumeric(metricsSource, ['changeRate', 'changePercent', 'priceChangePercent', 'percentChange24h', 'change24hPercent']);
+    const volume = pickOkxNumeric(metricsSource, ['usdVolume24h', 'volumeUsd24h', 'volume24h', 'turnover24h', 'usdTurnover24h']);
+    const liquidity = pickOkxNumeric(metricsSource, ['usdLiquidity', 'liquidityUsd', 'poolLiquidity', 'liquidity']);
+    const marketCap = pickOkxNumeric(metricsSource, ['usdMarketCap', 'marketCap', 'fdvUsd', 'fullyDilutedMarketCap', 'marketCapUsd']);
+    const supply = pickOkxNumeric(metricsSource, ['totalSupply', 'supply', 'circulatingSupply']);
+    const okbUsd = resolveOkbUsdPrice(tokenPrices);
+    const priceOkb = Number.isFinite(price) && Number.isFinite(okbUsd) && okbUsd > 0
+        ? price / okbUsd
+        : null;
+
+    return {
+        price,
+        priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
+        okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
+        changeAbs,
+        changePercent,
+        volume,
+        liquidity,
+        marketCap,
+        supply,
+        chain: chainLabel,
+        source,
+        tokenPrices,
+        raw: { priceEntry, priceInfoEntry }
+    };
+}
+
+async function fetchBanmaoTokenProfile(options = {}) {
+    const { chainName, tokenAddress } = options;
+    const query = await buildOkxDexQuery(chainName, { includeToken: false });
+    const normalizedAddress = tokenAddress
+        ? normalizeOkxConfigAddress(tokenAddress) || tokenAddress
+        : OKX_BANMAO_TOKEN_ADDRESS;
+
+    if (normalizedAddress) {
+        query.tokenAddress = normalizedAddress;
+        query.tokenContractAddress = normalizedAddress;
+    }
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/market/token/basic-info', { query });
+    return unwrapOkxFirst(payload);
+}
+
+async function fetchOkxTokenDirectory(chainName, options = {}) {
+    const { chainIndex } = options;
+    const query = await buildOkxDexQuery(chainName, {
+        includeToken: false,
+        includeQuote: false,
+        explicitChainIndex: chainIndex
+    });
+
+    const cacheKey = `${query.chainIndex || 'na'}|${(query.chainShortName || '').toLowerCase()}`;
+    const now = Date.now();
+    const cached = okxTokenDirectoryCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/all-tokens', { query });
+    const rows = unwrapOkxData(payload);
+
+    const tokens = [];
+    const byAddressLower = new Map();
+
+    if (Array.isArray(rows)) {
+        for (const row of rows) {
+            const token = normalizeOkxTokenDirectoryToken(row);
+            if (!token) {
+                continue;
+            }
+
+            tokens.push(token);
+            if (!byAddressLower.has(token.addressLower)) {
+                byAddressLower.set(token.addressLower, token);
+            }
+        }
+    }
+
+    const directory = {
+        tokens,
+        byAddressLower,
+        chainIndex: query.chainIndex ?? null,
+        chainShortName: query.chainShortName || null
+    };
+
+    okxTokenDirectoryCache.set(cacheKey, {
+        value: directory,
+        expiresAt: now + OKX_TOKEN_DIRECTORY_TTL
+    });
+
+    return directory;
+}
+
+async function fetchOkxSupportedChains() {
+    const directory = await ensureOkxChainDirectory();
+
+    const formatList = (list) => {
+        if (!Array.isArray(list) || list.length === 0) {
+            return [];
+        }
+
+        const seen = new Set();
+        const result = [];
+
+        for (const entry of list) {
+            if (!entry) {
+                continue;
+            }
+
+            const key = entry.primaryKey
+                || (Number.isFinite(entry.chainIndex) ? `idx:${entry.chainIndex}` : null)
+                || (entry.chainShortName ? normalizeChainKey(entry.chainShortName) : null);
+
+            if (key && seen.has(key)) {
+                continue;
+            }
+
+            if (key) {
+                seen.add(key);
+            }
+
+            const names = [];
+            if (entry.chainName) {
+                names.push(entry.chainName);
+            }
+            if (entry.chainShortName && entry.chainShortName !== entry.chainName) {
+                names.push(entry.chainShortName);
+            }
+
+            const baseLabel = names.length > 1
+                ? `${names[0]} (${names[1]})`
+                : (names[0] || entry.aliases?.[0] || 'Unknown');
+
+            const meta = [];
+            if (Number.isFinite(entry.chainIndex)) {
+                meta.push(`#${entry.chainIndex}`);
+            }
+            if (Number.isFinite(entry.chainId) && entry.chainId !== entry.chainIndex) {
+                meta.push(`id ${entry.chainId}`);
+            }
+
+            const metaText = meta.length > 0 ? ` [${meta.join(' · ')}]` : '';
+            result.push(`${baseLabel}${metaText}`);
+        }
+
+        return result;
+    };
+
+    return {
+        aggregator: formatList(directory?.aggregator || []),
+        market: formatList(directory?.market || [])
+    };
+}
+
+async function fetchOkx402Supported() {
+    const payload = await okxJsonRequest('GET', '/api/v6/x402/supported', { query: {} });
+    const data = unwrapOkxData(payload);
+    if (!data || data.length === 0) {
+        return [];
+    }
+
+    return data
+        .map((entry) => {
+            if (!entry) {
+                return null;
+            }
+            if (typeof entry === 'string') {
+                return entry;
+            }
+            if (typeof entry === 'object') {
+                return entry.chainShortName || entry.chainName || entry.name || null;
+            }
+            return null;
+        })
+        .filter(Boolean);
+}
+
+async function tryFetchOkxMarketTicker() {
+    if (!OKX_MARKET_INSTRUMENT) {
+        return null;
+    }
+
+    const payload = await okxJsonRequest('GET', '/api/v5/market/ticker', {
+        query: { instId: OKX_MARKET_INSTRUMENT },
+        expectOkCode: true,
+        auth: hasOkxCredentials
+    });
+
+    const tickerEntry = unwrapOkxFirst(payload);
+    const price = extractOkxPriceValue(tickerEntry);
+    const tokenPrices = collectOkxTokenUnitPrices(tickerEntry || {});
+    const okbUsd = resolveOkbUsdPrice(tokenPrices);
+    const priceOkb = Number.isFinite(price) && Number.isFinite(okbUsd) && okbUsd > 0
+        ? price / okbUsd
+        : null;
+
+    if (Number.isFinite(price)) {
+        return {
+            price,
+            priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
+            okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
+            source: 'OKX market ticker',
+            chain: null
+        };
+    }
+
+    return null;
+}
+
+function getOkxChainShortNameCandidates() {
+    const configured = typeof OKX_CHAIN_SHORT_NAME === 'string'
+        ? OKX_CHAIN_SHORT_NAME.split(/[|,]+/)
+        : [];
+
+    const defaults = [
+        'x-layer',
+        'xlayer',
+        'X Layer',
+        'X-Layer',
+        'X_LAYER',
+        'Xlayer'
+    ];
+
+    const seen = new Set();
+    const result = [];
+
+    for (const value of [...configured, ...defaults]) {
+        if (!value) {
+            continue;
+        }
+
+        const trimmed = value.trim();
+        if (!trimmed) {
+            continue;
+        }
+
+        const dedupeKey = trimmed.toLowerCase();
+        if (seen.has(dedupeKey)) {
+            continue;
+        }
+
+        seen.add(dedupeKey);
+        result.push(trimmed);
+    }
+
+    if (result.length === 0) {
+        result.push('x-layer');
+    }
+
+    return result;
+}
+
+function normalizeChainKey(value) {
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    return trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function normalizeOkxChainDirectoryEntry(entry) {
+    if (!entry) {
+        return null;
+    }
+
+    if (typeof entry === 'string') {
+        const trimmed = entry.trim();
+        if (!trimmed) {
+            return null;
+        }
+
+        const key = normalizeChainKey(trimmed);
+        return {
+            chainShortName: trimmed,
+            chainName: trimmed,
+            chainIndex: null,
+            chainId: null,
+            aliases: [trimmed],
+            keys: key ? [key] : [],
+            primaryKey: key,
+            raw: entry
+        };
+    }
+
+    if (typeof entry !== 'object') {
+        return null;
+    }
+
+    const aliasFields = [
+        entry.chainShortName,
+        entry.chainName,
+        entry.chain,
+        entry.name,
+        entry.shortName,
+        entry.short_name,
+        entry.short,
+        entry.symbol,
+        entry.chainSymbol,
+        entry.chainAlias,
+        entry.alias,
+        entry.displayName,
+        entry.label,
+        entry.networkName
+    ];
+
+    const aliases = Array.from(new Set(aliasFields
+        .map((value) => (typeof value === 'string' ? value.trim() : null))
+        .filter(Boolean)));
+
+    const chainShortName = aliases[0] || null;
+    const chainName = (typeof entry.chainName === 'string' && entry.chainName.trim())
+        ? entry.chainName.trim()
+        : (aliases[1] || chainShortName || null);
+
+    const chainIndexCandidate = entry.chainIndex ?? entry.index ?? entry.chain_id ?? entry.chainId ?? entry.id;
+    const chainIdCandidate = entry.chainId ?? entry.chain_id ?? entry.chainID ?? entry.id ?? entry.networkId;
+
+    const chainIndexNumeric = normalizeNumeric(chainIndexCandidate);
+    const chainIdNumeric = normalizeNumeric(chainIdCandidate);
+
+    const chainIndex = Number.isFinite(chainIndexNumeric) ? Math.trunc(chainIndexNumeric) : null;
+    const chainId = Number.isFinite(chainIdNumeric) ? Math.trunc(chainIdNumeric) : null;
+
+    const keys = Array.from(new Set(aliases
+        .map((alias) => normalizeChainKey(alias))
+        .filter(Boolean)));
+
+    const primaryKey = keys[0] || (Number.isFinite(chainIndex) ? `idx:${chainIndex}` : null);
+
+    return {
+        chainShortName: chainShortName || chainName || null,
+        chainName: chainName || chainShortName || null,
+        chainIndex,
+        chainId,
+        aliases,
+        keys,
+        primaryKey,
+        raw: entry
+    };
+}
+
+function dedupeOkxChainEntries(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    const seen = new Set();
+    const result = [];
+
+    for (const entry of entries) {
+        if (!entry) {
+            continue;
+        }
+
+        const key = entry.primaryKey
+            || (Number.isFinite(entry.chainIndex) ? `idx:${entry.chainIndex}` : null)
+            || (entry.chainShortName ? normalizeChainKey(entry.chainShortName) : null);
+
+        if (key && seen.has(key)) {
+            continue;
+        }
+
+        if (key) {
+            seen.add(key);
+        }
+
+        result.push(entry);
+    }
+
+    return result;
+}
+
+async function ensureOkxChainDirectory() {
+    const now = Date.now();
+    if (okxChainDirectoryCache && okxChainDirectoryExpiresAt > now) {
+        return okxChainDirectoryCache;
+    }
+
+    if (!okxChainDirectoryPromise) {
+        okxChainDirectoryPromise = loadOkxChainDirectory()
+            .then((directory) => {
+                okxChainDirectoryCache = directory;
+                okxChainDirectoryExpiresAt = Date.now() + OKX_CHAIN_CONTEXT_TTL;
+                return directory;
+            })
+            .catch((error) => {
+                okxChainDirectoryCache = null;
+                okxChainDirectoryExpiresAt = 0;
+                throw error;
+            })
+            .finally(() => {
+                okxChainDirectoryPromise = null;
+            });
+    }
+
+    return okxChainDirectoryPromise;
+}
+
+async function loadOkxChainDirectory() {
+    const [aggregator, market] = await Promise.allSettled([
+        okxJsonRequest('GET', '/api/v6/dex/aggregator/supported/chain', { query: {}, expectOkCode: false }),
+        okxJsonRequest('GET', '/api/v6/dex/market/supported/chain', { query: {}, expectOkCode: false })
+    ]);
+
+    const normalizeList = (payload) => {
+        const rawList = payload.status === 'fulfilled' ? unwrapOkxData(payload.value) : [];
+        const normalized = [];
+        for (const item of rawList || []) {
+            const entry = normalizeOkxChainDirectoryEntry(item);
+            if (entry) {
+                normalized.push(entry);
+            }
+        }
+        return dedupeOkxChainEntries(normalized);
+    };
+
+    return {
+        aggregator: normalizeList(aggregator),
+        market: normalizeList(market)
+    };
+}
+
+function findChainEntryByIndex(list, index) {
+    if (!Array.isArray(list) || !Number.isFinite(index)) {
+        return null;
+    }
+
+    const numericIndex = Number(index);
+    for (const entry of list) {
+        if (!entry) {
+            continue;
+        }
+
+        if (Number.isFinite(entry.chainIndex) && Number(entry.chainIndex) === numericIndex) {
+            return entry;
+        }
+    }
+
+    return null;
+}
+
+function findChainEntryByKeys(list, keys) {
+    if (!Array.isArray(list) || !Array.isArray(keys) || keys.length === 0) {
+        return null;
+    }
+
+    for (const entry of list) {
+        if (!entry || !Array.isArray(entry.keys)) {
+            continue;
+        }
+
+        for (const key of entry.keys) {
+            if (keys.includes(key)) {
+                return entry;
+            }
+        }
+    }
+
+    return null;
+}
+
+function collectChainSearchKeys(chainName) {
+    const names = [];
+
+    if (chainName) {
+        names.push(chainName);
+    }
+
+    if (OKX_CHAIN_SHORT_NAME) {
+        names.push(OKX_CHAIN_SHORT_NAME);
+    }
+
+    const configured = typeof OKX_CHAIN_SHORT_NAME === 'string'
+        ? OKX_CHAIN_SHORT_NAME.split(/[|,]+/)
+        : [];
+
+    for (const value of configured) {
+        names.push(value);
+    }
+
+    names.push('x-layer', 'xlayer', 'X Layer', 'okx xlayer', 'okbchain', 'okxchain');
+
+    const normalized = [];
+    const seen = new Set();
+
+    for (const name of names) {
+        if (!name || typeof name !== 'string') {
+            continue;
+        }
+
+        const variants = [
+            name,
+            name.replace(/[_\s-]+/g, ''),
+            name.replace(/[_\s]+/g, '-'),
+            name.replace(/[-]+/g, ' ')
+        ];
+
+        for (const variant of variants) {
+            const key = normalizeChainKey(variant);
+            if (key && !seen.has(key)) {
+                seen.add(key);
+                normalized.push(key);
+            }
+        }
+    }
+
+    return normalized;
+}
+
+async function resolveOkxChainContext(chainName) {
+    const cacheKey = chainName ? chainName.toLowerCase().trim() : '(default)';
+    const cached = okxResolvedChainCache.get(cacheKey);
+    const now = Date.now();
+
+    if (cached && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    let directory = null;
+    try {
+        directory = await ensureOkxChainDirectory();
+    } catch (error) {
+        console.warn(`[OKX] Failed to load chain directory: ${error.message}`);
+    }
+
+    const aggregator = directory?.aggregator || [];
+    const market = directory?.market || [];
+
+    const searchKeys = collectChainSearchKeys(chainName);
+
+    let match = null;
+
+    if (Number.isFinite(OKX_CHAIN_INDEX)) {
+        match = findChainEntryByIndex(aggregator, OKX_CHAIN_INDEX)
+            || findChainEntryByIndex(market, OKX_CHAIN_INDEX);
+    }
+
+    if (!match && searchKeys.length > 0) {
+        match = findChainEntryByKeys(aggregator, searchKeys)
+            || findChainEntryByKeys(market, searchKeys);
+    }
+
+    if (!match) {
+        const xlayerKey = 'xlayer';
+        match = findChainEntryByKeys(aggregator, [xlayerKey])
+            || findChainEntryByKeys(market, [xlayerKey]);
+    }
+
+    if (!match) {
+        match = aggregator[0] || market[0] || null;
+    }
+
+    if (!match) {
+        const fallbackShortName = OKX_CHAIN_SHORT_NAME || 'x-layer';
+        const fallbackKeys = collectChainSearchKeys(fallbackShortName);
+        match = {
+            chainShortName: fallbackShortName,
+            chainName: fallbackShortName,
+            chainIndex: Number.isFinite(OKX_CHAIN_INDEX)
+                ? Number(OKX_CHAIN_INDEX)
+                : OKX_CHAIN_INDEX_FALLBACK,
+            chainId: null,
+            aliases: [fallbackShortName],
+            keys: fallbackKeys,
+            primaryKey: fallbackKeys[0] || null,
+            raw: null
+        };
+    }
+
+    if (okxResolvedChainCache.size > 50) {
+        okxResolvedChainCache.clear();
+    }
+
+    okxResolvedChainCache.set(cacheKey, {
+        value: match,
+        expiresAt: now + OKX_CHAIN_CONTEXT_TTL
+    });
+
+    return match;
+}
+
+async function buildOkxDexQuery(chainName, options = {}) {
+    const query = {};
+    const context = await resolveOkxChainContext(chainName);
+    const explicitChainIndex = options.explicitChainIndex;
+    const explicitChainShortName = options.explicitChainShortName;
+
+    if (explicitChainShortName) {
+        query.chainShortName = explicitChainShortName;
+    }
+
+    if (Number.isFinite(explicitChainIndex)) {
+        query.chainIndex = Number(explicitChainIndex);
+    }
+
+    if (context) {
+        if (!query.chainShortName) {
+            if (context.chainShortName) {
+                query.chainShortName = context.chainShortName;
+            } else if (chainName) {
+                query.chainShortName = chainName;
+            }
+        }
+
+        if (!Number.isFinite(query.chainIndex)) {
+            if (Number.isFinite(context.chainIndex)) {
+                query.chainIndex = Number(context.chainIndex);
+            } else if (Number.isFinite(OKX_CHAIN_INDEX)) {
+                query.chainIndex = Number(OKX_CHAIN_INDEX);
+            }
+        }
+
+        if (Number.isFinite(context.chainId)) {
+            query.chainId = context.chainId;
+        }
+    } else if (chainName && !query.chainShortName) {
+        query.chainShortName = chainName;
+    }
+
+    if (!query.chainShortName) {
+        query.chainShortName = OKX_CHAIN_SHORT_NAME || 'x-layer';
+    }
+
+    if (!Number.isFinite(query.chainIndex)) {
+        if (Number.isFinite(OKX_CHAIN_INDEX)) {
+            query.chainIndex = Number(OKX_CHAIN_INDEX);
+        } else if (Number.isFinite(OKX_CHAIN_INDEX_FALLBACK)) {
+            query.chainIndex = OKX_CHAIN_INDEX_FALLBACK;
+        }
+    }
+
+    const includeToken = options.includeToken !== false;
+    const includeQuote = options.includeQuote !== false;
+
+    if (includeToken && OKX_BANMAO_TOKEN_ADDRESS) {
+        query.tokenAddress = OKX_BANMAO_TOKEN_ADDRESS;
+        query.baseTokenAddress = query.baseTokenAddress || OKX_BANMAO_TOKEN_ADDRESS;
+        query.baseCurrency = query.baseCurrency || OKX_BANMAO_TOKEN_ADDRESS;
+        query.baseToken = query.baseToken || OKX_BANMAO_TOKEN_ADDRESS;
+        query.tokenContractAddress = query.tokenContractAddress || OKX_BANMAO_TOKEN_ADDRESS;
+    }
+
+    if (includeQuote && OKX_QUOTE_TOKEN_ADDRESS) {
+        query.quoteTokenAddress = OKX_QUOTE_TOKEN_ADDRESS;
+        query.quoteCurrency = query.quoteCurrency || OKX_QUOTE_TOKEN_ADDRESS;
+        query.quoteToken = query.quoteToken || OKX_QUOTE_TOKEN_ADDRESS;
+        if (!query.toTokenAddress) {
+            query.toTokenAddress = OKX_QUOTE_TOKEN_ADDRESS;
+        }
+    }
+
+    return query;
+}
+
+async function okxJsonRequest(method, path, options = {}) {
+    const { query, body, auth = hasOkxCredentials, expectOkCode = true } = options;
+    const url = new URL(path, OKX_BASE_URL);
+
+    if (query && typeof query === 'object') {
+        for (const [key, value] of Object.entries(query)) {
+            if (value === undefined || value === null || value === '') {
+                continue;
+            }
+            url.searchParams.set(key, String(value));
+        }
+    }
+
+    const methodUpper = method.toUpperCase();
+    const requestPath = url.pathname + url.search;
+    const bodyString = body ? JSON.stringify(body) : '';
+
+    const headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'banmao-bot/2.0 (+https://www.banmao.fun)'
+    };
+
+    if (bodyString) {
+        headers['Content-Type'] = 'application/json';
+    }
+
+    if (auth && hasOkxCredentials) {
+        const timestamp = new Date().toISOString();
+        const signPayload = `${timestamp}${methodUpper}${requestPath}${bodyString}`;
+        const signature = crypto
+            .createHmac('sha256', OKX_SECRET_KEY)
+            .update(signPayload)
+            .digest('base64');
+
+        headers['OK-ACCESS-KEY'] = OKX_API_KEY;
+        headers['OK-ACCESS-SIGN'] = signature;
+        headers['OK-ACCESS-TIMESTAMP'] = timestamp;
+        headers['OK-ACCESS-PASSPHRASE'] = OKX_API_PASSPHRASE;
+        if (OKX_API_PROJECT) {
+            headers['OK-ACCESS-PROJECT'] = OKX_API_PROJECT;
+        }
+        if (OKX_API_SIMULATED) {
+            headers['x-simulated-trading'] = '1';
+        }
+    }
+
+    const response = await fetchJsonWithTimeout(url.toString(), {
+        method: methodUpper,
+        headers,
+        body: bodyString || undefined
+    }, OKX_FETCH_TIMEOUT);
+
+    if (!response) {
+        return null;
+    }
+
+    if (expectOkCode && response.code && response.code !== '0') {
+        const msg = typeof response.msg === 'string' ? response.msg : 'Unknown error';
+        throw new Error(`OKX response code ${response.code}: ${msg}`);
+    }
+
+    return response;
+}
+
+async function fetchJsonWithTimeout(urlString, requestOptions, timeoutMs) {
+    const options = requestOptions || {};
+
+    if (typeof fetch === 'function') {
+        const supportsAbort = typeof AbortController === 'function';
+        const controller = supportsAbort ? new AbortController() : null;
+        let timeoutId = null;
+        let timedOut = false;
+
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+                timedOut = true;
+                if (controller) {
+                    controller.abort();
+                }
+                reject(new Error('Request timed out'));
+            }, timeoutMs);
+        });
+
+        try {
+            const response = await Promise.race([
+                fetch(urlString, {
+                    ...options,
+                    ...(controller ? { signal: controller.signal } : {})
+                }),
+                timeoutPromise
+            ]);
+
+            if (!response) {
+                throw new Error('Invalid response from fetch');
+            }
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const text = await response.text();
+            if (!text) {
+                return null;
+            }
+
+            try {
+                return JSON.parse(text);
+            } catch (error) {
+                throw new Error('Failed to parse OKX response');
+            }
+        } catch (error) {
+            if (timedOut || (controller && error && error.name === 'AbortError')) {
+                throw new Error('Request timed out');
+            }
+            throw error;
+        } finally {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+        }
+    }
+
+    return await fetchJsonWithHttps(urlString, options, timeoutMs);
+}
+
+function fetchJsonWithHttps(urlString, options, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        const requestOptions = {
+            method: options.method || 'GET',
+            headers: options.headers || {}
+        };
+
+        const req = https.request(urlString, requestOptions, (response) => {
+            const { statusCode } = response;
+            const chunks = [];
+
+            response.setEncoding('utf8');
+            response.on('error', reject);
+
+            if (!statusCode || statusCode < 200 || statusCode >= 300) {
+                if (typeof response.resume === 'function') {
+                    response.resume();
+                }
+                reject(new Error(`HTTP ${statusCode || 'ERR'}`));
+                return;
+            }
+
+            response.on('data', (chunk) => chunks.push(chunk));
+            response.on('end', () => {
+                const body = chunks.join('');
+
+                if (!body) {
+                    resolve(null);
+                    return;
+                }
+
+                try {
+                    resolve(JSON.parse(body));
+                } catch (error) {
+                    reject(new Error('Failed to parse OKX response'));
+                }
+            });
+        });
+
+        req.on('error', (error) => {
+            reject(error);
+        });
+
+        req.setTimeout(timeoutMs, () => {
+            req.destroy(new Error('Request timed out'));
+        });
+
+        if (options.body) {
+            req.write(options.body);
+        }
+
+        req.end();
+    });
+}
+
+function extractOkxPriceValue(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+
+    const priceKeys = [
+        'usdPrice',
+        'price',
+        'priceUsd',
+        'lastPrice',
+        'last',
+        'close',
+        'markPrice',
+        'quotePrice',
+        'tokenPrice',
+        'tokenUnitPrice',
+        'usdValue',
+        'value',
+        'bestAskPrice',
+        'bestBidPrice',
+        'bestAsk',
+        'bestBid',
+        'askPx',
+        'bidPx'
+    ];
+
+    for (const key of priceKeys) {
+        if (Object.prototype.hasOwnProperty.call(entry, key)) {
+            const numeric = normalizeNumeric(entry[key]);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+    }
+
+    const nestedKeys = ['prices', 'priceInfo', 'tokenPrices', 'ticker', 'bestAsk', 'bestBid'];
+    for (const nestedKey of nestedKeys) {
+        const nested = entry[nestedKey];
+        const numeric = extractFromNested(nested);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+    }
+
+    if (Array.isArray(entry.data)) {
+        const numeric = extractFromNested(entry.data);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+    }
+
+    return null;
+}
+
+function extractFromNested(value) {
+    if (!value) {
+        return null;
+    }
+
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const numeric = extractOkxPriceValue(item);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+        return null;
+    }
+
+    if (typeof value === 'object') {
+        const nestedValues = Object.values(value);
+        for (const nested of nestedValues) {
+            const numeric = extractOkxPriceValue(nested);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+    }
+
+    return normalizeNumeric(value);
+}
+
+function pickOkxNumeric(entry, keys) {
+    if (!entry || typeof entry !== 'object' || !Array.isArray(keys)) {
+        return null;
+    }
+
+    for (const key of keys) {
+        if (!key || typeof key !== 'string') {
+            continue;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(entry, key)) {
+            const numeric = normalizeNumeric(entry[key]);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+    }
+
+    return null;
+}
+
+function unwrapOkxData(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return [];
+    }
+
+    const directData = payload.data !== undefined ? payload.data : payload.result;
+
+    if (Array.isArray(directData)) {
+        return directData;
+    }
+
+    if (directData && typeof directData === 'object') {
+        const candidates = [
+            directData.data,
+            directData.items,
+            directData.list,
+            directData.rows,
+            directData.result,
+            directData.candles,
+            directData.records,
+            directData.trades,
+            directData.pools,
+            directData.liquidityList,
+            directData.tokens,
+            directData.tokenList
+        ];
+        for (const candidate of candidates) {
+            if (Array.isArray(candidate)) {
+                return candidate;
+            }
+        }
+    }
+
+    return [];
+}
+
+function unwrapOkxFirst(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const data = unwrapOkxData(payload);
+    if (data.length > 0) {
+        return data[0] || null;
+    }
+
+    if (payload.data && typeof payload.data === 'object') {
+        return payload.data;
+    }
+
+    return null;
+}
+
+function normalizeNumeric(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+
+    if (typeof value === 'string') {
+        const cleaned = value.replace(/[,\s]/g, '');
+        if (!cleaned) {
+            return null;
+        }
+        const numeric = Number(cleaned);
+        return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    return null;
+}
+
+function normalizeOkxTokenDirectoryToken(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+
+    const addressCandidate = entry.tokenContractAddress
+        || entry.tokenAddress
+        || entry.contractAddress
+        || entry.address
+        || entry.baseTokenAddress
+        || entry.token;
+
+    if (!addressCandidate || typeof addressCandidate !== 'string') {
+        return null;
+    }
+
+    const normalizedAddress = normalizeOkxConfigAddress(addressCandidate) || addressCandidate.trim();
+    if (!normalizedAddress) {
+        return null;
+    }
+
+    const decimals = pickOkxNumeric(entry, ['decimals', 'decimal', 'tokenDecimal']);
+    const symbolCandidate = typeof entry.tokenSymbol === 'string'
+        ? entry.tokenSymbol
+        : (typeof entry.symbol === 'string' ? entry.symbol : null);
+    const nameCandidate = typeof entry.tokenName === 'string'
+        ? entry.tokenName
+        : (typeof entry.name === 'string' ? entry.name : null);
+    const logoCandidate = typeof entry.tokenLogoUrl === 'string'
+        ? entry.tokenLogoUrl
+        : (typeof entry.logoUrl === 'string' ? entry.logoUrl : (typeof entry.logo === 'string' ? entry.logo : null));
+
+    return {
+        address: normalizedAddress,
+        addressLower: normalizedAddress.toLowerCase(),
+        decimals: Number.isFinite(decimals) ? Math.max(0, Math.trunc(decimals)) : null,
+        symbol: symbolCandidate ? symbolCandidate.trim() : null,
+        name: nameCandidate ? nameCandidate.trim() : null,
+        logo: logoCandidate ? logoCandidate.trim() : null,
+        raw: entry
+    };
 }
 
 function toRoomIdString(roomId) {
@@ -823,6 +3094,129 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: "Markdown" });
     });
 
+    bot.onText(/\/okxchains/, async (msg) => {
+        const lang = await getLang(msg);
+        try {
+            const directory = await fetchOkxSupportedChains();
+            if (!directory) {
+                sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+                return;
+            }
+
+            const aggregatorLines = (directory.aggregator || []).slice(0, 20);
+            const marketLines = (directory.market || []).slice(0, 20);
+
+            const lines = [
+                t(lang, 'okxchains_title'),
+                t(lang, 'okxchains_aggregator_heading'),
+                aggregatorLines.length > 0 ? aggregatorLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data'),
+                '',
+                t(lang, 'okxchains_market_heading'),
+                marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
+            ];
+
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[OkxChains] Failed to load supported chains: ${error.message}`);
+            sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/\/okx402status/, async (msg) => {
+        const lang = await getLang(msg);
+        try {
+            const supported = await fetchOkx402Supported();
+            const lines = [
+                t(lang, 'okx402_title'),
+                supported && supported.length > 0
+                    ? t(lang, 'okx402_supported', { chains: supported.join(', ') })
+                    : t(lang, 'okx402_not_supported')
+            ];
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[Okx402] Failed to check x402 support: ${error.message}`);
+            sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/\/banmaoprice/, async (msg) => {
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+
+        try {
+            const snapshot = await fetchBanmaoQuoteSnapshot();
+            if (!snapshot || !Number.isFinite(snapshot.price)) {
+                throw new Error('No price returned');
+            }
+
+            const priceUsdText = formatUsdPrice(snapshot.price);
+            const priceOkbNumeric = Number(snapshot.priceOkb);
+            const priceOkbText = Number.isFinite(priceOkbNumeric)
+                ? formatTokenQuantity(priceOkbNumeric, { minimumFractionDigits: 8, maximumFractionDigits: 8 })
+                : null;
+
+            const fromAmountText = formatTokenAmountFromUnits(
+                snapshot.fromAmount ?? snapshot.amount,
+                snapshot.decimals,
+                { minimumFractionDigits: 0, maximumFractionDigits: 6 }
+            ) || '1';
+
+            const toAmountText = formatTokenAmountFromUnits(
+                snapshot.toAmount,
+                snapshot.quoteDecimals,
+                { minimumFractionDigits: 6, maximumFractionDigits: 8 }
+            );
+
+            const priceImpactText = Number.isFinite(snapshot.priceImpactPercent)
+                ? formatPercentage(snapshot.priceImpactPercent, {
+                    includeSign: true,
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                })
+                : null;
+
+            const feeText = Number.isFinite(Number(snapshot.tradeFeeUsd))
+                ? formatUsdPrice(snapshot.tradeFeeUsd)
+                : null;
+
+            const sourceLabelParts = [];
+            if (typeof snapshot.source === 'string' && snapshot.source.trim()) {
+                sourceLabelParts.push(snapshot.source.trim());
+            } else {
+                sourceLabelParts.push('OKX DEX');
+            }
+            if (snapshot.chain && snapshot.chain !== '(default)') {
+                sourceLabelParts.push(`chain: ${snapshot.chain}`);
+            }
+            const sourceLabel = sourceLabelParts.join(' · ');
+
+            const fallbackValue = t(lang, 'okx_generic_no_data');
+
+            const lines = [
+                t(lang, 'banmaoprice_title'),
+                t(lang, 'banmaoprice_price_usd', { priceUsd: priceUsdText }),
+                priceOkbText ? t(lang, 'banmaoprice_price_okb', { priceOkb: priceOkbText }) : null,
+                t(lang, 'banmaoprice_quote_line', {
+                    fromAmount: fromAmountText,
+                    fromSymbol: snapshot.fromSymbol || 'BANMAO',
+                    toAmount: toAmountText || fallbackValue,
+                    toSymbol: snapshot.toSymbol || 'USDT'
+                }),
+                feeText ? t(lang, 'banmaoprice_fee_line', { feeUsd: feeText }) : null,
+                priceImpactText ? t(lang, 'banmaoprice_price_impact_line', { impact: priceImpactText }) : null,
+                snapshot.routeLabel ? t(lang, 'banmaoprice_route_line', { route: snapshot.routeLabel }) : null,
+                t(lang, 'banmaoprice_source_line', { source: sourceLabel })
+            ].filter(Boolean);
+
+            const successMessage = lines.join('\n');
+            sendReply(msg, successMessage, { parse_mode: "Markdown" });
+        } catch (error) {
+            console.error(`[BanmaoPrice] Failed to fetch price: ${error.message}`);
+            const errorMessage = t(lang, 'banmaoprice_error');
+            sendReply(msg, errorMessage, { parse_mode: "Markdown" });
+        }
+    });
+
     // COMMAND: /banmaofeed - Chỉ dùng cho group
     bot.onText(/\/banmaofeed(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
@@ -1107,18 +3501,37 @@ function startTelegramBot() {
     bot.onText(/\/help/, async (msg) => {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
-        const helpMessage = `${t(lang, 'help_header')}\n\n${[
+        const generalCommands = [
             t(lang, 'help_command_start'),
             t(lang, 'help_command_register'),
             t(lang, 'help_command_mywallet'),
             t(lang, 'help_command_stats'),
+            t(lang, 'help_command_banmaoprice'),
+            t(lang, 'help_command_okxchains'),
+            t(lang, 'help_command_okx402status'),
             t(lang, 'help_command_unregister'),
             t(lang, 'help_command_language'),
-            t(lang, 'help_command_banmaofeed'),
             t(lang, 'help_command_feedlang'),
-            t(lang, 'help_command_feedtopic'),
             t(lang, 'help_command_help')
-        ].join('\n')}`;
+        ];
+
+        const adminCommands = [
+            t(lang, 'help_command_banmaofeed'),
+            t(lang, 'help_command_feedtopic')
+        ];
+
+        const sections = [
+            t(lang, 'help_header'),
+            '',
+            t(lang, 'help_section_general_title'),
+            generalCommands.join('\n')
+        ];
+
+        if (adminCommands.length > 0) {
+            sections.push('', t(lang, 'help_section_admin_title'), adminCommands.join('\n'));
+        }
+
+        const helpMessage = sections.join('\n');
         sendReply(msg, helpMessage, { parse_mode: "Markdown" });
     });
 
