@@ -93,6 +93,7 @@ const BANMAO_DECIMALS_DEFAULT = 18;
 const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
 let banmaoDecimalsCache = null;
 let banmaoDecimalsFetchedAt = 0;
+const tokenDecimalsCache = new Map();
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -884,6 +885,49 @@ async function getBanmaoTokenDecimals(chainName) {
     return banmaoDecimalsCache !== null ? banmaoDecimalsCache : BANMAO_DECIMALS_DEFAULT;
 }
 
+async function resolveTokenDecimals(tokenAddress, options = {}) {
+    const { chainName, fallback = null } = options;
+
+    if (!tokenAddress || typeof tokenAddress !== 'string') {
+        return fallback;
+    }
+
+    const normalized = normalizeOkxConfigAddress(tokenAddress);
+    const lower = normalized ? normalized.toLowerCase() : tokenAddress.toLowerCase();
+
+    if (BANMAO_ADDRESS_LOWER && lower === BANMAO_ADDRESS_LOWER) {
+        return getBanmaoTokenDecimals(chainName);
+    }
+
+    if (OKX_QUOTE_ADDRESS_LOWER && lower === OKX_QUOTE_ADDRESS_LOWER) {
+        return 6;
+    }
+
+    if (OKX_OKB_TOKEN_ADDRESSES.includes(lower)) {
+        return 18;
+    }
+
+    const cached = tokenDecimalsCache.get(lower);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    try {
+        const profile = await fetchBanmaoTokenProfile({ chainName, tokenAddress: normalized || tokenAddress });
+        const decimals = pickOkxNumeric(profile || {}, ['decimals', 'tokenDecimals', 'tokenDecimal', 'decimal']);
+        if (Number.isFinite(decimals)) {
+            tokenDecimalsCache.set(lower, { value: Math.max(0, Math.trunc(decimals)), expiresAt: now + BANMAO_DECIMALS_CACHE_TTL });
+            return Math.max(0, Math.trunc(decimals));
+        }
+    } catch (error) {
+        console.warn(`[TokenDecimals] Failed to resolve decimals for ${tokenAddress}: ${error.message}`);
+    }
+
+    tokenDecimalsCache.set(lower, { value: fallback, expiresAt: now + (BANMAO_DECIMALS_CACHE_TTL / 2) });
+    return fallback;
+}
+
 function parseBigIntValue(value) {
     if (value === null || value === undefined) {
         return null;
@@ -1552,8 +1596,16 @@ async function fetchBanmaoCandles(options = {}) {
 }
 
 async function fetchBanmaoTokenProfile(options = {}) {
-    const { chainName } = options;
-    const query = await buildOkxDexQuery(chainName);
+    const { chainName, tokenAddress } = options;
+    const query = await buildOkxDexQuery(chainName, { includeToken: false });
+    const normalizedAddress = tokenAddress
+        ? normalizeOkxConfigAddress(tokenAddress) || tokenAddress
+        : OKX_BANMAO_TOKEN_ADDRESS;
+
+    if (normalizedAddress) {
+        query.tokenAddress = normalizedAddress;
+    }
+
     const payload = await okxJsonRequest('GET', '/api/v6/dex/market/token/basic-info', { query });
     return unwrapOkxFirst(payload);
 }
@@ -1573,6 +1625,56 @@ async function fetchBanmaoRecentTrades(options = {}) {
         .map((row) => normalizeOkxTrade(row))
         .filter(Boolean)
         .sort((a, b) => b.timestamp - a.timestamp);
+}
+
+async function fetchBanmaoSwapStatus(txHash, options = {}) {
+    const { chainName } = options;
+    if (!txHash || typeof txHash !== 'string') {
+        throw new Error('Missing transaction hash');
+    }
+
+    const trimmed = txHash.trim();
+    if (!trimmed) {
+        throw new Error('Missing transaction hash');
+    }
+
+    const query = await buildOkxDexQuery(chainName, { includeToken: false, includeQuote: false });
+    query.txHash = trimmed;
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/history', { query });
+    const entry = unwrapOkxFirst(payload);
+    if (!entry) {
+        return null;
+    }
+
+    const context = await resolveOkxChainContext(chainName);
+    const chainLabel = context?.chainName || context?.chainShortName || query.chainShortName || null;
+    const chainIndex = Number.isFinite(entry.chainIndex)
+        ? Number(entry.chainIndex)
+        : (Number.isFinite(query.chainIndex) ? Number(query.chainIndex) : null);
+
+    return {
+        txHash: entry.txHash || trimmed,
+        status: typeof entry.status === 'string' ? entry.status : null,
+        txType: entry.txType || entry.txTypeName || entry.type || null,
+        chain: chainLabel,
+        chainIndex,
+        height: entry.height || null,
+        txTime: normalizeOkxTimestamp(entry.txTime || entry.timestamp),
+        fromAddress: entry.fromAddress || null,
+        toAddress: entry.toAddress || null,
+        dexRouter: entry.dexRouter || null,
+        route: entry.route || null,
+        gasLimit: entry.gasLimit || null,
+        gasUsed: entry.gasUsed || null,
+        gasPrice: entry.gasPrice || null,
+        txFee: entry.txFee || null,
+        referalAmount: entry.referalAmount || null,
+        errorMsg: entry.errorMsg || null,
+        fromTokenDetails: Array.isArray(entry.fromTokenDetails) ? entry.fromTokenDetails : [],
+        toTokenDetails: Array.isArray(entry.toTokenDetails) ? entry.toTokenDetails : [],
+        raw: entry
+    };
 }
 
 async function fetchOkxSupportedChains() {
@@ -2924,6 +3026,306 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: "Markdown" });
     });
 
+    bot.onText(/\/banmaomarket/, async (msg) => {
+        const lang = await getLang(msg);
+        try {
+            const snapshot = await fetchBanmaoMarketSnapshot();
+            if (!snapshot) {
+                sendReply(msg, t(lang, 'banmaomarket_error'), { parse_mode: 'Markdown' });
+                return;
+            }
+
+            const changePercent = normalizePercentageValue(snapshot.changePercent);
+            const changePercentText = Number.isFinite(changePercent)
+                ? formatPercentage(changePercent, { includeSign: true, maximumFractionDigits: 2 })
+                : null;
+            const changeUsdText = Number.isFinite(snapshot.changeAbs)
+                ? formatUsdCompact(snapshot.changeAbs)
+                : null;
+
+            const lines = [
+                t(lang, 'banmaomarket_title'),
+                t(lang, 'banmaomarket_price_line', { priceUsd: formatUsdPrice(snapshot.price) }),
+                snapshot.priceOkb ? t(lang, 'banmaomarket_okb_line', { priceOkb: formatTokenQuantity(snapshot.priceOkb, { maximumFractionDigits: 6 }) }) : null,
+                changePercentText ? t(lang, 'banmaomarket_change_line', { percent: changePercentText, usd: changeUsdText || '—' }) : null,
+                Number.isFinite(snapshot.volume) ? t(lang, 'banmaomarket_volume_line', { volume: formatUsdCompact(snapshot.volume) }) : null,
+                Number.isFinite(snapshot.liquidity) ? t(lang, 'banmaomarket_liquidity_line', { liquidity: formatUsdCompact(snapshot.liquidity) }) : null,
+                Number.isFinite(snapshot.marketCap) ? t(lang, 'banmaomarket_marketcap_line', { marketCap: formatUsdCompact(snapshot.marketCap) }) : null,
+                Number.isFinite(snapshot.supply) ? t(lang, 'banmaomarket_supply_line', { supply: formatTokenQuantity(snapshot.supply, { maximumFractionDigits: 0 }) }) : null,
+                snapshot.chain ? t(lang, 'banmaomarket_chain_line', { chain: snapshot.chain }) : null,
+                t(lang, 'banmaomarket_source_line', { source: snapshot.source || 'OKX' })
+            ].filter(Boolean);
+
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[BanmaoMarket] Failed to load market snapshot: ${error.message}`);
+            sendReply(msg, t(lang, 'banmaomarket_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/\/banmaoliquidity/, async (msg) => {
+        const lang = await getLang(msg);
+        try {
+            const overview = await fetchBanmaoLiquidityOverview();
+            if (!overview) {
+                sendReply(msg, t(lang, 'banmaoliquidity_error'), { parse_mode: 'Markdown' });
+                return;
+            }
+
+            const pools = Array.isArray(overview.pools) ? overview.pools.slice(0, 5) : [];
+            const poolLines = pools.length > 0
+                ? pools.map((pool) => {
+                    const liquidityText = Number.isFinite(pool.liquidityUsd)
+                        ? formatUsdCompact(pool.liquidityUsd)
+                        : '—';
+                    const dexLabel = pool.dexName || pool.quoteSymbol || null;
+                    return t(lang, 'banmaoliquidity_pool_line', {
+                        name: pool.name || 'Pool',
+                        dex: dexLabel || '—',
+                        liquidity: liquidityText
+                    });
+                })
+                : [t(lang, 'banmaoliquidity_no_data')];
+
+            const lines = [
+                t(lang, 'banmaoliquidity_title'),
+                overview.chain ? t(lang, 'banmaoliquidity_chain_line', { chain: overview.chain }) : null,
+                Number.isFinite(overview.totalLiquidity) ? t(lang, 'banmaoliquidity_total', { total: formatUsdCompact(overview.totalLiquidity) }) : null,
+                t(lang, 'banmaoliquidity_pool_header'),
+                ...poolLines
+            ].filter(Boolean);
+
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[BanmaoLiquidity] Failed to load liquidity overview: ${error.message}`);
+            sendReply(msg, t(lang, 'banmaoliquidity_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/\/banmaocandles(?:\s+([^\s]+))?/, async (msg, match) => {
+        const lang = await getLang(msg);
+        const intervalRaw = match && match[1] ? match[1].trim().toUpperCase() : '1H';
+        const allowed = {
+            '5M': t(lang, 'banmaocandles_interval_5m'),
+            '15M': t(lang, 'banmaocandles_interval_15m'),
+            '1H': t(lang, 'banmaocandles_interval_1h'),
+            '4H': t(lang, 'banmaocandles_interval_4h'),
+            '1D': t(lang, 'banmaocandles_interval_1d')
+        };
+
+        if (!allowed[intervalRaw]) {
+            sendReply(msg, t(lang, 'banmaocandles_invalid_interval'), { parse_mode: 'Markdown' });
+            return;
+        }
+
+        try {
+            const candles = await fetchBanmaoCandles({ bar: intervalRaw, limit: 24 });
+            if (!candles || candles.length === 0) {
+                sendReply(msg, t(lang, 'banmaocandles_no_data'), { parse_mode: 'Markdown' });
+                return;
+            }
+
+            const closes = candles.map((candle) => candle.close).filter((value) => Number.isFinite(value));
+            const highs = candles.map((candle) => candle.high).filter((value) => Number.isFinite(value));
+            const lows = candles.map((candle) => candle.low).filter((value) => Number.isFinite(value));
+            const volumes = candles.map((candle) => candle.volume).filter((value) => Number.isFinite(value));
+
+            const latest = candles[candles.length - 1];
+            const first = candles[0];
+            const sparkline = renderSparkline(closes);
+            const range = formatTimestampRange(first.timestamp, latest.timestamp);
+            const changePercent = Number.isFinite(first.close) && Number.isFinite(latest.close)
+                ? formatPercentage(((latest.close - first.close) / first.close) * 100, { includeSign: true, maximumFractionDigits: 2 })
+                : null;
+
+            const lines = [
+                t(lang, 'banmaocandles_title', { interval: allowed[intervalRaw] }),
+                t(lang, 'banmaocandles_range_line', { start: range.start, end: range.end }),
+                t(lang, 'banmaocandles_latest_line', {
+                    price: formatUsdPrice(latest.close),
+                    time: new Date(latest.timestamp).toISOString().replace('T', ' ').slice(0, 16),
+                    ago: formatRelativeTime(latest.timestamp) || '—'
+                }),
+                changePercent ? t(lang, 'banmaocandles_change_line', { change: changePercent }) : null,
+                highs.length > 0 ? t(lang, 'banmaocandles_high_low_line', {
+                    high: formatUsdPrice(Math.max(...highs)),
+                    low: formatUsdPrice(Math.min(...lows))
+                }) : null,
+                volumes.length > 0 ? t(lang, 'banmaocandles_volume_line', {
+                    volume: formatTokenQuantity(volumes.reduce((sum, value) => sum + value, 0), { maximumFractionDigits: 2 })
+                }) : null,
+                sparkline ? t(lang, 'banmaocandles_sparkline_line', { sparkline }) : null
+            ].filter(Boolean);
+
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[BanmaoCandles] Failed to load candles: ${error.message}`);
+            sendReply(msg, t(lang, 'banmaocandles_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/\/banmaotrades(?:\s+(\d+))?/, async (msg, match) => {
+        const lang = await getLang(msg);
+        const requestedLimit = match && match[1] ? Number(match[1]) : 5;
+        const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 5, 1), 10);
+
+        try {
+            const trades = await fetchBanmaoRecentTrades({ limit });
+            if (!trades || trades.length === 0) {
+                sendReply(msg, t(lang, 'banmaotrades_no_data'), { parse_mode: 'Markdown' });
+                return;
+            }
+
+            const tradeLines = trades.map((trade) => {
+                const side = trade.side ? trade.side.toUpperCase() : '—';
+                const priceText = Number.isFinite(trade.price) ? formatUsdPrice(trade.price) : '—';
+                const amountText = Number.isFinite(trade.amount) ? formatTokenQuantity(trade.amount, { maximumFractionDigits: 4 }) : '—';
+                const ago = formatRelativeTime(trade.timestamp) || '—';
+                return t(lang, 'banmaotrades_trade_line', { side, price: priceText, amount: amountText, ago });
+            });
+
+            const lines = [
+                t(lang, 'banmaotrades_title', { count: tradeLines.length }),
+                ...tradeLines
+            ];
+
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[BanmaoTrades] Failed to load trades: ${error.message}`);
+            sendReply(msg, t(lang, 'banmaotrades_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/\/banmaostatus(?:\s+([^\s]+))?/, async (msg, match) => {
+        const lang = await getLang(msg);
+        const txHash = match && match[1] ? match[1].trim() : '';
+        if (!txHash) {
+            sendReply(msg, t(lang, 'banmaostatus_usage'), { parse_mode: 'Markdown' });
+            return;
+        }
+
+        try {
+            const status = await fetchBanmaoSwapStatus(txHash);
+            if (!status) {
+                sendReply(msg, t(lang, 'banmaostatus_not_found'), { parse_mode: 'Markdown' });
+                return;
+            }
+
+            const normalizeStatus = (value) => (value ? String(value).toLowerCase() : '');
+            const statusKey = normalizeStatus(status.status);
+            const statusLabel = {
+                success: `✅ ${t(lang, 'banmaostatus_state_success')}`,
+                pending: `⏳ ${t(lang, 'banmaostatus_state_pending')}`,
+                fail: `❌ ${t(lang, 'banmaostatus_state_failed')}`
+            }[statusKey] || `ℹ️ ${status.status || t(lang, 'banmaostatus_state_unknown')}`;
+
+            const mapDetails = async (details) => {
+                const parts = [];
+                for (const detail of details) {
+                    if (!detail) {
+                        continue;
+                    }
+
+                    const address = detail.tokenAddress || detail.tokenContractAddress || detail.contractAddress || null;
+                    let decimals = Number(detail.decimal ?? detail.decimals ?? detail.tokenDecimal);
+                    if (Number.isFinite(decimals)) {
+                        decimals = Math.max(0, Math.trunc(decimals));
+                    } else {
+                        const resolvedDecimals = await resolveTokenDecimals(address);
+                        decimals = Number.isFinite(resolvedDecimals) ? Math.max(0, Math.trunc(resolvedDecimals)) : null;
+                    }
+
+                    const amountRaw = detail.amount ?? detail.tokenAmount ?? detail.quantity ?? detail.volume ?? detail.value;
+                    const decimalsSafe = Number.isFinite(decimals) ? decimals : 18;
+                    let amountText = amountRaw !== undefined ? formatTokenAmountFromUnits(amountRaw, decimalsSafe, { maximumFractionDigits: 6 }) : null;
+                    if (!amountText && Number.isFinite(detail.displayAmount)) {
+                        amountText = formatTokenQuantity(detail.displayAmount, { maximumFractionDigits: 4 });
+                    }
+                    if (!amountText && typeof amountRaw === 'string') {
+                        amountText = amountRaw;
+                    }
+
+                    const symbolRaw = detail.symbol || detail.tokenSymbol || detail.name || detail.token || null;
+                    const symbol = symbolRaw ? String(symbolRaw).toUpperCase() : (address ? shortAddress(address) : '—');
+                    const formatted = amountText ? `${amountText} ${symbol}` : symbol;
+                    parts.push(formatted);
+                }
+                return parts;
+            };
+
+            const fromDetails = await mapDetails(status.fromTokenDetails || []);
+            const toDetails = await mapDetails(status.toTokenDetails || []);
+
+            const timeIso = status.txTime ? new Date(status.txTime).toISOString().replace('T', ' ').slice(0, 19) : null;
+            const lines = [
+                t(lang, 'banmaostatus_title'),
+                t(lang, 'banmaostatus_hash_line', { hash: status.txHash }),
+                t(lang, 'banmaostatus_status_line', { status: statusLabel }),
+                status.txType ? t(lang, 'banmaostatus_type_line', { type: status.txType }) : null,
+                status.chain ? t(lang, 'banmaostatus_chain_line', { chain: status.chain }) : null,
+                timeIso ? t(lang, 'banmaostatus_time_line', { time: timeIso, ago: formatRelativeTime(status.txTime) || '—' }) : null,
+                fromDetails.length > 0 ? t(lang, 'banmaostatus_from_line', { value: fromDetails.join(', ') }) : null,
+                toDetails.length > 0 ? t(lang, 'banmaostatus_to_line', { value: toDetails.join(', ') }) : null,
+                status.fromAddress ? t(lang, 'banmaostatus_sender_line', { address: shortAddress(status.fromAddress) }) : null,
+                status.toAddress ? t(lang, 'banmaostatus_receiver_line', { address: shortAddress(status.toAddress) }) : null,
+                status.dexRouter ? t(lang, 'banmaostatus_route_line', { route: status.dexRouter }) : null,
+                status.txFee ? t(lang, 'banmaostatus_fee_line', { fee: status.txFee }) : null,
+                status.gasUsed ? t(lang, 'banmaostatus_gas_line', { used: status.gasUsed, limit: status.gasLimit || '—', price: status.gasPrice || '—' }) : null,
+                status.errorMsg ? t(lang, 'banmaostatus_error_line', { error: status.errorMsg }) : null
+            ].filter(Boolean);
+
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[BanmaoStatus] Failed to load transaction status: ${error.message}`);
+            sendReply(msg, t(lang, 'banmaostatus_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/\/okxchains/, async (msg) => {
+        const lang = await getLang(msg);
+        try {
+            const directory = await fetchOkxSupportedChains();
+            if (!directory) {
+                sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+                return;
+            }
+
+            const aggregatorLines = (directory.aggregator || []).slice(0, 20);
+            const marketLines = (directory.market || []).slice(0, 20);
+
+            const lines = [
+                t(lang, 'okxchains_title'),
+                t(lang, 'okxchains_aggregator_heading'),
+                aggregatorLines.length > 0 ? aggregatorLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data'),
+                '',
+                t(lang, 'okxchains_market_heading'),
+                marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
+            ];
+
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[OkxChains] Failed to load supported chains: ${error.message}`);
+            sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/\/okx402status/, async (msg) => {
+        const lang = await getLang(msg);
+        try {
+            const supported = await fetchOkx402Supported();
+            const lines = [
+                t(lang, 'okx402_title'),
+                supported && supported.length > 0
+                    ? t(lang, 'okx402_supported', { chains: supported.join(', ') })
+                    : t(lang, 'okx402_not_supported')
+            ];
+            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[Okx402] Failed to check x402 support: ${error.message}`);
+            sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
     bot.onText(/\/banmaoprice/, async (msg) => {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
@@ -3292,6 +3694,11 @@ function startTelegramBot() {
             t(lang, 'help_command_mywallet'),
             t(lang, 'help_command_stats'),
             t(lang, 'help_command_banmaoprice'),
+            t(lang, 'help_command_banmaomarket'),
+            t(lang, 'help_command_banmaoliquidity'),
+            t(lang, 'help_command_banmaocandles'),
+            t(lang, 'help_command_banmaotrades'),
+            t(lang, 'help_command_banmaostatus'),
             t(lang, 'help_command_okxchains'),
             t(lang, 'help_command_okx402status'),
             t(lang, 'help_command_unregister'),
