@@ -32,6 +32,8 @@ const OKX_BANMAO_TOKEN_ADDRESS =
 const OKX_QUOTE_TOKEN_ADDRESS =
     normalizeOkxConfigAddress(process.env.OKX_QUOTE_TOKEN_ADDRESS) ||
     '0x779Ded0c9e1022225f8E0630b35a9b54bE713736';
+const BANMAO_ADDRESS_LOWER = OKX_BANMAO_TOKEN_ADDRESS ? OKX_BANMAO_TOKEN_ADDRESS.toLowerCase() : null;
+const OKX_QUOTE_ADDRESS_LOWER = OKX_QUOTE_TOKEN_ADDRESS ? OKX_QUOTE_TOKEN_ADDRESS.toLowerCase() : null;
 const OKX_MARKET_INSTRUMENT = process.env.OKX_MARKET_INSTRUMENT || 'BANMAO-USDT';
 const OKX_FETCH_TIMEOUT = Number(process.env.OKX_FETCH_TIMEOUT || 10000);
 const OKX_API_KEY = process.env.OKX_API_KEY || null;
@@ -39,6 +41,35 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || null;
 const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || null;
 const OKX_API_PROJECT = process.env.OKX_API_PROJECT || null;
 const OKX_API_SIMULATED = String(process.env.OKX_API_SIMULATED || '').toLowerCase() === 'true';
+const OKX_OKB_TOKEN_ADDRESSES = (() => {
+    const raw = process.env.OKX_OKB_TOKEN_ADDRESSES
+        || '0xe538905cf8410324e03a5a23c1c177a474d59b2b';
+
+    const seen = new Set();
+    const result = [];
+
+    for (const value of raw.split(/[|,\s]+/)) {
+        if (!value) {
+            continue;
+        }
+
+        const normalized = normalizeOkxConfigAddress(value);
+        if (!normalized) {
+            continue;
+        }
+
+        const lowered = normalized.toLowerCase();
+        if (seen.has(lowered)) {
+            continue;
+        }
+
+        seen.add(lowered);
+        result.push(lowered);
+    }
+
+    return result;
+})();
+const OKX_OKB_SYMBOL_KEYS = ['okb', 'wokb'];
 const OKX_CHAIN_INDEX = (() => {
     const value = process.env.OKX_CHAIN_INDEX;
     if (value === undefined || value === null || value === '') {
@@ -731,14 +762,22 @@ async function fetchBanmaoQuoteSnapshot(options = {}) {
     }
 
     const chainLabel = context?.chainName || context?.chainShortName || query.chainShortName || chainName || '(default)';
+    const okbUsd = resolveOkbUsdPrice(priceInfo.tokenUnitPrices);
+    const priceOkb = Number.isFinite(priceInfo.price) && Number.isFinite(okbUsd) && okbUsd > 0
+        ? priceInfo.price / okbUsd
+        : null;
 
     return {
         price: priceInfo.price,
+        priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
+        okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
         chain: chainLabel,
         source: 'OKX DEX quote',
         amount,
         decimals: priceInfo.fromDecimals,
         quoteDecimals: priceInfo.toDecimals,
+        tokenPrices: priceInfo.tokenUnitPrices,
+        derivedPrice: priceInfo.amountPrice,
         raw: quoteEntry
     };
 }
@@ -810,9 +849,191 @@ function parseBigIntValue(value) {
     return null;
 }
 
+function extractOkxTokenUnitPrice(token) {
+    if (!token || typeof token !== 'object') {
+        return null;
+    }
+
+    const keys = ['tokenUnitPrice', 'unitPrice', 'priceUsd', 'usdPrice', 'price'];
+    for (const key of keys) {
+        if (!Object.prototype.hasOwnProperty.call(token, key)) {
+            continue;
+        }
+
+        const numeric = normalizeNumeric(token[key]);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+    }
+
+    return null;
+}
+
+function normalizeOkxTokenAddress(value) {
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+
+    const normalized = normalizeOkxConfigAddress(value);
+    if (normalized) {
+        return normalized.toLowerCase();
+    }
+
+    const trimmed = value.trim();
+    return trimmed ? trimmed.toLowerCase() : null;
+}
+
+function collectOkxTokenUnitPrices(entry, routerList = []) {
+    const tokens = [];
+    const byAddress = new Map();
+    const bySymbol = new Map();
+
+    const register = (token, meta = {}) => {
+        if (!token || typeof token !== 'object') {
+            return;
+        }
+
+        const unitPrice = extractOkxTokenUnitPrice(token);
+        if (!Number.isFinite(unitPrice)) {
+            return;
+        }
+
+        const symbolRaw = typeof token.tokenSymbol === 'string'
+            ? token.tokenSymbol
+            : (typeof token.symbol === 'string' ? token.symbol : null);
+        const symbol = symbolRaw ? symbolRaw.trim() : null;
+
+        const addressCandidates = [
+            token.tokenContractAddress,
+            token.tokenAddress,
+            token.contractAddress,
+            token.address,
+            token.contract,
+            token.mintAddress
+        ];
+
+        let normalizedAddress = null;
+        for (const candidate of addressCandidates) {
+            const normalized = normalizeOkxTokenAddress(candidate);
+            if (normalized) {
+                normalizedAddress = normalized;
+                break;
+            }
+        }
+
+        const record = {
+            unitPrice,
+            symbol,
+            address: normalizedAddress,
+            meta,
+            raw: token
+        };
+
+        tokens.push(record);
+
+        if (normalizedAddress && !byAddress.has(normalizedAddress)) {
+            byAddress.set(normalizedAddress, record);
+        }
+
+        if (symbol) {
+            const symbolKey = symbol.toLowerCase();
+            if (!bySymbol.has(symbolKey)) {
+                bySymbol.set(symbolKey, record);
+            }
+        }
+    };
+
+    register(entry?.fromToken, { source: 'fromToken' });
+    register(entry?.toToken, { source: 'toToken' });
+    register(entry?.sellToken, { source: 'sellToken' });
+    register(entry?.buyToken, { source: 'buyToken' });
+
+    routerList.forEach((route, index) => {
+        register(route?.fromToken, { source: 'router', hop: index, side: 'from' });
+        register(route?.toToken, { source: 'router', hop: index, side: 'to' });
+    });
+
+    const fromTokenEntry = BANMAO_ADDRESS_LOWER && byAddress.has(BANMAO_ADDRESS_LOWER)
+        ? byAddress.get(BANMAO_ADDRESS_LOWER)
+        : null;
+    const quoteTokenEntry = OKX_QUOTE_ADDRESS_LOWER && byAddress.has(OKX_QUOTE_ADDRESS_LOWER)
+        ? byAddress.get(OKX_QUOTE_ADDRESS_LOWER)
+        : null;
+
+    return {
+        list: tokens,
+        byAddress,
+        bySymbol,
+        fromTokenUsd: fromTokenEntry && Number.isFinite(fromTokenEntry.unitPrice)
+            ? fromTokenEntry.unitPrice
+            : null,
+        quoteTokenUsd: quoteTokenEntry && Number.isFinite(quoteTokenEntry.unitPrice)
+            ? quoteTokenEntry.unitPrice
+            : null
+    };
+}
+
+function resolveOkbUsdPrice(tokenPrices) {
+    if (!tokenPrices) {
+        return null;
+    }
+
+    const { byAddress, bySymbol, list } = tokenPrices;
+
+    if (byAddress instanceof Map) {
+        for (const address of OKX_OKB_TOKEN_ADDRESSES) {
+            if (!address) {
+                continue;
+            }
+
+            const entry = byAddress.get(address);
+            if (entry && Number.isFinite(entry.unitPrice)) {
+                return entry.unitPrice;
+            }
+        }
+    }
+
+    if (bySymbol instanceof Map) {
+        for (const key of OKX_OKB_SYMBOL_KEYS) {
+            if (!key) {
+                continue;
+            }
+
+            const entry = bySymbol.get(key);
+            if (entry && Number.isFinite(entry.unitPrice)) {
+                return entry.unitPrice;
+            }
+        }
+    }
+
+    if (Array.isArray(list)) {
+        for (const entry of list) {
+            if (!entry || !Number.isFinite(entry.unitPrice)) {
+                continue;
+            }
+
+            const symbol = typeof entry.symbol === 'string' ? entry.symbol.toUpperCase() : '';
+            if (symbol.includes('OKB')) {
+                return entry.unitPrice;
+            }
+        }
+    }
+
+    return null;
+}
+
 function extractOkxQuotePrice(entry, options = {}) {
     if (!entry || typeof entry !== 'object') {
-        return { price: null, fromDecimals: null, toDecimals: null, fromAmount: null, toAmount: null };
+        return {
+            price: null,
+            fromDecimals: null,
+            toDecimals: null,
+            fromAmount: null,
+            toAmount: null,
+            tokenUnitPrices: null,
+            quotePrice: null,
+            amountPrice: null
+        };
     }
 
     const directPrice = extractOkxPriceValue(entry);
@@ -837,6 +1058,8 @@ function extractOkxQuotePrice(entry, options = {}) {
     const fromDecimals = normalizeDecimalsCandidate(fromDecimalsCandidates);
     const toDecimals = normalizeDecimalsCandidate(toDecimalsCandidates);
 
+    const tokenPrices = collectOkxTokenUnitPrices(entry, routerList);
+
     const fromAmount = parseBigIntValue(
         entry.fromTokenAmount
         ?? entry.sellTokenAmount
@@ -852,13 +1075,20 @@ function extractOkxQuotePrice(entry, options = {}) {
         ?? entry.outputAmount
     );
 
-    let price = Number.isFinite(directPrice) ? Number(directPrice) : null;
+    const priceFromAmounts = (fromAmount !== null && toAmount !== null)
+        ? computePriceFromTokenAmounts(fromAmount, toAmount, fromDecimals, toDecimals)
+        : null;
 
-    if (!Number.isFinite(price) && fromAmount !== null && toAmount !== null) {
-        const priceFromAmounts = computePriceFromTokenAmounts(fromAmount, toAmount, fromDecimals, toDecimals);
-        if (Number.isFinite(priceFromAmounts)) {
-            price = priceFromAmounts;
-        }
+    let price = tokenPrices && Number.isFinite(tokenPrices.fromTokenUsd)
+        ? tokenPrices.fromTokenUsd
+        : null;
+
+    if (!Number.isFinite(price) && Number.isFinite(directPrice)) {
+        price = Number(directPrice);
+    }
+
+    if (!Number.isFinite(price) && Number.isFinite(priceFromAmounts)) {
+        price = priceFromAmounts;
     }
 
     const toAmountUsd = pickOkxNumeric(entry, ['toAmountUsd', 'toUsdAmount', 'toAmountInUsd', 'usdAmount']);
@@ -875,7 +1105,16 @@ function extractOkxQuotePrice(entry, options = {}) {
         price = null;
     }
 
-    return { price, fromDecimals, toDecimals, fromAmount, toAmount };
+    return {
+        price,
+        fromDecimals,
+        toDecimals,
+        fromAmount,
+        toAmount,
+        tokenUnitPrices: tokenPrices,
+        quotePrice: Number.isFinite(directPrice) ? Number(directPrice) : null,
+        amountPrice: Number.isFinite(priceFromAmounts) ? priceFromAmounts : null
+    };
 }
 
 function normalizeDecimalsCandidate(candidates) {
@@ -1041,7 +1280,13 @@ async function fetchBanmaoMarketSnapshotForChain(chainName) {
         }
     }
 
-    const price = extractOkxPriceValue(priceEntry);
+    const tokenPrices = collectOkxTokenUnitPrices(priceEntry || priceInfoEntry);
+
+    let price = extractOkxPriceValue(priceEntry);
+    if (!Number.isFinite(price) && tokenPrices && Number.isFinite(tokenPrices.fromTokenUsd)) {
+        price = tokenPrices.fromTokenUsd;
+    }
+
     if (!Number.isFinite(price)) {
         if (errors.length > 0) {
             throw errors[errors.length - 1];
@@ -1056,9 +1301,15 @@ async function fetchBanmaoMarketSnapshotForChain(chainName) {
     const liquidity = pickOkxNumeric(metricsSource, ['usdLiquidity', 'liquidityUsd', 'poolLiquidity', 'liquidity']);
     const marketCap = pickOkxNumeric(metricsSource, ['usdMarketCap', 'marketCap', 'fdvUsd', 'fullyDilutedMarketCap', 'marketCapUsd']);
     const supply = pickOkxNumeric(metricsSource, ['totalSupply', 'supply', 'circulatingSupply']);
+    const okbUsd = resolveOkbUsdPrice(tokenPrices);
+    const priceOkb = Number.isFinite(price) && Number.isFinite(okbUsd) && okbUsd > 0
+        ? price / okbUsd
+        : null;
 
     return {
         price,
+        priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
+        okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
         changeAbs,
         changePercent,
         volume,
@@ -1067,6 +1318,7 @@ async function fetchBanmaoMarketSnapshotForChain(chainName) {
         supply,
         chain: chainLabel,
         source,
+        tokenPrices,
         raw: { priceEntry, priceInfoEntry }
     };
 }
@@ -1150,25 +1402,48 @@ async function fetchBanmaoLiquidityForChain(chainName) {
 
 async function fetchBanmaoCandles(options = {}) {
     const { chainName, bar = '1H', limit = 24 } = options;
-    const query = await buildOkxDexQuery(chainName);
-    query.bar = bar;
+    const baseQuery = await buildOkxDexQuery(chainName);
+    const query = { ...baseQuery, bar };
     if (limit) {
         query.limit = Math.min(Math.max(Number(limit) || 0, 1), 200);
     }
 
-    const payload = await okxJsonRequest('GET', '/api/v6/dex/market/candles', { query });
-    const rows = unwrapOkxData(payload);
+    const endpoints = [
+        '/api/v6/dex/market/candles',
+        '/api/v6/dex/market/historical-candles'
+    ];
 
-    if (!rows || rows.length === 0) {
-        return [];
+    const errors = [];
+
+    for (const path of endpoints) {
+        try {
+            const payload = await okxJsonRequest('GET', path, { query });
+            const rows = unwrapOkxData(payload);
+
+            if (!rows || rows.length === 0) {
+                continue;
+            }
+
+            const candles = rows
+                .map((row) => normalizeOkxCandle(row))
+                .filter((candle) => candle && Number.isFinite(candle.close) && Number.isFinite(candle.timestamp));
+
+            if (candles.length === 0) {
+                continue;
+            }
+
+            candles.sort((a, b) => a.timestamp - b.timestamp);
+            return candles;
+        } catch (error) {
+            errors.push(new Error(`[${path}] ${error.message}`));
+        }
     }
 
-    const candles = rows
-        .map((row) => normalizeOkxCandle(row))
-        .filter((candle) => candle && Number.isFinite(candle.close) && Number.isFinite(candle.timestamp));
+    if (errors.length > 0) {
+        throw errors[errors.length - 1];
+    }
 
-    candles.sort((a, b) => a.timestamp - b.timestamp);
-    return candles;
+    return [];
 }
 
 async function fetchBanmaoTokenProfile(options = {}) {
@@ -1292,9 +1567,20 @@ async function tryFetchOkxMarketTicker() {
 
     const tickerEntry = unwrapOkxFirst(payload);
     const price = extractOkxPriceValue(tickerEntry);
+    const tokenPrices = collectOkxTokenUnitPrices(tickerEntry || {});
+    const okbUsd = resolveOkbUsdPrice(tokenPrices);
+    const priceOkb = Number.isFinite(price) && Number.isFinite(okbUsd) && okbUsd > 0
+        ? price / okbUsd
+        : null;
 
     if (Number.isFinite(price)) {
-        return { price, source: 'OKX market ticker', chain: null };
+        return {
+            price,
+            priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
+            okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
+            source: 'OKX market ticker',
+            chain: null
+        };
     }
 
     return null;
@@ -1887,6 +2173,7 @@ function extractOkxPriceValue(entry) {
         'markPrice',
         'quotePrice',
         'tokenPrice',
+        'tokenUnitPrice',
         'usdValue',
         'value',
         'bestAskPrice',
@@ -2553,6 +2840,10 @@ function startTelegramBot() {
             const changeDirection = Number.isFinite(changePercentValue)
                 ? (changePercentValue >= 0 ? '▲ ' : '▼ ')
                 : '';
+            const priceOkbNumeric = Number(snapshot.priceOkb);
+            const priceOkbText = Number.isFinite(priceOkbNumeric)
+                ? formatTokenQuantity(priceOkbNumeric, { minimumFractionDigits: 8, maximumFractionDigits: 8 })
+                : null;
 
             const volumeText = Number.isFinite(Number(snapshot.volume))
                 ? formatUsdCompact(snapshot.volume)
@@ -2582,6 +2873,7 @@ function startTelegramBot() {
                     changePercent: changePercentText || fallbackValue,
                     changeDirection
                 }),
+                priceOkbText ? t(lang, 'price_banmao_price_okb_line', { price: priceOkbText }) : null,
                 volumeText ? t(lang, 'price_banmao_volume_line', { volume: volumeText }) : null,
                 liquidityText ? t(lang, 'price_banmao_liquidity_line', { liquidity: liquidityText }) : null,
                 t(lang, 'price_banmao_source_line', { source: sourceLabel }),
@@ -2709,6 +3001,10 @@ function startTelegramBot() {
 
             const fallbackValue = t(lang, 'okx_generic_no_data');
             const priceText = formatUsdPrice(snapshot.price);
+            const priceOkbNumeric = Number(snapshot.priceOkb);
+            const priceOkbText = Number.isFinite(priceOkbNumeric)
+                ? formatTokenQuantity(priceOkbNumeric, { minimumFractionDigits: 8, maximumFractionDigits: 8 })
+                : null;
             const changePercentValue = normalizePercentageValue(snapshot.changePercent);
             const changePercentText = Number.isFinite(changePercentValue)
                 ? formatPercentage(changePercentValue, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -2777,6 +3073,7 @@ function startTelegramBot() {
                     changeDirection,
                     changeAbs: changeAbsText
                 }),
+                priceOkbText ? t(lang, 'banmao_market_price_okb', { priceOkb: priceOkbText }) : null,
                 t(lang, 'banmao_market_volume', { volume: volumeText }),
                 t(lang, 'banmao_market_liquidity', { liquidity: liquidityText }),
                 t(lang, 'banmao_market_marketcap', { marketCap: marketCapText }),
