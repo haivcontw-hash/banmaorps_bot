@@ -25,14 +25,38 @@ const MAX_TELEGRAM_RETRIES = 5;
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://www.okx.com';
 const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'x-layer';
 const OKX_BANMAO_TOKEN_ADDRESS =
-    process.env.OKX_BANMAO_TOKEN_ADDRESS || '0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
+    normalizeOkxConfigAddress(process.env.OKX_BANMAO_TOKEN_ADDRESS) ||
+    '0x16d91d1615FC55B76d5f92365Bd60C069B46ef78';
 const OKX_QUOTE_TOKEN_ADDRESS =
-    process.env.OKX_QUOTE_TOKEN_ADDRESS || '0xf55bec9cafdbE8730f096Aa55dad6D22d44099Df';
+    normalizeOkxConfigAddress(process.env.OKX_QUOTE_TOKEN_ADDRESS) ||
+    '0xf55Bec9cAFDBE8730f096aa55Dad6D22d44099Df';
 const OKX_MARKET_INSTRUMENT = process.env.OKX_MARKET_INSTRUMENT || 'BANMAO-USDT';
 const OKX_FETCH_TIMEOUT = Number(process.env.OKX_FETCH_TIMEOUT || 10000);
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeOkxConfigAddress(value) {
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    try {
+        return ethers.getAddress(trimmed);
+    } catch (error) {
+        const basicHexPattern = /^0x[0-9a-fA-F]{40}$/;
+        if (basicHexPattern.test(trimmed)) {
+            return trimmed;
+        }
+    }
+
+    return null;
 }
 
 function markRoomFinalOutcome(roomId, outcome) {
@@ -518,8 +542,112 @@ async function tryFetchOkxDexTicker() {
         return null;
     }
 
+    const chainNames = getOkxChainShortNameCandidates();
+    const errors = [];
+
+    for (const chainName of chainNames) {
+        try {
+            const directTicker = await tryFetchOkxDexTickerForChain(chainName);
+            if (directTicker) {
+                return directTicker;
+            }
+        } catch (error) {
+            errors.push({ chainName, error });
+        }
+
+        try {
+            const tokenPriceTicker = await tryFetchOkxDexTokenPrice(chainName);
+            if (tokenPriceTicker) {
+                return tokenPriceTicker;
+            }
+        } catch (error) {
+            errors.push({ chainName, error });
+        }
+    }
+
+    // One more attempt without specifying the chain in case the API defaults it internally
+    try {
+        const fallbackTicker = await tryFetchOkxDexTickerForChain();
+        if (fallbackTicker) {
+            return fallbackTicker;
+        }
+    } catch (error) {
+        errors.push({ chainName: '(default)', error });
+    }
+
+    try {
+        const fallbackTokenPrice = await tryFetchOkxDexTokenPrice();
+        if (fallbackTokenPrice) {
+            return fallbackTokenPrice;
+        }
+    } catch (error) {
+        errors.push({ chainName: '(default)', error });
+    }
+
+    if (errors.length > 0) {
+        const attemptedChains = chainNames.join(', ') || 'n/a';
+        const lastFailure = errors[errors.length - 1];
+        const messageParts = [`chains tried: ${attemptedChains}`];
+        if (lastFailure?.chainName) {
+            messageParts.push(`last chain: ${lastFailure.chainName}`);
+        }
+        if (lastFailure?.error?.message) {
+            messageParts.push(`reason: ${lastFailure.error.message}`);
+        }
+        throw new Error(`All OKX DEX requests failed (${messageParts.join('; ')}).`);
+    }
+
+    return null;
+}
+
+function getOkxChainShortNameCandidates() {
+    const configured = typeof OKX_CHAIN_SHORT_NAME === 'string'
+        ? OKX_CHAIN_SHORT_NAME.split(/[|,]+/)
+        : [];
+
+    const defaults = [
+        'x-layer',
+        'xlayer',
+        'X Layer',
+        'X-Layer',
+        'X_LAYER',
+        'Xlayer'
+    ];
+
+    const seen = new Set();
+    const result = [];
+
+    for (const value of [...configured, ...defaults]) {
+        if (!value) {
+            continue;
+        }
+
+        const trimmed = value.trim();
+        if (!trimmed) {
+            continue;
+        }
+
+        const dedupeKey = trimmed.toLowerCase();
+        if (seen.has(dedupeKey)) {
+            continue;
+        }
+
+        seen.add(dedupeKey);
+        result.push(trimmed);
+    }
+
+    if (result.length === 0) {
+        result.push('x-layer');
+    }
+
+    return result;
+}
+
+async function tryFetchOkxDexTickerForChain(chainName) {
     const url = new URL('/api/v5/dex/aggregator/ticker', OKX_BASE_URL);
-    url.searchParams.set('chainShortName', OKX_CHAIN_SHORT_NAME);
+    if (chainName) {
+        url.searchParams.set('chainShortName', chainName);
+    }
     url.searchParams.set('tokenAddress', OKX_BANMAO_TOKEN_ADDRESS);
     if (OKX_QUOTE_TOKEN_ADDRESS) {
         url.searchParams.set('quoteTokenAddress', OKX_QUOTE_TOKEN_ADDRESS);
@@ -530,11 +658,36 @@ async function tryFetchOkxDexTicker() {
         const msg = typeof payload.msg === 'string' ? payload.msg : 'Unknown error';
         throw new Error(`OKX response code ${payload.code}: ${msg}`);
     }
+
     const tickerEntry = Array.isArray(payload?.data) ? payload.data[0] : payload?.data;
     const price = extractOkxPriceValue(tickerEntry);
 
     if (Number.isFinite(price)) {
-        return { price, source: 'dex' };
+        return { price, source: 'dex', chain: chainName || '(default)' };
+    }
+
+    return null;
+}
+
+async function tryFetchOkxDexTokenPrice(chainName) {
+    const url = new URL('/api/v5/dex/aggregator/tokenPrice', OKX_BASE_URL);
+    if (chainName) {
+        url.searchParams.set('chainShortName', chainName);
+    }
+    url.searchParams.set('tokenAddress', OKX_BANMAO_TOKEN_ADDRESS);
+    if (OKX_QUOTE_TOKEN_ADDRESS) {
+        url.searchParams.set('quoteTokenAddress', OKX_QUOTE_TOKEN_ADDRESS);
+    }
+
+    const payload = await fetchOkxJson(url);
+    if (payload && payload.code && payload.code !== '0') {
+        const msg = typeof payload.msg === 'string' ? payload.msg : 'Unknown error';
+        throw new Error(`OKX response code ${payload.code}: ${msg}`);
+    }
+
+    const priceCandidate = extractOkxPriceValue(Array.isArray(payload?.data) ? payload.data[0] : payload?.data);
+    if (Number.isFinite(priceCandidate)) {
+        return { price: priceCandidate, source: 'dex-tokenPrice', chain: chainName || '(default)' };
     }
 
     return null;
