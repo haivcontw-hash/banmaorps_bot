@@ -816,11 +816,26 @@ function extractOkxQuotePrice(entry, options = {}) {
     }
 
     const directPrice = extractOkxPriceValue(entry);
-    const fromDecimalsValue = pickOkxNumeric(entry, ['fromTokenDecimals', 'sellTokenDecimals', 'fromDecimals', 'fromTokenDecimal']);
-    const toDecimalsValue = pickOkxNumeric(entry, ['toTokenDecimals', 'buyTokenDecimals', 'toDecimals', 'toTokenDecimal']);
+    const routerList = Array.isArray(entry.dexRouterList) ? entry.dexRouterList : [];
+    const firstRoute = routerList[0] || null;
+    const lastRoute = routerList.length > 0 ? routerList[routerList.length - 1] : null;
 
-    const fromDecimals = Number.isFinite(fromDecimalsValue) ? Math.max(0, Math.trunc(fromDecimalsValue)) : null;
-    const toDecimals = Number.isFinite(toDecimalsValue) ? Math.max(0, Math.trunc(toDecimalsValue)) : null;
+    const fromDecimalsCandidates = [
+        pickOkxNumeric(entry, ['fromTokenDecimals', 'sellTokenDecimals', 'fromDecimals', 'fromTokenDecimal']),
+        pickOkxNumeric(entry.fromToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(entry.sellToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(firstRoute?.fromToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal'])
+    ];
+
+    const toDecimalsCandidates = [
+        pickOkxNumeric(entry, ['toTokenDecimals', 'buyTokenDecimals', 'toDecimals', 'toTokenDecimal']),
+        pickOkxNumeric(entry.toToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(entry.buyToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal']),
+        pickOkxNumeric(lastRoute?.toToken, ['decimal', 'decimals', 'tokenDecimals', 'tokenDecimal'])
+    ];
+
+    const fromDecimals = normalizeDecimalsCandidate(fromDecimalsCandidates);
+    const toDecimals = normalizeDecimalsCandidate(toDecimalsCandidates);
 
     const fromAmount = parseBigIntValue(
         entry.fromTokenAmount
@@ -840,22 +855,18 @@ function extractOkxQuotePrice(entry, options = {}) {
     let price = Number.isFinite(directPrice) ? Number(directPrice) : null;
 
     if (!Number.isFinite(price) && fromAmount !== null && toAmount !== null) {
-        const fromNumeric = Number(fromAmount);
-        const toNumeric = Number(toAmount);
-        if (Number.isFinite(fromNumeric) && fromNumeric > 0 && Number.isFinite(toNumeric)) {
-            const decimalsDiff = (fromDecimals || 0) - (toDecimals || 0);
-            price = toNumeric / fromNumeric;
-            if (decimalsDiff !== 0) {
-                price *= Math.pow(10, decimalsDiff);
-            }
+        const priceFromAmounts = computePriceFromTokenAmounts(fromAmount, toAmount, fromDecimals, toDecimals);
+        if (Number.isFinite(priceFromAmounts)) {
+            price = priceFromAmounts;
         }
     }
 
     const toAmountUsd = pickOkxNumeric(entry, ['toAmountUsd', 'toUsdAmount', 'toAmountInUsd', 'usdAmount']);
-    if (!Number.isFinite(price) && Number.isFinite(toAmountUsd) && fromAmount !== null && Number.isFinite(fromDecimals)) {
+    if (!Number.isFinite(price) && Number.isFinite(toAmountUsd) && fromAmount !== null) {
+        const decimals = Number.isFinite(fromDecimals) ? fromDecimals : 0;
         const fromNumeric = Number(fromAmount);
         if (Number.isFinite(fromNumeric) && fromNumeric > 0) {
-            const scale = Math.pow(10, fromDecimals);
+            const scale = Math.pow(10, decimals);
             price = (toAmountUsd / fromNumeric) * scale;
         }
     }
@@ -865,6 +876,62 @@ function extractOkxQuotePrice(entry, options = {}) {
     }
 
     return { price, fromDecimals, toDecimals, fromAmount, toAmount };
+}
+
+function normalizeDecimalsCandidate(candidates) {
+    if (!Array.isArray(candidates)) {
+        return null;
+    }
+
+    for (const candidate of candidates) {
+        const numeric = normalizeNumeric(candidate);
+        if (Number.isFinite(numeric)) {
+            return Math.max(0, Math.trunc(numeric));
+        }
+    }
+
+    return null;
+}
+
+function computePriceFromTokenAmounts(fromAmount, toAmount, fromDecimals, toDecimals) {
+    if (fromAmount === null || toAmount === null) {
+        return null;
+    }
+
+    const hasFromDecimals = Number.isFinite(fromDecimals);
+    const hasToDecimals = Number.isFinite(toDecimals);
+    const fromDigits = hasFromDecimals ? Math.max(0, Math.trunc(fromDecimals)) : 0;
+    const toDigits = hasToDecimals ? Math.max(0, Math.trunc(toDecimals)) : 0;
+
+    try {
+        const numerator = toAmount * (BigInt(10) ** BigInt(fromDigits));
+        const denominator = fromAmount * (BigInt(10) ** BigInt(toDigits));
+        if (denominator === 0n) {
+            return null;
+        }
+
+        const ratio = Number(numerator) / Number(denominator);
+        if (Number.isFinite(ratio)) {
+            return ratio;
+        }
+    } catch (error) {
+        // Fallback to floating point math below
+    }
+
+    const fromNumeric = Number(fromAmount);
+    const toNumeric = Number(toAmount);
+    if (Number.isFinite(fromNumeric) && fromNumeric > 0 && Number.isFinite(toNumeric)) {
+        let ratio = toNumeric / fromNumeric;
+        if (hasFromDecimals || hasToDecimals) {
+            const decimalsDiff = fromDigits - toDigits;
+            if (decimalsDiff !== 0) {
+                ratio *= Math.pow(10, decimalsDiff);
+            }
+        }
+        return Number.isFinite(ratio) ? ratio : null;
+    }
+
+    return null;
 }
 
 async function fetchBanmaoPrice() {
