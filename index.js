@@ -39,10 +39,29 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || null;
 const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || null;
 const OKX_API_PROJECT = process.env.OKX_API_PROJECT || null;
 const OKX_API_SIMULATED = String(process.env.OKX_API_SIMULATED || '').toLowerCase() === 'true';
+const OKX_CHAIN_INDEX = (() => {
+    const value = process.env.OKX_CHAIN_INDEX;
+    if (value === undefined || value === null || value === '') {
+        return null;
+    }
+
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+})();
+const OKX_CHAIN_CONTEXT_TTL = Number(process.env.OKX_CHAIN_CONTEXT_TTL || 10 * 60 * 1000);
 const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSPHRASE);
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
     'https://web3.okx.com/token/x-layer/0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
+
+let okxChainDirectoryCache = null;
+let okxChainDirectoryExpiresAt = 0;
+let okxChainDirectoryPromise = null;
+const okxResolvedChainCache = new Map();
+const BANMAO_DECIMALS_DEFAULT = 18;
+const BANMAO_DECIMALS_CACHE_TTL = 30 * 60 * 1000;
+let banmaoDecimalsCache = null;
+let banmaoDecimalsFetchedAt = 0;
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -673,8 +692,193 @@ function renderSparkline(values) {
     return numericValues.map((value) => scale(value)).join('');
 }
 
+async function fetchBanmaoQuoteSnapshot(options = {}) {
+    if (!OKX_BANMAO_TOKEN_ADDRESS || !OKX_QUOTE_TOKEN_ADDRESS) {
+        throw new Error('Missing OKX token addresses');
+    }
+
+    const { chainName, slippagePercent = '0.5', amount: amountOverride } = options;
+    const query = await buildOkxDexQuery(chainName, { includeToken: false, includeQuote: false });
+    const context = await resolveOkxChainContext(chainName);
+
+    if (!query.chainShortName && !Number.isFinite(query.chainIndex) && !Number.isFinite(query.chainId)) {
+        throw new Error('Unable to resolve OKX chain context');
+    }
+
+    const amount = amountOverride || await resolveBanmaoQuoteAmount(chainName);
+    const requestQuery = {
+        ...('chainShortName' in query ? { chainShortName: query.chainShortName } : {}),
+        ...('chainIndex' in query ? { chainIndex: query.chainIndex } : {}),
+        ...('chainId' in query ? { chainId: query.chainId } : {}),
+        fromTokenAddress: OKX_BANMAO_TOKEN_ADDRESS,
+        toTokenAddress: OKX_QUOTE_TOKEN_ADDRESS,
+        amount,
+        slippagePercent
+    };
+
+    const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/quote', {
+        query: requestQuery
+    });
+
+    const quoteEntry = unwrapOkxFirst(payload);
+    if (!quoteEntry) {
+        return null;
+    }
+
+    const priceInfo = extractOkxQuotePrice(quoteEntry, { requestAmount: amount });
+    if (!Number.isFinite(priceInfo.price) || priceInfo.price <= 0) {
+        return null;
+    }
+
+    const chainLabel = context?.chainName || context?.chainShortName || query.chainShortName || chainName || '(default)';
+
+    return {
+        price: priceInfo.price,
+        chain: chainLabel,
+        source: 'OKX DEX quote',
+        amount,
+        decimals: priceInfo.fromDecimals,
+        quoteDecimals: priceInfo.toDecimals,
+        raw: quoteEntry
+    };
+}
+
+async function resolveBanmaoQuoteAmount(chainName) {
+    const decimals = await getBanmaoTokenDecimals(chainName);
+    const safeDecimals = Number.isFinite(decimals) ? Math.max(0, Math.min(36, Math.trunc(decimals))) : BANMAO_DECIMALS_DEFAULT;
+
+    try {
+        return (BigInt(10) ** BigInt(safeDecimals)).toString();
+    } catch (error) {
+        // Fallback to 1 * 10^18 if exponentiation fails for any reason
+        return '1000000000000000000';
+    }
+}
+
+async function getBanmaoTokenDecimals(chainName) {
+    const now = Date.now();
+    if (banmaoDecimalsCache !== null && banmaoDecimalsFetchedAt > 0 && now - banmaoDecimalsFetchedAt < BANMAO_DECIMALS_CACHE_TTL) {
+        return banmaoDecimalsCache;
+    }
+
+    try {
+        const profile = await fetchBanmaoTokenProfile({ chainName });
+        const decimals = pickOkxNumeric(profile || {}, ['decimals', 'tokenDecimals', 'tokenDecimal', 'decimal']);
+        if (Number.isFinite(decimals)) {
+            banmaoDecimalsCache = Math.max(0, Math.trunc(decimals));
+            banmaoDecimalsFetchedAt = now;
+            return banmaoDecimalsCache;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoDecimals] Failed to load token profile: ${error.message}`);
+    }
+
+    return banmaoDecimalsCache !== null ? banmaoDecimalsCache : BANMAO_DECIMALS_DEFAULT;
+}
+
+function parseBigIntValue(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+
+    if (typeof value === 'bigint') {
+        return value;
+    }
+
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value)) {
+            return null;
+        }
+        return BigInt(Math.trunc(value));
+    }
+
+    if (typeof value === 'string') {
+        const cleaned = value.replace(/[,_\s]/g, '');
+        if (!cleaned) {
+            return null;
+        }
+
+        if (/^-?\d+$/.test(cleaned)) {
+            try {
+                return BigInt(cleaned);
+            } catch (error) {
+                return null;
+            }
+        }
+    }
+
+    return null;
+}
+
+function extractOkxQuotePrice(entry, options = {}) {
+    if (!entry || typeof entry !== 'object') {
+        return { price: null, fromDecimals: null, toDecimals: null, fromAmount: null, toAmount: null };
+    }
+
+    const directPrice = extractOkxPriceValue(entry);
+    const fromDecimalsValue = pickOkxNumeric(entry, ['fromTokenDecimals', 'sellTokenDecimals', 'fromDecimals', 'fromTokenDecimal']);
+    const toDecimalsValue = pickOkxNumeric(entry, ['toTokenDecimals', 'buyTokenDecimals', 'toDecimals', 'toTokenDecimal']);
+
+    const fromDecimals = Number.isFinite(fromDecimalsValue) ? Math.max(0, Math.trunc(fromDecimalsValue)) : null;
+    const toDecimals = Number.isFinite(toDecimalsValue) ? Math.max(0, Math.trunc(toDecimalsValue)) : null;
+
+    const fromAmount = parseBigIntValue(
+        entry.fromTokenAmount
+        ?? entry.sellTokenAmount
+        ?? entry.fromAmount
+        ?? entry.inputAmount
+        ?? options.requestAmount
+    );
+
+    const toAmount = parseBigIntValue(
+        entry.toTokenAmount
+        ?? entry.buyTokenAmount
+        ?? entry.toAmount
+        ?? entry.outputAmount
+    );
+
+    let price = Number.isFinite(directPrice) ? Number(directPrice) : null;
+
+    if (!Number.isFinite(price) && fromAmount !== null && toAmount !== null) {
+        const fromNumeric = Number(fromAmount);
+        const toNumeric = Number(toAmount);
+        if (Number.isFinite(fromNumeric) && fromNumeric > 0 && Number.isFinite(toNumeric)) {
+            const decimalsDiff = (fromDecimals || 0) - (toDecimals || 0);
+            price = toNumeric / fromNumeric;
+            if (decimalsDiff !== 0) {
+                price *= Math.pow(10, decimalsDiff);
+            }
+        }
+    }
+
+    const toAmountUsd = pickOkxNumeric(entry, ['toAmountUsd', 'toUsdAmount', 'toAmountInUsd', 'usdAmount']);
+    if (!Number.isFinite(price) && Number.isFinite(toAmountUsd) && fromAmount !== null && Number.isFinite(fromDecimals)) {
+        const fromNumeric = Number(fromAmount);
+        if (Number.isFinite(fromNumeric) && fromNumeric > 0) {
+            const scale = Math.pow(10, fromDecimals);
+            price = (toAmountUsd / fromNumeric) * scale;
+        }
+    }
+
+    if (!Number.isFinite(price)) {
+        price = null;
+    }
+
+    return { price, fromDecimals, toDecimals, fromAmount, toAmount };
+}
+
 async function fetchBanmaoPrice() {
     const errors = [];
+
+    try {
+        const quoteSnapshot = await fetchBanmaoQuoteSnapshot();
+        if (quoteSnapshot && Number.isFinite(quoteSnapshot.price)) {
+            return quoteSnapshot;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoPrice] Quote snapshot failed: ${error.message}`);
+        errors.push(error);
+    }
 
     try {
         const snapshot = await fetchBanmaoMarketSnapshot();
@@ -735,7 +939,8 @@ async function fetchBanmaoMarketSnapshot() {
 }
 
 async function fetchBanmaoMarketSnapshotForChain(chainName) {
-    const query = buildOkxDexQuery(chainName);
+    const query = await buildOkxDexQuery(chainName);
+    const chainLabel = query.chainShortName || chainName || '(default)';
     const errors = [];
 
     let priceInfoEntry = null;
@@ -743,7 +948,7 @@ async function fetchBanmaoMarketSnapshotForChain(chainName) {
         const payload = await okxJsonRequest('GET', '/api/v6/dex/market/price-info', { query });
         priceInfoEntry = unwrapOkxFirst(payload);
     } catch (error) {
-        errors.push(new Error(`[price-info:${chainName || 'default'}] ${error.message}`));
+        errors.push(new Error(`[price-info:${chainLabel}] ${error.message}`));
     }
 
     let priceEntry = priceInfoEntry;
@@ -755,7 +960,7 @@ async function fetchBanmaoMarketSnapshotForChain(chainName) {
             priceEntry = unwrapOkxFirst(payload);
             source = 'OKX DEX price';
         } catch (error) {
-            errors.push(new Error(`[price:${chainName || 'default'}] ${error.message}`));
+            errors.push(new Error(`[price:${chainLabel}] ${error.message}`));
         }
     }
 
@@ -765,7 +970,7 @@ async function fetchBanmaoMarketSnapshotForChain(chainName) {
             priceEntry = unwrapOkxFirst(payload);
             source = 'OKX DEX tokenPrice';
         } catch (error) {
-            errors.push(new Error(`[tokenPrice:${chainName || 'default'}] ${error.message}`));
+            errors.push(new Error(`[tokenPrice:${chainLabel}] ${error.message}`));
         }
     }
 
@@ -793,7 +998,7 @@ async function fetchBanmaoMarketSnapshotForChain(chainName) {
         liquidity,
         marketCap,
         supply,
-        chain: chainName || '(default)',
+        chain: chainLabel,
         source,
         raw: { priceEntry, priceInfoEntry }
     };
@@ -831,7 +1036,8 @@ async function fetchBanmaoLiquidityOverview() {
 }
 
 async function fetchBanmaoLiquidityForChain(chainName) {
-    const query = buildOkxDexQuery(chainName);
+    const query = await buildOkxDexQuery(chainName);
+    const chainLabel = query.chainShortName || chainName || '(default)';
     const payload = await okxJsonRequest('GET', '/api/v6/dex/aggregator/get-liquidity', { query });
     const rows = unwrapOkxData(payload);
 
@@ -840,7 +1046,7 @@ async function fetchBanmaoLiquidityForChain(chainName) {
             totalLiquidity: null,
             poolCount: 0,
             pools: [],
-            chain: chainName || '(default)'
+            chain: chainLabel
         };
     }
 
@@ -871,13 +1077,13 @@ async function fetchBanmaoLiquidityForChain(chainName) {
         totalLiquidity: Number.isFinite(totalLiquidity) && totalLiquidity > 0 ? totalLiquidity : null,
         poolCount: pools.length,
         pools,
-        chain: chainName || '(default)'
+        chain: chainLabel
     };
 }
 
 async function fetchBanmaoCandles(options = {}) {
     const { chainName, bar = '1H', limit = 24 } = options;
-    const query = buildOkxDexQuery(chainName);
+    const query = await buildOkxDexQuery(chainName);
     query.bar = bar;
     if (limit) {
         query.limit = Math.min(Math.max(Number(limit) || 0, 1), 200);
@@ -900,14 +1106,14 @@ async function fetchBanmaoCandles(options = {}) {
 
 async function fetchBanmaoTokenProfile(options = {}) {
     const { chainName } = options;
-    const query = buildOkxDexQuery(chainName);
+    const query = await buildOkxDexQuery(chainName);
     const payload = await okxJsonRequest('GET', '/api/v6/dex/market/token/basic-info', { query });
     return unwrapOkxFirst(payload);
 }
 
 async function fetchBanmaoRecentTrades(options = {}) {
     const { chainName, limit = 1 } = options;
-    const query = buildOkxDexQuery(chainName);
+    const query = await buildOkxDexQuery(chainName);
     query.limit = Math.min(Math.max(Number(limit) || 0, 1), 50);
 
     const payload = await okxJsonRequest('GET', '/api/v6/dex/market/trades', { query });
@@ -923,31 +1129,64 @@ async function fetchBanmaoRecentTrades(options = {}) {
 }
 
 async function fetchOkxSupportedChains() {
-    const [aggregator, market] = await Promise.allSettled([
-        okxJsonRequest('GET', '/api/v6/dex/aggregator/supported/chain', { query: {} }),
-        okxJsonRequest('GET', '/api/v6/dex/market/supported/chain', { query: {} })
-    ]);
+    const directory = await ensureOkxChainDirectory();
 
-    const aggregatorChains = aggregator.status === 'fulfilled' ? unwrapOkxData(aggregator.value) : [];
-    const marketChains = market.status === 'fulfilled' ? unwrapOkxData(market.value) : [];
+    const formatList = (list) => {
+        if (!Array.isArray(list) || list.length === 0) {
+            return [];
+        }
 
-    const normalizeChain = (entry) => {
-        if (!entry) {
-            return null;
+        const seen = new Set();
+        const result = [];
+
+        for (const entry of list) {
+            if (!entry) {
+                continue;
+            }
+
+            const key = entry.primaryKey
+                || (Number.isFinite(entry.chainIndex) ? `idx:${entry.chainIndex}` : null)
+                || (entry.chainShortName ? normalizeChainKey(entry.chainShortName) : null);
+
+            if (key && seen.has(key)) {
+                continue;
+            }
+
+            if (key) {
+                seen.add(key);
+            }
+
+            const names = [];
+            if (entry.chainName) {
+                names.push(entry.chainName);
+            }
+            if (entry.chainShortName && entry.chainShortName !== entry.chainName) {
+                names.push(entry.chainShortName);
+            }
+
+            const baseLabel = names.length > 1
+                ? `${names[0]} (${names[1]})`
+                : (names[0] || entry.aliases?.[0] || 'Unknown');
+
+            const meta = [];
+            if (Number.isFinite(entry.chainIndex)) {
+                meta.push(`#${entry.chainIndex}`);
+            }
+            if (Number.isFinite(entry.chainId) && entry.chainId !== entry.chainIndex) {
+                meta.push(`id ${entry.chainId}`);
+            }
+
+            const metaText = meta.length > 0 ? ` [${meta.join(' · ')}]` : '';
+            result.push(`${baseLabel}${metaText}`);
         }
-        if (typeof entry === 'string') {
-            return entry;
-        }
-        if (typeof entry === 'object') {
-            return entry.chainShortName || entry.chainName || entry.name || entry.shortName || null;
-        }
-        return null;
+
+        return result;
     };
 
-    const aggregatorList = Array.from(new Set((aggregatorChains || []).map(normalizeChain).filter(Boolean)));
-    const marketList = Array.from(new Set((marketChains || []).map(normalizeChain).filter(Boolean)));
-
-    return { aggregator: aggregatorList, market: marketList };
+    return {
+        aggregator: formatList(directory?.aggregator || []),
+        market: formatList(directory?.market || [])
+    };
 }
 
 async function fetchOkx402Supported() {
@@ -1037,17 +1276,352 @@ function getOkxChainShortNameCandidates() {
     return result;
 }
 
-function buildOkxDexQuery(chainName) {
-    const query = {};
+function normalizeChainKey(value) {
+    if (!value || typeof value !== 'string') {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    return trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function normalizeOkxChainDirectoryEntry(entry) {
+    if (!entry) {
+        return null;
+    }
+
+    if (typeof entry === 'string') {
+        const trimmed = entry.trim();
+        if (!trimmed) {
+            return null;
+        }
+
+        const key = normalizeChainKey(trimmed);
+        return {
+            chainShortName: trimmed,
+            chainName: trimmed,
+            chainIndex: null,
+            chainId: null,
+            aliases: [trimmed],
+            keys: key ? [key] : [],
+            primaryKey: key,
+            raw: entry
+        };
+    }
+
+    if (typeof entry !== 'object') {
+        return null;
+    }
+
+    const aliasFields = [
+        entry.chainShortName,
+        entry.chainName,
+        entry.chain,
+        entry.name,
+        entry.shortName,
+        entry.short_name,
+        entry.short,
+        entry.symbol,
+        entry.chainSymbol,
+        entry.chainAlias,
+        entry.alias,
+        entry.displayName,
+        entry.label,
+        entry.networkName
+    ];
+
+    const aliases = Array.from(new Set(aliasFields
+        .map((value) => (typeof value === 'string' ? value.trim() : null))
+        .filter(Boolean)));
+
+    const chainShortName = aliases[0] || null;
+    const chainName = (typeof entry.chainName === 'string' && entry.chainName.trim())
+        ? entry.chainName.trim()
+        : (aliases[1] || chainShortName || null);
+
+    const chainIndexCandidate = entry.chainIndex ?? entry.index ?? entry.chain_id ?? entry.chainId ?? entry.id;
+    const chainIdCandidate = entry.chainId ?? entry.chain_id ?? entry.chainID ?? entry.id ?? entry.networkId;
+
+    const chainIndexNumeric = normalizeNumeric(chainIndexCandidate);
+    const chainIdNumeric = normalizeNumeric(chainIdCandidate);
+
+    const chainIndex = Number.isFinite(chainIndexNumeric) ? Math.trunc(chainIndexNumeric) : null;
+    const chainId = Number.isFinite(chainIdNumeric) ? Math.trunc(chainIdNumeric) : null;
+
+    const keys = Array.from(new Set(aliases
+        .map((alias) => normalizeChainKey(alias))
+        .filter(Boolean)));
+
+    const primaryKey = keys[0] || (Number.isFinite(chainIndex) ? `idx:${chainIndex}` : null);
+
+    return {
+        chainShortName: chainShortName || chainName || null,
+        chainName: chainName || chainShortName || null,
+        chainIndex,
+        chainId,
+        aliases,
+        keys,
+        primaryKey,
+        raw: entry
+    };
+}
+
+function dedupeOkxChainEntries(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+        return [];
+    }
+
+    const seen = new Set();
+    const result = [];
+
+    for (const entry of entries) {
+        if (!entry) {
+            continue;
+        }
+
+        const key = entry.primaryKey
+            || (Number.isFinite(entry.chainIndex) ? `idx:${entry.chainIndex}` : null)
+            || (entry.chainShortName ? normalizeChainKey(entry.chainShortName) : null);
+
+        if (key && seen.has(key)) {
+            continue;
+        }
+
+        if (key) {
+            seen.add(key);
+        }
+
+        result.push(entry);
+    }
+
+    return result;
+}
+
+async function ensureOkxChainDirectory() {
+    const now = Date.now();
+    if (okxChainDirectoryCache && okxChainDirectoryExpiresAt > now) {
+        return okxChainDirectoryCache;
+    }
+
+    if (!okxChainDirectoryPromise) {
+        okxChainDirectoryPromise = loadOkxChainDirectory()
+            .then((directory) => {
+                okxChainDirectoryCache = directory;
+                okxChainDirectoryExpiresAt = Date.now() + OKX_CHAIN_CONTEXT_TTL;
+                return directory;
+            })
+            .catch((error) => {
+                okxChainDirectoryCache = null;
+                okxChainDirectoryExpiresAt = 0;
+                throw error;
+            })
+            .finally(() => {
+                okxChainDirectoryPromise = null;
+            });
+    }
+
+    return okxChainDirectoryPromise;
+}
+
+async function loadOkxChainDirectory() {
+    const [aggregator, market] = await Promise.allSettled([
+        okxJsonRequest('GET', '/api/v6/dex/aggregator/supported/chain', { query: {}, expectOkCode: false }),
+        okxJsonRequest('GET', '/api/v6/dex/market/supported/chain', { query: {}, expectOkCode: false })
+    ]);
+
+    const normalizeList = (payload) => {
+        const rawList = payload.status === 'fulfilled' ? unwrapOkxData(payload.value) : [];
+        const normalized = [];
+        for (const item of rawList || []) {
+            const entry = normalizeOkxChainDirectoryEntry(item);
+            if (entry) {
+                normalized.push(entry);
+            }
+        }
+        return dedupeOkxChainEntries(normalized);
+    };
+
+    return {
+        aggregator: normalizeList(aggregator),
+        market: normalizeList(market)
+    };
+}
+
+function findChainEntryByIndex(list, index) {
+    if (!Array.isArray(list) || !Number.isFinite(index)) {
+        return null;
+    }
+
+    const numericIndex = Number(index);
+    for (const entry of list) {
+        if (!entry) {
+            continue;
+        }
+
+        if (Number.isFinite(entry.chainIndex) && Number(entry.chainIndex) === numericIndex) {
+            return entry;
+        }
+    }
+
+    return null;
+}
+
+function findChainEntryByKeys(list, keys) {
+    if (!Array.isArray(list) || !Array.isArray(keys) || keys.length === 0) {
+        return null;
+    }
+
+    for (const entry of list) {
+        if (!entry || !Array.isArray(entry.keys)) {
+            continue;
+        }
+
+        for (const key of entry.keys) {
+            if (keys.includes(key)) {
+                return entry;
+            }
+        }
+    }
+
+    return null;
+}
+
+function collectChainSearchKeys(chainName) {
+    const names = [];
+
     if (chainName) {
+        names.push(chainName);
+    }
+
+    if (OKX_CHAIN_SHORT_NAME) {
+        names.push(OKX_CHAIN_SHORT_NAME);
+    }
+
+    const configured = typeof OKX_CHAIN_SHORT_NAME === 'string'
+        ? OKX_CHAIN_SHORT_NAME.split(/[|,]+/)
+        : [];
+
+    for (const value of configured) {
+        names.push(value);
+    }
+
+    names.push('x-layer', 'xlayer', 'X Layer', 'okx xlayer', 'okbchain', 'okxchain');
+
+    const normalized = [];
+    const seen = new Set();
+
+    for (const name of names) {
+        if (!name || typeof name !== 'string') {
+            continue;
+        }
+
+        const variants = [
+            name,
+            name.replace(/[_\s-]+/g, ''),
+            name.replace(/[_\s]+/g, '-'),
+            name.replace(/[-]+/g, ' ')
+        ];
+
+        for (const variant of variants) {
+            const key = normalizeChainKey(variant);
+            if (key && !seen.has(key)) {
+                seen.add(key);
+                normalized.push(key);
+            }
+        }
+    }
+
+    return normalized;
+}
+
+async function resolveOkxChainContext(chainName) {
+    const cacheKey = chainName ? chainName.toLowerCase().trim() : '(default)';
+    const cached = okxResolvedChainCache.get(cacheKey);
+    const now = Date.now();
+
+    if (cached && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    const directory = await ensureOkxChainDirectory();
+    const aggregator = directory?.aggregator || [];
+    const market = directory?.market || [];
+
+    const searchKeys = collectChainSearchKeys(chainName);
+
+    let match = null;
+
+    if (Number.isFinite(OKX_CHAIN_INDEX)) {
+        match = findChainEntryByIndex(aggregator, OKX_CHAIN_INDEX)
+            || findChainEntryByIndex(market, OKX_CHAIN_INDEX);
+    }
+
+    if (!match && searchKeys.length > 0) {
+        match = findChainEntryByKeys(aggregator, searchKeys)
+            || findChainEntryByKeys(market, searchKeys);
+    }
+
+    if (!match) {
+        const xlayerKey = 'xlayer';
+        match = findChainEntryByKeys(aggregator, [xlayerKey])
+            || findChainEntryByKeys(market, [xlayerKey]);
+    }
+
+    if (!match) {
+        match = aggregator[0] || market[0] || null;
+    }
+
+    if (okxResolvedChainCache.size > 50) {
+        okxResolvedChainCache.clear();
+    }
+
+    okxResolvedChainCache.set(cacheKey, {
+        value: match,
+        expiresAt: now + OKX_CHAIN_CONTEXT_TTL
+    });
+
+    return match;
+}
+
+async function buildOkxDexQuery(chainName, options = {}) {
+    const query = {};
+    const context = await resolveOkxChainContext(chainName);
+
+    if (context) {
+        if (context.chainShortName) {
+            query.chainShortName = context.chainShortName;
+        } else if (chainName) {
+            query.chainShortName = chainName;
+        }
+
+        if (Number.isFinite(context.chainIndex)) {
+            query.chainIndex = context.chainIndex;
+        } else if (Number.isFinite(OKX_CHAIN_INDEX)) {
+            query.chainIndex = Number(OKX_CHAIN_INDEX);
+        }
+
+        if (Number.isFinite(context.chainId)) {
+            query.chainId = context.chainId;
+        }
+    } else if (chainName) {
         query.chainShortName = chainName;
     }
-    if (OKX_BANMAO_TOKEN_ADDRESS) {
+
+    const includeToken = options.includeToken !== false;
+    const includeQuote = options.includeQuote !== false;
+
+    if (includeToken && OKX_BANMAO_TOKEN_ADDRESS) {
         query.tokenAddress = OKX_BANMAO_TOKEN_ADDRESS;
     }
-    if (OKX_QUOTE_TOKEN_ADDRESS) {
+
+    if (includeQuote && OKX_QUOTE_TOKEN_ADDRESS) {
         query.quoteTokenAddress = OKX_QUOTE_TOKEN_ADDRESS;
     }
+
     return query;
 }
 
