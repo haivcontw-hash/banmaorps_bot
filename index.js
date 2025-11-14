@@ -23,9 +23,11 @@ const roomCache = new Map();
 const finalRoomOutcomes = new Map();
 const MAX_TELEGRAM_RETRIES = 5;
 const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://www.okx.com';
-const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'xlayer';
-const OKX_BANMAO_TOKEN_ADDRESS = process.env.OKX_BANMAO_TOKEN_ADDRESS || '';
-const OKX_QUOTE_TOKEN_ADDRESS = process.env.OKX_QUOTE_TOKEN_ADDRESS || '';
+const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'x-layer';
+const OKX_BANMAO_TOKEN_ADDRESS =
+    process.env.OKX_BANMAO_TOKEN_ADDRESS || '0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
+const OKX_QUOTE_TOKEN_ADDRESS =
+    process.env.OKX_QUOTE_TOKEN_ADDRESS || '0xf55bec9cafdbE8730f096Aa55dad6D22d44099Df';
 const OKX_MARKET_INSTRUMENT = process.env.OKX_MARKET_INSTRUMENT || 'BANMAO-USDT';
 const OKX_FETCH_TIMEOUT = Number(process.env.OKX_FETCH_TIMEOUT || 10000);
 
