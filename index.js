@@ -1123,10 +1123,19 @@ function summarizeOkxQuoteRoute(entry) {
         return null;
     }
 
-    const names = [];
     const seen = new Set();
+    const names = [];
 
-    for (const hop of list) {
+    const normalizeName = (value) => {
+        if (!value || typeof value !== 'string') {
+            return null;
+        }
+
+        const trimmed = value.trim();
+        return trimmed ? trimmed : null;
+    };
+
+    const extractDexName = (hop) => {
         const nameCandidates = [
             hop?.dexProtocol?.dexName,
             hop?.dexProtocol?.name,
@@ -1134,16 +1143,63 @@ function summarizeOkxQuoteRoute(entry) {
         ];
 
         for (const candidate of nameCandidates) {
-            if (!candidate || typeof candidate !== 'string') {
-                continue;
-            }
-
-            const trimmed = candidate.trim();
-            if (trimmed && !seen.has(trimmed)) {
-                seen.add(trimmed);
-                names.push(trimmed);
+            const normalized = normalizeName(candidate);
+            if (normalized) {
+                return normalized;
             }
         }
+
+        return null;
+    };
+
+    const extractTokenAddress = (token) => {
+        if (!token || typeof token !== 'object') {
+            return null;
+        }
+
+        const candidates = [
+            token.tokenContractAddress,
+            token.tokenAddress,
+            token.contractAddress,
+            token.address
+        ];
+
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate) {
+                return candidate.trim().toLowerCase();
+            }
+        }
+
+        return null;
+    };
+
+    const pushName = (name) => {
+        if (!name) {
+            return;
+        }
+
+        const key = name.toLowerCase();
+        if (seen.has(key)) {
+            return;
+        }
+
+        seen.add(key);
+        names.push(name);
+    };
+
+    // Prioritize the hop that handles BANMAO so the main route highlights DYOR Swap.
+    if (BANMAO_ADDRESS_LOWER) {
+        for (const hop of list) {
+            const fromAddress = extractTokenAddress(hop?.fromToken);
+            if (fromAddress && fromAddress === BANMAO_ADDRESS_LOWER) {
+                pushName(extractDexName(hop));
+                break;
+            }
+        }
+    }
+
+    for (const hop of list) {
+        pushName(extractDexName(hop));
     }
 
     if (names.length === 0) {
