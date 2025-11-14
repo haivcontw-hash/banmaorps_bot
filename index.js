@@ -22,6 +22,12 @@ const defaultLang = 'en';
 const roomCache = new Map();
 const finalRoomOutcomes = new Map();
 const MAX_TELEGRAM_RETRIES = 5;
+const OKX_BASE_URL = process.env.OKX_BASE_URL || 'https://www.okx.com';
+const OKX_CHAIN_SHORT_NAME = process.env.OKX_CHAIN_SHORT_NAME || 'xlayer';
+const OKX_BANMAO_TOKEN_ADDRESS = process.env.OKX_BANMAO_TOKEN_ADDRESS || '';
+const OKX_QUOTE_TOKEN_ADDRESS = process.env.OKX_QUOTE_TOKEN_ADDRESS || '';
+const OKX_MARKET_INSTRUMENT = process.env.OKX_MARKET_INSTRUMENT || 'BANMAO-USDT';
+const OKX_FETCH_TIMEOUT = Number(process.env.OKX_FETCH_TIMEOUT || 10000);
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -449,6 +455,242 @@ function formatBanmaoFromWei(weiValue) {
     }
 }
 
+function formatUsdPrice(amount) {
+    const numeric = Number(amount);
+    if (!Number.isFinite(numeric)) {
+        return '0.0000';
+    }
+
+    let minimumFractionDigits = 2;
+    let maximumFractionDigits = 2;
+
+    if (numeric < 1 && numeric >= 0.01) {
+        minimumFractionDigits = 4;
+        maximumFractionDigits = 4;
+    } else if (numeric < 0.01 && numeric >= 0.0001) {
+        minimumFractionDigits = 6;
+        maximumFractionDigits = 6;
+    } else if (numeric < 0.0001) {
+        minimumFractionDigits = 8;
+        maximumFractionDigits = 8;
+    }
+
+    return numeric.toLocaleString('en-US', {
+        minimumFractionDigits,
+        maximumFractionDigits
+    });
+}
+
+async function fetchBanmaoPrice() {
+    let lastError = null;
+
+    try {
+        const dexTicker = await tryFetchOkxDexTicker();
+        if (dexTicker) {
+            return dexTicker;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoPrice] DEX ticker failed: ${error.message}`);
+        lastError = error;
+    }
+
+    try {
+        const marketTicker = await tryFetchOkxMarketTicker();
+        if (marketTicker) {
+            return marketTicker;
+        }
+    } catch (error) {
+        console.warn(`[BanmaoPrice] Market ticker failed: ${error.message}`);
+        lastError = error;
+    }
+
+    if (lastError) {
+        throw lastError;
+    }
+
+    throw new Error('No price data available');
+}
+
+async function tryFetchOkxDexTicker() {
+    if (!OKX_BANMAO_TOKEN_ADDRESS) {
+        return null;
+    }
+
+    const url = new URL('/api/v5/dex/aggregator/ticker', OKX_BASE_URL);
+    url.searchParams.set('chainShortName', OKX_CHAIN_SHORT_NAME);
+    url.searchParams.set('tokenAddress', OKX_BANMAO_TOKEN_ADDRESS);
+    if (OKX_QUOTE_TOKEN_ADDRESS) {
+        url.searchParams.set('quoteTokenAddress', OKX_QUOTE_TOKEN_ADDRESS);
+    }
+
+    const payload = await fetchOkxJson(url);
+    if (payload && payload.code && payload.code !== '0') {
+        const msg = typeof payload.msg === 'string' ? payload.msg : 'Unknown error';
+        throw new Error(`OKX response code ${payload.code}: ${msg}`);
+    }
+    const tickerEntry = Array.isArray(payload?.data) ? payload.data[0] : payload?.data;
+    const price = extractOkxPriceValue(tickerEntry);
+
+    if (Number.isFinite(price)) {
+        return { price, source: 'dex' };
+    }
+
+    return null;
+}
+
+async function tryFetchOkxMarketTicker() {
+    if (!OKX_MARKET_INSTRUMENT) {
+        return null;
+    }
+
+    const url = new URL('/api/v5/market/ticker', OKX_BASE_URL);
+    url.searchParams.set('instId', OKX_MARKET_INSTRUMENT);
+
+    const payload = await fetchOkxJson(url);
+    if (payload && payload.code && payload.code !== '0') {
+        const msg = typeof payload.msg === 'string' ? payload.msg : 'Unknown error';
+        throw new Error(`OKX response code ${payload.code}: ${msg}`);
+    }
+    const tickerEntry = Array.isArray(payload?.data) ? payload.data[0] : payload?.data;
+    const price = extractOkxPriceValue(tickerEntry);
+
+    if (Number.isFinite(price)) {
+        return { price, source: 'market' };
+    }
+
+    return null;
+}
+
+async function fetchOkxJson(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), OKX_FETCH_TIMEOUT);
+
+    try {
+        const response = await fetch(url.toString(), {
+            method: 'GET',
+            signal: controller.signal,
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        return await response.json();
+    } catch (error) {
+        if (error && error.name === 'AbortError') {
+            throw new Error('Request timed out');
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function extractOkxPriceValue(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+
+    const priceKeys = [
+        'usdPrice',
+        'price',
+        'priceUsd',
+        'lastPrice',
+        'last',
+        'close',
+        'markPrice',
+        'quotePrice',
+        'tokenPrice',
+        'usdValue',
+        'value',
+        'bestAskPrice',
+        'bestBidPrice',
+        'bestAsk',
+        'bestBid',
+        'askPx',
+        'bidPx'
+    ];
+
+    for (const key of priceKeys) {
+        if (Object.prototype.hasOwnProperty.call(entry, key)) {
+            const numeric = normalizeNumeric(entry[key]);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+    }
+
+    const nestedKeys = ['prices', 'priceInfo', 'tokenPrices', 'ticker', 'bestAsk', 'bestBid'];
+    for (const nestedKey of nestedKeys) {
+        const nested = entry[nestedKey];
+        const numeric = extractFromNested(nested);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+    }
+
+    if (Array.isArray(entry.data)) {
+        const numeric = extractFromNested(entry.data);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+    }
+
+    return null;
+}
+
+function extractFromNested(value) {
+    if (!value) {
+        return null;
+    }
+
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const numeric = extractOkxPriceValue(item);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+        return null;
+    }
+
+    if (typeof value === 'object') {
+        const nestedValues = Object.values(value);
+        for (const nested of nestedValues) {
+            const numeric = extractOkxPriceValue(nested);
+            if (Number.isFinite(numeric)) {
+                return numeric;
+            }
+        }
+    }
+
+    return normalizeNumeric(value);
+}
+
+function normalizeNumeric(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+
+    if (typeof value === 'string') {
+        const cleaned = value.replace(/[,\s]/g, '');
+        if (!cleaned) {
+            return null;
+        }
+        const numeric = Number(cleaned);
+        return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    return null;
+}
+
 function toRoomIdString(roomId) {
     try {
         return roomId.toString();
@@ -853,6 +1095,26 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: "Markdown" });
     });
 
+    bot.onText(/\/pricebanmao/, async (msg) => {
+        const chatId = msg.chat.id.toString();
+        const lang = await getLang(msg);
+
+        try {
+            const priceInfo = await fetchBanmaoPrice();
+            if (!priceInfo || !Number.isFinite(priceInfo.price)) {
+                throw new Error('No price returned');
+            }
+
+            const formattedPrice = formatUsdPrice(priceInfo.price);
+            const successMessage = t(lang, 'price_banmao_success', { price: formattedPrice });
+            sendReply(msg, successMessage, { parse_mode: "Markdown" });
+        } catch (error) {
+            console.error(`[BanmaoPrice] Failed to fetch price: ${error.message}`);
+            const errorMessage = t(lang, 'price_banmao_error');
+            sendReply(msg, errorMessage, { parse_mode: "Markdown" });
+        }
+    });
+
     // COMMAND: /banmaofeed - Chỉ dùng cho group
     bot.onText(/\/banmaofeed(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
@@ -1142,6 +1404,7 @@ function startTelegramBot() {
             t(lang, 'help_command_register'),
             t(lang, 'help_command_mywallet'),
             t(lang, 'help_command_stats'),
+            t(lang, 'help_command_pricebanmao'),
             t(lang, 'help_command_unregister'),
             t(lang, 'help_command_language'),
             t(lang, 'help_command_feedlang'),

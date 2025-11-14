@@ -136,10 +136,13 @@
   "help_command_register": "• `/register <alamat_dompet>` — Tambahkan dompet secara manual ke daftar pantauan Anda.",
   "help_command_mywallet": "• `/mywallet` — Lihat semua dompet yang sedang Anda pantau.",
   "help_command_stats": "• `/stats` — Lihat ringkasan hasil permainan dan keuntungan Anda.",
+  "help_command_pricebanmao": "• `/pricebanmao` — Cek harga $BANMAO terkini dari OKX DEX di X Layer.",
   "help_command_unregister": "• `/unregister` — Hapus dompet yang dipilih (atau semua) dari pemantauan.",
   "help_command_language": "• `/language` — Ganti bahasa antarmuka bot.",
   "help_command_banmaofeed": "• `/banmaofeed <jumlah|off>` — Atur siaran otomatis di obrolan grup (khusus grup).",
   "help_command_feedlang": "• `/feedlang` — Pilih bahasa pribadi untuk notifikasi feed grup (khusus grup). Gunakan `/feedlang off` untuk menghapus.",
   "help_command_feedtopic": "• `/feedtopic` — Pilih topik tempat notifikasi grup dikirim (khusus grup).",
-  "help_command_help": "• `/help` — Tampilkan kembali daftar perintah ini."
+  "help_command_help": "• `/help` — Tampilkan kembali daftar perintah ini.",
+  "price_banmao_success": "Harga $BANMAO saat ini: **{price} USD** (OKX DEX).",
+  "price_banmao_error": "⚠️ Tidak dapat mengambil harga $BANMAO sekarang. Coba lagi nanti."
 }

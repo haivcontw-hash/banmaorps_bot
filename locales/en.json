@@ -136,10 +136,13 @@
   "help_command_register": "• `/register <wallet_address>` — Manually add a wallet to your watch list.",
   "help_command_mywallet": "• `/mywallet` — View every wallet you are currently monitoring.",
   "help_command_stats": "• `/stats` — See your game results and profit statistics.",
+  "help_command_pricebanmao": "• `/pricebanmao` — Check the live $BANMAO price from OKX DEX on X Layer.",
   "help_command_unregister": "• `/unregister` — Remove selected wallets (or all) from monitoring.",
   "help_command_language": "• `/language` — Change the bot interface language.",
   "help_command_banmaofeed": "• `/banmaofeed <amount|off>` — Configure automatic broadcasts in group chats (group only).",
   "help_command_feedlang": "• `/feedlang` — Choose your personal language for group feed alerts (group only). Use `/feedlang off` to reset.",
   "help_command_feedtopic": "• `/feedtopic` — Choose which topic receives group feed updates (group only).",
-  "help_command_help": "• `/help` — Show this list of commands again."
+  "help_command_help": "• `/help` — Show this list of commands again.",
+  "price_banmao_success": "Current $BANMAO price: **{price} USD** (OKX DEX).",
+  "price_banmao_error": "⚠️ Unable to fetch the $BANMAO price right now. Please try again soon."
 }

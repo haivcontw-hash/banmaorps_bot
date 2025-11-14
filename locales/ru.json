@@ -136,10 +136,13 @@
   "help_command_register": "• `/register <адрес_кошелька>` — Добавить кошелек вручную в список отслеживания.",
   "help_command_mywallet": "• `/mywallet` — Показать все кошельки, которые вы отслеживаете.",
   "help_command_stats": "• `/stats` — Посмотреть результаты игр и статистику прибыли.",
+  "help_command_pricebanmao": "• `/pricebanmao` — Узнать актуальную цену $BANMAO на OKX DEX (X Layer).",
   "help_command_unregister": "• `/unregister` — Удалить выбранные (или все) кошельки из отслеживания.",
   "help_command_language": "• `/language` — Выбрать язык интерфейса бота.",
   "help_command_banmaofeed": "• `/banmaofeed <сумма|off>` — Настроить автопубликацию в групповых чатах (только для групп).",
   "help_command_feedlang": "• `/feedlang` — Выберите личный язык для групповых уведомлений (только для групп). Используйте `/feedlang off`, чтобы сбросить.",
   "help_command_feedtopic": "• `/feedtopic` — Выбрать топик для групповых уведомлений (только для групп).",
-  "help_command_help": "• `/help` — Показать этот список команд снова."
+  "help_command_help": "• `/help` — Показать этот список команд снова.",
+  "price_banmao_success": "Текущая цена $BANMAO: **{price} USD** (OKX DEX).",
+  "price_banmao_error": "⚠️ Не удалось получить цену $BANMAO. Попробуйте ещё раз позже."
 }

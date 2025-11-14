@@ -136,10 +136,13 @@
   "help_command_register": "• `/register <địa_chỉ_ví>` — Thêm ví vào danh sách theo dõi.",
   "help_command_mywallet": "• `/mywallet` — Xem tất cả ví bạn đang theo dõi.",
   "help_command_stats": "• `/stats` — Xem kết quả và thống kê lợi nhuận.",
+  "help_command_pricebanmao": "• `/pricebanmao` — Xem giá $BANMAO trực tiếp từ OKX DEX trên X Layer.",
   "help_command_unregister": "• `/unregister` — Gỡ bớt (hoặc tất cả) ví khỏi danh sách theo dõi.",
   "help_command_language": "• `/language` — Đổi ngôn ngữ giao diện bot.",
   "help_command_banmaofeed": "• `/banmaofeed <amount|off>` — Cấu hình phát tự động trong nhóm (chỉ dùng trong nhóm).",
   "help_command_feedlang": "• `/feedlang` — Chọn ngôn ngữ cá nhân cho thông báo feed (chỉ dùng trong nhóm). Gõ `/feedlang off` để bỏ chọn.",
   "help_command_feedtopic": "• `/feedtopic` — Chọn chủ đề mà bot sẽ gửi thông báo (chỉ dùng trong nhóm).",
-  "help_command_help": "• `/help` — Hiển thị lại danh sách lệnh này."
+  "help_command_help": "• `/help` — Hiển thị lại danh sách lệnh này.",
+  "price_banmao_success": "Giá $BANMAO hiện tại: **{price} USD** (OKX DEX).",
+  "price_banmao_error": "⚠️ Không thể lấy giá $BANMAO lúc này. Vui lòng thử lại sau."
 }

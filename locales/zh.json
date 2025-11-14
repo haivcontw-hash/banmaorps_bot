@@ -136,10 +136,13 @@
   "help_command_register": "• `/register <钱包地址>` — 手动将钱包加入监控列表。",
   "help_command_mywallet": "• `/mywallet` — 查看当前监控的所有钱包。",
   "help_command_stats": "• `/stats` — 查看对局结果与收益统计。",
+  "help_command_pricebanmao": "• `/pricebanmao` — 查看来自 OKX DEX（X Layer）的实时 $BANMAO 价格。",
   "help_command_unregister": "• `/unregister` — 选择要移除的钱包或一次性全部移除。",
   "help_command_language": "• `/language` — 切换机器人的界面语言。",
   "help_command_banmaofeed": "• `/banmaofeed <金额|off>` — 配置群组自动播报（仅限群组）。",
   "help_command_feedlang": "• `/feedlang` — 为群组播报选择个人语言（仅限群组）。使用 `/feedlang off` 取消。",
   "help_command_feedtopic": "• `/feedtopic` — 选择群组通知要发送到哪个话题（仅限群组）。",
-  "help_command_help": "• `/help` — 再次显示此指令列表。"
+  "help_command_help": "• `/help` — 再次显示此指令列表。",
+  "price_banmao_success": "$BANMAO 当前价格：**{price} USD**（OKX DEX）。",
+  "price_banmao_error": "⚠️ 暂时无法获取 $BANMAO 价格，请稍后再试。"
 }
