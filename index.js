@@ -639,6 +639,37 @@ function formatTokenQuantity(amount, options = {}) {
     });
 }
 
+function formatTokenAmountFromUnits(amount, decimals, options = {}) {
+    const bigIntValue = parseBigIntValue(amount);
+    if (bigIntValue === null) {
+        return null;
+    }
+
+    const digits = Number.isFinite(decimals) ? Math.max(0, Math.trunc(decimals)) : 0;
+
+    try {
+        const formatted = ethers.formatUnits(bigIntValue, digits);
+        const numeric = Number(formatted);
+        if (Number.isFinite(numeric)) {
+            const minimumFractionDigits = Number.isFinite(options.minimumFractionDigits)
+                ? options.minimumFractionDigits
+                : (Math.abs(numeric) < 1 ? 6 : 2);
+            const maximumFractionDigits = Number.isFinite(options.maximumFractionDigits)
+                ? options.maximumFractionDigits
+                : Math.max(minimumFractionDigits, Math.abs(numeric) < 1 ? 8 : 6);
+
+            return numeric.toLocaleString('en-US', {
+                minimumFractionDigits,
+                maximumFractionDigits
+            });
+        }
+
+        return formatted;
+    } catch (error) {
+        return null;
+    }
+}
+
 function formatTimestampRange(startMs, endMs) {
     const start = startMs ? new Date(startMs) : null;
     const end = endMs ? new Date(endMs) : null;
@@ -732,18 +763,21 @@ async function fetchBanmaoQuoteSnapshot(options = {}) {
     const query = await buildOkxDexQuery(chainName, { includeToken: false, includeQuote: false });
     const context = await resolveOkxChainContext(chainName);
 
-    if (!query.chainShortName && !Number.isFinite(query.chainIndex) && !Number.isFinite(query.chainId)) {
-        throw new Error('Unable to resolve OKX chain context');
+    const chainIndex = Number.isFinite(query.chainIndex)
+        ? Number(query.chainIndex)
+        : (Number.isFinite(context?.chainIndex) ? Number(context.chainIndex) : null);
+
+    if (!Number.isFinite(chainIndex)) {
+        throw new Error('Unable to resolve OKX chain index');
     }
 
     const amount = amountOverride || await resolveBanmaoQuoteAmount(chainName);
     const requestQuery = {
-        ...('chainShortName' in query ? { chainShortName: query.chainShortName } : {}),
-        ...('chainIndex' in query ? { chainIndex: query.chainIndex } : {}),
-        ...('chainId' in query ? { chainId: query.chainId } : {}),
+        chainIndex,
         fromTokenAddress: OKX_BANMAO_TOKEN_ADDRESS,
         toTokenAddress: OKX_QUOTE_TOKEN_ADDRESS,
         amount,
+        swapMode: 'exactIn',
         slippagePercent
     };
 
@@ -767,15 +801,50 @@ async function fetchBanmaoQuoteSnapshot(options = {}) {
         ? priceInfo.price / okbUsd
         : null;
 
+    const extractSymbol = (token, fallback) => {
+        if (!token || typeof token !== 'object') {
+            return fallback;
+        }
+
+        const candidate = typeof token.tokenSymbol === 'string'
+            ? token.tokenSymbol
+            : (typeof token.symbol === 'string' ? token.symbol : null);
+
+        if (candidate && candidate.trim()) {
+            return candidate.trim().toUpperCase();
+        }
+
+        return fallback;
+    };
+
+    const routerList = Array.isArray(quoteEntry.dexRouterList) ? quoteEntry.dexRouterList : [];
+    const firstRoute = routerList[0] || null;
+    const lastRoute = routerList.length > 0 ? routerList[routerList.length - 1] : null;
+
+    const fromSymbol = extractSymbol(quoteEntry.fromToken, extractSymbol(firstRoute?.fromToken, 'BANMAO'));
+    const toSymbol = extractSymbol(quoteEntry.toToken, extractSymbol(lastRoute?.toToken, 'USDT'));
+
+    const tradeFeeUsd = normalizeNumeric(quoteEntry.tradeFee);
+    const priceImpactPercent = normalizeNumeric(quoteEntry.priceImpactPercent);
+    const routeLabel = summarizeOkxQuoteRoute(quoteEntry);
+
     return {
         price: priceInfo.price,
         priceOkb: Number.isFinite(priceOkb) ? priceOkb : null,
         okbUsd: Number.isFinite(okbUsd) ? okbUsd : null,
         chain: chainLabel,
+        chainIndex,
         source: 'OKX DEX quote',
         amount,
         decimals: priceInfo.fromDecimals,
         quoteDecimals: priceInfo.toDecimals,
+        fromAmount: priceInfo.fromAmount,
+        toAmount: priceInfo.toAmount,
+        fromSymbol,
+        toSymbol,
+        tradeFeeUsd: Number.isFinite(tradeFeeUsd) ? tradeFeeUsd : null,
+        priceImpactPercent: Number.isFinite(priceImpactPercent) ? priceImpactPercent : null,
+        routeLabel,
         tokenPrices: priceInfo.tokenUnitPrices,
         derivedPrice: priceInfo.amountPrice,
         raw: quoteEntry
@@ -971,6 +1040,42 @@ function collectOkxTokenUnitPrices(entry, routerList = []) {
             ? quoteTokenEntry.unitPrice
             : null
     };
+}
+
+function summarizeOkxQuoteRoute(entry) {
+    const list = Array.isArray(entry?.dexRouterList) ? entry.dexRouterList : [];
+    if (list.length === 0) {
+        return null;
+    }
+
+    const names = [];
+    const seen = new Set();
+
+    for (const hop of list) {
+        const nameCandidates = [
+            hop?.dexProtocol?.dexName,
+            hop?.dexProtocol?.name,
+            hop?.dexName
+        ];
+
+        for (const candidate of nameCandidates) {
+            if (!candidate || typeof candidate !== 'string') {
+                continue;
+            }
+
+            const trimmed = candidate.trim();
+            if (trimmed && !seen.has(trimmed)) {
+                seen.add(trimmed);
+                names.push(trimmed);
+            }
+        }
+    }
+
+    if (names.length === 0) {
+        return null;
+    }
+
+    return names.join(' → ');
 }
 
 function resolveOkbUsdPrice(tokenPrices) {
@@ -2819,37 +2924,44 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: "Markdown" });
     });
 
-    bot.onText(/\/pricebanmao/, async (msg) => {
+    bot.onText(/\/banmaoprice/, async (msg) => {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
 
         try {
-            const snapshot = await fetchBanmaoPrice();
+            const snapshot = await fetchBanmaoQuoteSnapshot();
             if (!snapshot || !Number.isFinite(snapshot.price)) {
                 throw new Error('No price returned');
             }
 
-            const priceFormatted = formatUsdPrice(snapshot.price);
-            const changeAbsValue = Number.isFinite(Number(snapshot.changeAbs))
-                ? formatUsdPrice(Math.abs(Number(snapshot.changeAbs)))
-                : null;
-            const changePercentValue = normalizePercentageValue(snapshot.changePercent);
-            const changePercentText = Number.isFinite(changePercentValue)
-                ? formatPercentage(changePercentValue, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                : null;
-            const changeDirection = Number.isFinite(changePercentValue)
-                ? (changePercentValue >= 0 ? '▲ ' : '▼ ')
-                : '';
+            const priceUsdText = formatUsdPrice(snapshot.price);
             const priceOkbNumeric = Number(snapshot.priceOkb);
             const priceOkbText = Number.isFinite(priceOkbNumeric)
                 ? formatTokenQuantity(priceOkbNumeric, { minimumFractionDigits: 8, maximumFractionDigits: 8 })
                 : null;
 
-            const volumeText = Number.isFinite(Number(snapshot.volume))
-                ? formatUsdCompact(snapshot.volume)
+            const fromAmountText = formatTokenAmountFromUnits(
+                snapshot.fromAmount ?? snapshot.amount,
+                snapshot.decimals,
+                { minimumFractionDigits: 0, maximumFractionDigits: 6 }
+            ) || '1';
+
+            const toAmountText = formatTokenAmountFromUnits(
+                snapshot.toAmount,
+                snapshot.quoteDecimals,
+                { minimumFractionDigits: 6, maximumFractionDigits: 8 }
+            );
+
+            const priceImpactText = Number.isFinite(snapshot.priceImpactPercent)
+                ? formatPercentage(snapshot.priceImpactPercent, {
+                    includeSign: true,
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                })
                 : null;
-            const liquidityText = Number.isFinite(Number(snapshot.liquidity))
-                ? formatUsdCompact(snapshot.liquidity)
+
+            const feeText = Number.isFinite(Number(snapshot.tradeFeeUsd))
+                ? formatUsdPrice(snapshot.tradeFeeUsd)
                 : null;
 
             const sourceLabelParts = [];
@@ -2866,282 +2978,26 @@ function startTelegramBot() {
             const fallbackValue = t(lang, 'okx_generic_no_data');
 
             const lines = [
-                t(lang, 'price_banmao_title'),
-                t(lang, 'price_banmao_price_line', {
-                    price: priceFormatted,
-                    changeAbs: changeAbsValue || fallbackValue,
-                    changePercent: changePercentText || fallbackValue,
-                    changeDirection
+                t(lang, 'banmaoprice_title'),
+                t(lang, 'banmaoprice_price_usd', { priceUsd: priceUsdText }),
+                priceOkbText ? t(lang, 'banmaoprice_price_okb', { priceOkb: priceOkbText }) : null,
+                t(lang, 'banmaoprice_quote_line', {
+                    fromAmount: fromAmountText,
+                    fromSymbol: snapshot.fromSymbol || 'BANMAO',
+                    toAmount: toAmountText || fallbackValue,
+                    toSymbol: snapshot.toSymbol || 'USDT'
                 }),
-                priceOkbText ? t(lang, 'price_banmao_price_okb_line', { price: priceOkbText }) : null,
-                volumeText ? t(lang, 'price_banmao_volume_line', { volume: volumeText }) : null,
-                liquidityText ? t(lang, 'price_banmao_liquidity_line', { liquidity: liquidityText }) : null,
-                t(lang, 'price_banmao_source_line', { source: sourceLabel }),
-                t(lang, 'price_banmao_chart_hint')
+                feeText ? t(lang, 'banmaoprice_fee_line', { feeUsd: feeText }) : null,
+                priceImpactText ? t(lang, 'banmaoprice_price_impact_line', { impact: priceImpactText }) : null,
+                snapshot.routeLabel ? t(lang, 'banmaoprice_route_line', { route: snapshot.routeLabel }) : null,
+                t(lang, 'banmaoprice_source_line', { source: sourceLabel })
             ].filter(Boolean);
 
             const successMessage = lines.join('\n');
             sendReply(msg, successMessage, { parse_mode: "Markdown" });
         } catch (error) {
             console.error(`[BanmaoPrice] Failed to fetch price: ${error.message}`);
-            const errorMessage = t(lang, 'price_banmao_error');
-            sendReply(msg, errorMessage, { parse_mode: "Markdown" });
-        }
-    });
-
-    bot.onText(/\/banmaochart(?:\s+(\d+))?/, async (msg, match) => {
-        const lang = await getLang(msg);
-        const requestedHours = match && match[1] ? parseInt(match[1], 10) : 24;
-        const hours = Number.isFinite(requestedHours) && requestedHours > 0 ? Math.min(requestedHours, 240) : 24;
-
-        try {
-            const candles = await fetchBanmaoCandles({ limit: hours, bar: '1H' });
-            if (!candles || candles.length === 0) {
-                throw new Error('No candle data');
-            }
-
-            const closingPrices = candles.map((candle) => candle.close).filter((value) => Number.isFinite(value));
-            const sparkline = renderSparkline(closingPrices);
-            if (!sparkline) {
-                throw new Error('Unable to render sparkline');
-            }
-
-            const minPrice = Math.min(...closingPrices);
-            const maxPrice = Math.max(...closingPrices);
-            const firstCandle = candles[0];
-            const lastCandle = candles[candles.length - 1];
-            const range = formatTimestampRange(firstCandle?.timestamp, lastCandle?.timestamp);
-
-            const lines = [
-                t(lang, 'banmao_chart_title', { hours }),
-                '```',
-                sparkline,
-                '```',
-                t(lang, 'banmao_chart_range', { minPrice: formatUsdPrice(minPrice), maxPrice: formatUsdPrice(maxPrice) }),
-                t(lang, 'banmao_chart_updated', { start: range.start, end: range.end })
-            ];
-
-            const message = lines.join('\n');
-            sendReply(msg, message, { parse_mode: "Markdown" });
-        } catch (error) {
-            console.error(`[BanmaoChart] Failed to build chart: ${error.message}`);
-            const errorMessage = t(lang, 'banmao_chart_error');
-            sendReply(msg, errorMessage, { parse_mode: "Markdown" });
-        }
-    });
-
-    bot.onText(/\/banmaoliquidity/, async (msg) => {
-        const lang = await getLang(msg);
-
-        try {
-            const overview = await fetchBanmaoLiquidityOverview();
-            if (!overview) {
-                throw new Error('No liquidity data');
-            }
-
-            const totalLiquidityText = Number.isFinite(Number(overview.totalLiquidity))
-                ? formatUsdCompact(overview.totalLiquidity)
-                : t(lang, 'okx_generic_no_data');
-
-            const topPool = Array.isArray(overview.pools)
-                ? overview.pools.find((pool) => Number.isFinite(pool?.liquidityUsd))
-                : null;
-
-            const lines = [
-                t(lang, 'banmao_liquidity_title'),
-                t(lang, 'banmao_liquidity_summary', {
-                    liquidity: totalLiquidityText,
-                    poolCount: overview.poolCount || 0
-                })
-            ];
-
-            if (topPool) {
-                lines.push(t(lang, 'banmao_liquidity_top_pool', {
-                    poolName: topPool.name || 'Pool',
-                    liquidity: formatUsdCompact(topPool.liquidityUsd || 0)
-                }));
-
-                if (topPool.quoteSymbol) {
-                    lines.push(t(lang, 'banmao_liquidity_quote', { quote: topPool.quoteSymbol }));
-                }
-            }
-
-            const chainLabel = overview.chain && overview.chain !== '(default)'
-                ? overview.chain
-                : 'OKX DEX';
-            lines.push(t(lang, 'banmao_liquidity_note', { chain: chainLabel }));
-
-            const message = lines.join('\n');
-            sendReply(msg, message, { parse_mode: "Markdown" });
-        } catch (error) {
-            console.error(`[BanmaoLiquidity] Failed to fetch liquidity: ${error.message}`);
-            const errorMessage = t(lang, 'banmao_liquidity_error');
-            sendReply(msg, errorMessage, { parse_mode: "Markdown" });
-        }
-    });
-
-    bot.onText(/\/banmaomarket/, async (msg) => {
-        const lang = await getLang(msg);
-
-        try {
-            const snapshot = await fetchBanmaoMarketSnapshot();
-            if (!snapshot || !Number.isFinite(snapshot.price)) {
-                throw new Error('No price data');
-            }
-
-            const [liquidityResult, tokenProfileResult, tradesResult] = await Promise.allSettled([
-                fetchBanmaoLiquidityOverview(),
-                fetchBanmaoTokenProfile(),
-                fetchBanmaoRecentTrades({ limit: 1 })
-            ]);
-
-            const liquidity = liquidityResult.status === 'fulfilled' ? liquidityResult.value : null;
-            const tokenProfile = tokenProfileResult.status === 'fulfilled' ? tokenProfileResult.value : null;
-            const trades = tradesResult.status === 'fulfilled' ? tradesResult.value : [];
-
-            const fallbackValue = t(lang, 'okx_generic_no_data');
-            const priceText = formatUsdPrice(snapshot.price);
-            const priceOkbNumeric = Number(snapshot.priceOkb);
-            const priceOkbText = Number.isFinite(priceOkbNumeric)
-                ? formatTokenQuantity(priceOkbNumeric, { minimumFractionDigits: 8, maximumFractionDigits: 8 })
-                : null;
-            const changePercentValue = normalizePercentageValue(snapshot.changePercent);
-            const changePercentText = Number.isFinite(changePercentValue)
-                ? formatPercentage(changePercentValue, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                : fallbackValue;
-            const changeDirection = Number.isFinite(changePercentValue)
-                ? (changePercentValue >= 0 ? '▲' : '▼')
-                : '';
-            const changeAbsText = Number.isFinite(Number(snapshot.changeAbs))
-                ? formatUsdPrice(Math.abs(Number(snapshot.changeAbs)))
-                : fallbackValue;
-
-            const volumeText = Number.isFinite(Number(snapshot.volume))
-                ? formatUsdCompact(snapshot.volume)
-                : fallbackValue;
-
-            const liquidityValue = liquidity && Number.isFinite(Number(liquidity.totalLiquidity))
-                ? liquidity.totalLiquidity
-                : snapshot.liquidity;
-            const liquidityText = Number.isFinite(Number(liquidityValue))
-                ? formatUsdCompact(liquidityValue)
-                : fallbackValue;
-
-            const marketCapValue = Number.isFinite(Number(snapshot.marketCap))
-                ? snapshot.marketCap
-                : pickOkxNumeric(tokenProfile, ['marketCapUsd', 'marketCap', 'fdvUsd', 'fullyDilutedMarketCap']);
-            const marketCapText = Number.isFinite(Number(marketCapValue))
-                ? formatUsdCompact(marketCapValue)
-                : fallbackValue;
-
-            const symbol = (tokenProfile && (tokenProfile.symbol || tokenProfile.tokenSymbol)) || 'BANMAO';
-            const supplyValue = pickOkxNumeric(tokenProfile || {}, ['totalSupply', 'supply', 'circulatingSupply', 'maxSupply']);
-            const supplyText = Number.isFinite(Number(supplyValue))
-                ? formatTokenQuantity(supplyValue, { minimumFractionDigits: 0, maximumFractionDigits: 0 })
-                : fallbackValue;
-
-            const trade = Array.isArray(trades) && trades.length > 0 ? trades[0] : null;
-            let tradeLine = null;
-            if (trade) {
-                const sideKey = trade.side === 'sell'
-                    ? 'banmao_market_trade_sell'
-                    : 'banmao_market_trade_buy';
-                const sideLabel = t(lang, sideKey);
-                const amountText = Number.isFinite(Number(trade.amount))
-                    ? formatTokenQuantity(trade.amount, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                    : fallbackValue;
-                const priceTextTrade = Number.isFinite(Number(trade.price))
-                    ? formatUsdPrice(trade.price)
-                    : fallbackValue;
-                const agoText = formatRelativeTime(trade.timestamp) || fallbackValue;
-                tradeLine = t(lang, 'banmao_market_last_trade', {
-                    side: sideLabel,
-                    amount: amountText,
-                    symbol,
-                    price: priceTextTrade,
-                    ago: agoText
-                });
-            }
-
-            const tokenLink = (tokenProfile && (tokenProfile.tokenUrl || tokenProfile.url)) || OKX_BANMAO_TOKEN_URL;
-
-            const lines = [
-                t(lang, 'banmao_market_title'),
-                t(lang, 'banmao_market_price', {
-                    price: priceText,
-                    changePercent: changePercentText,
-                    changeDirection,
-                    changeAbs: changeAbsText
-                }),
-                priceOkbText ? t(lang, 'banmao_market_price_okb', { priceOkb: priceOkbText }) : null,
-                t(lang, 'banmao_market_volume', { volume: volumeText }),
-                t(lang, 'banmao_market_liquidity', { liquidity: liquidityText }),
-                t(lang, 'banmao_market_marketcap', { marketCap: marketCapText }),
-                t(lang, 'banmao_market_supply', { supply: supplyText, symbol }),
-                tradeLine,
-                t(lang, 'banmao_market_token_link', { link: tokenLink })
-            ].filter(Boolean);
-
-            const message = lines.join('\n');
-            sendReply(msg, message, { parse_mode: "Markdown" });
-        } catch (error) {
-            console.error(`[BanmaoMarket] Failed to assemble market data: ${error.message}`);
-            const errorMessage = t(lang, 'banmao_market_error');
-            sendReply(msg, errorMessage, { parse_mode: "Markdown" });
-        }
-    });
-
-    bot.onText(/\/okxchains/, async (msg) => {
-        const lang = await getLang(msg);
-
-        try {
-            const { aggregator, market } = await fetchOkxSupportedChains();
-            const fallback = t(lang, 'okx_generic_no_data');
-            const aggregatorText = aggregator && aggregator.length > 0 ? aggregator.join(', ') : fallback;
-            const marketText = market && market.length > 0 ? market.join(', ') : fallback;
-
-            const lines = [
-                t(lang, 'okx_chains_title'),
-                aggregator && aggregator.length > 0
-                    ? t(lang, 'okx_chains_aggregator', { chains: aggregatorText })
-                    : null,
-                market && market.length > 0
-                    ? t(lang, 'okx_chains_market', { chains: marketText })
-                    : null
-            ].filter(Boolean);
-
-            if (lines.length === 1) {
-                lines.push(t(lang, 'okx_chains_none'));
-            }
-
-            const message = lines.join('\n');
-            sendReply(msg, message, { parse_mode: "Markdown" });
-        } catch (error) {
-            console.error(`[OkxChains] Failed to load supported chains: ${error.message}`);
-            const errorMessage = t(lang, 'okx_chains_error');
-            sendReply(msg, errorMessage, { parse_mode: "Markdown" });
-        }
-    });
-
-    bot.onText(/\/okx402status/, async (msg) => {
-        const lang = await getLang(msg);
-
-        try {
-            const supported = await fetchOkx402Supported();
-            const fallback = t(lang, 'okx_generic_no_data');
-            const chainsText = supported && supported.length > 0 ? supported.join(', ') : fallback;
-
-            const lines = [
-                t(lang, 'okx_x402_title'),
-                t(lang, 'okx_x402_supported', { chains: chainsText }),
-                t(lang, 'okx_x402_note')
-            ];
-
-            const message = lines.join('\n');
-            sendReply(msg, message, { parse_mode: "Markdown" });
-        } catch (error) {
-            console.error(`[Okx402] Failed to query x402 support: ${error.message}`);
-            const errorMessage = t(lang, 'okx_x402_error');
+            const errorMessage = t(lang, 'banmaoprice_error');
             sendReply(msg, errorMessage, { parse_mode: "Markdown" });
         }
     });
@@ -3435,10 +3291,7 @@ function startTelegramBot() {
             t(lang, 'help_command_register'),
             t(lang, 'help_command_mywallet'),
             t(lang, 'help_command_stats'),
-            t(lang, 'help_command_pricebanmao'),
-            t(lang, 'help_command_banmaochart'),
-            t(lang, 'help_command_banmaomarket'),
-            t(lang, 'help_command_banmaoliquidity'),
+            t(lang, 'help_command_banmaoprice'),
             t(lang, 'help_command_okxchains'),
             t(lang, 'help_command_okx402status'),
             t(lang, 'help_command_unregister'),
