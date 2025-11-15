@@ -99,6 +99,15 @@ let banmaoDecimalsCache = null;
 let banmaoDecimalsFetchedAt = 0;
 const tokenDecimalsCache = new Map();
 const okxTokenDirectoryCache = new Map();
+const CHECKIN_REWARD_MESSAGE = process.env.CHECKIN_REWARD_MESSAGE || 'Please contact the admin to receive your reward!';
+const CHECKIN_CHALLENGE_TIMEOUT = (() => {
+    const raw = Number(process.env.CHECKIN_CHALLENGE_TIMEOUT);
+    if (Number.isFinite(raw) && raw > 0) {
+        return raw;
+    }
+    return 2 * 60 * 1000;
+})();
+const checkinChallenges = new Map();
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,6 +133,101 @@ function normalizeOkxConfigAddress(value) {
     }
 
     return null;
+}
+
+function getUtcDateKey(date = new Date()) {
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function buildCheckinChallengeKey(chatId, userId) {
+    return `${chatId}:${userId}`;
+}
+
+function clearCheckinChallenge(key) {
+    const existing = checkinChallenges.get(key);
+    if (existing && existing.timeoutHandle) {
+        clearTimeout(existing.timeoutHandle);
+    }
+    checkinChallenges.delete(key);
+}
+
+function storeCheckinChallenge(key, payload) {
+    clearCheckinChallenge(key);
+
+    const timeoutHandle = setTimeout(() => {
+        clearCheckinChallenge(key);
+    }, CHECKIN_CHALLENGE_TIMEOUT);
+
+    if (typeof timeoutHandle.unref === 'function') {
+        timeoutHandle.unref();
+    }
+
+    checkinChallenges.set(key, { ...payload, timeoutHandle });
+}
+
+function randomInt(min, max) {
+    const lower = Math.ceil(min);
+    const upper = Math.floor(max);
+    return Math.floor(Math.random() * (upper - lower + 1)) + lower;
+}
+
+function createMathChallenge() {
+    const operations = ['+', '-', 'x', ':'];
+    const op = operations[randomInt(0, operations.length - 1)];
+    let a = 0;
+    let b = 0;
+    let answer = 0;
+
+    switch (op) {
+        case '+':
+            a = randomInt(5, 40);
+            b = randomInt(1, 30);
+            answer = a + b;
+            break;
+        case '-':
+            a = randomInt(10, 50);
+            b = randomInt(1, a);
+            answer = a - b;
+            break;
+        case 'x':
+            a = randomInt(2, 12);
+            b = randomInt(2, 12);
+            answer = a * b;
+            break;
+        case ':':
+        default: {
+            b = randomInt(2, 10);
+            answer = randomInt(2, 12);
+            a = b * answer;
+            break;
+        }
+    }
+
+    return {
+        question: `${a} ${op} ${b}`,
+        answer
+    };
+}
+
+function parseNumericAnswer(raw) {
+    if (typeof raw !== 'string') {
+        return null;
+    }
+
+    const normalized = raw.trim().replace(',', '.');
+    if (!normalized) {
+        return null;
+    }
+
+    const value = Number(normalized);
+    if (!Number.isFinite(value)) {
+        return null;
+    }
+
+    return value;
 }
 
 function markRoomFinalOutcome(roomId, outcome) {
@@ -3094,6 +3198,69 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: "Markdown" });
     });
 
+    bot.onText(/\/checkin(?:@[\w_]+)?$/, async (msg) => {
+        const chatType = msg.chat?.type;
+        const lang = await getLang(msg);
+
+        if (chatType !== 'group' && chatType !== 'supergroup') {
+            sendReply(msg, t(lang, 'checkin_group_only'));
+            return;
+        }
+
+        if (!msg.from) {
+            return;
+        }
+
+        const chatId = msg.chat.id.toString();
+        const userId = msg.from.id.toString();
+        const todayKey = getUtcDateKey(new Date());
+
+        try {
+            const state = await db.getDailyCheckinState(chatId, userId);
+            if (state && state.lastCheckinDate === todayKey) {
+                sendReply(msg, t(lang, 'checkin_already_completed'));
+                return;
+            }
+
+            const key = buildCheckinChallengeKey(chatId, userId);
+            const existing = checkinChallenges.get(key);
+            if (existing && existing.expiresAt > Date.now()) {
+                sendReply(msg, t(lang, 'checkin_challenge_pending', { question: existing.question }));
+                return;
+            }
+
+            if (existing) {
+                clearCheckinChallenge(key);
+            }
+
+            const challenge = createMathChallenge();
+            const challengeMinutes = Math.max(1, Math.ceil(CHECKIN_CHALLENGE_TIMEOUT / 60000));
+            const prompt = [
+                t(lang, 'checkin_challenge_prompt', { question: challenge.question }),
+                t(lang, 'checkin_challenge_instructions', { minutes: challengeMinutes })
+            ].join('\n');
+
+            const sent = await sendReply(msg, prompt, {
+                reply_markup: {
+                    force_reply: true,
+                    selective: true
+                }
+            });
+
+            storeCheckinChallenge(key, {
+                chatId,
+                userId,
+                question: challenge.question,
+                answer: challenge.answer,
+                messageId: sent.message_id,
+                expiresAt: Date.now() + CHECKIN_CHALLENGE_TIMEOUT
+            });
+        } catch (error) {
+            console.error(`[CheckIn] Không thể tạo thử thách cho ${chatId}:${userId}: ${error.message}`);
+            sendReply(msg, t(lang, 'checkin_error'));
+        }
+    });
+
     bot.onText(/\/okxchains/, async (msg) => {
         const lang = await getLang(msg);
         try {
@@ -3506,6 +3673,7 @@ function startTelegramBot() {
             t(lang, 'help_command_register'),
             t(lang, 'help_command_mywallet'),
             t(lang, 'help_command_stats'),
+            t(lang, 'help_command_checkin'),
             t(lang, 'help_command_banmaoprice'),
             t(lang, 'help_command_okxchains'),
             t(lang, 'help_command_okx402status'),
@@ -3533,6 +3701,82 @@ function startTelegramBot() {
 
         const helpMessage = sections.join('\n');
         sendReply(msg, helpMessage, { parse_mode: "Markdown" });
+    });
+
+    bot.on('message', async (msg) => {
+        if (!msg || !msg.text) {
+            return;
+        }
+
+        if (!msg.from || msg.from.is_bot) {
+            return;
+        }
+
+        if (!msg.reply_to_message) {
+            return;
+        }
+
+        const chatId = msg.chat?.id;
+        const userId = msg.from.id;
+        if (!chatId || !userId) {
+            return;
+        }
+
+        const key = buildCheckinChallengeKey(chatId.toString(), userId.toString());
+        const challenge = checkinChallenges.get(key);
+        if (!challenge) {
+            return;
+        }
+
+        if (msg.reply_to_message.message_id !== challenge.messageId) {
+            return;
+        }
+
+        const lang = await getLang(msg);
+
+        if (challenge.expiresAt <= Date.now()) {
+            clearCheckinChallenge(key);
+            sendReply(msg, t(lang, 'checkin_challenge_timeout'));
+            return;
+        }
+
+        const answer = parseNumericAnswer(msg.text);
+        if (answer === null) {
+            sendReply(msg, t(lang, 'checkin_answer_invalid'));
+            return;
+        }
+
+        if (Math.abs(answer - challenge.answer) > 1e-9) {
+            sendReply(msg, t(lang, 'checkin_answer_incorrect'));
+            return;
+        }
+
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const todayKey = getUtcDateKey(new Date());
+
+        try {
+            const result = await db.recordDailyCheckin(chatId.toString(), userId.toString(), todayKey, nowSeconds);
+            const responses = [];
+
+            if (result.alreadyCheckedIn) {
+                responses.push(t(lang, 'checkin_already_completed'));
+            } else {
+                responses.push(t(lang, 'checkin_success', { streak: result.streak, total: result.totalCheckins }));
+                if (result.streakReset) {
+                    responses.push(t(lang, 'checkin_success_streak_reset'));
+                }
+                if (result.rewardUnlocked) {
+                    responses.push(t(lang, 'checkin_reward_unlocked', { streak: result.streak, reward: CHECKIN_REWARD_MESSAGE }));
+                }
+            }
+
+            sendReply(msg, responses.join('\n\n'));
+        } catch (error) {
+            console.error(`[CheckIn] Không thể ghi điểm danh cho ${chatId}:${userId}: ${error.message}`);
+            sendReply(msg, t(lang, 'checkin_error'));
+        } finally {
+            clearCheckinChallenge(key);
+        }
     });
 
     // Xử lý tất cả CALLBACK QUERY (Nút bấm) - Cần async

@@ -92,6 +92,29 @@ async function init() {
             PRIMARY KEY (groupChatId, userId)
         );
     `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS daily_checkins (
+            groupChatId TEXT NOT NULL,
+            userId TEXT NOT NULL,
+            streak INTEGER NOT NULL DEFAULT 0,
+            lastCheckinDate TEXT,
+            lastCheckinAt INTEGER,
+            totalCheckins INTEGER NOT NULL DEFAULT 0,
+            updatedAt INTEGER,
+            PRIMARY KEY (groupChatId, userId)
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS daily_checkin_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            groupChatId TEXT NOT NULL,
+            userId TEXT NOT NULL,
+            checkinDate TEXT NOT NULL,
+            checkinAt INTEGER NOT NULL,
+            streak INTEGER NOT NULL
+        );
+    `);
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_daily_checkin_logs_group_date ON daily_checkin_logs (groupChatId, checkinDate);');
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -362,6 +385,102 @@ async function updateGroupSubscriptionTopic(chatId, messageThreadId) {
     );
 }
 
+function toDayIndex(dateKey) {
+    if (!dateKey || typeof dateKey !== 'string') {
+        return null;
+    }
+
+    const parts = dateKey.split('-').map(part => Number(part));
+    if (parts.length !== 3 || parts.some(Number.isNaN)) {
+        return null;
+    }
+
+    const [year, month, day] = parts;
+    return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+}
+
+async function getDailyCheckinState(groupChatId, userId) {
+    const row = await dbGet(
+        'SELECT streak, lastCheckinDate, lastCheckinAt, totalCheckins FROM daily_checkins WHERE groupChatId = ? AND userId = ?',
+        [groupChatId, userId]
+    );
+
+    if (!row) {
+        return null;
+    }
+
+    return {
+        streak: Number(row.streak) || 0,
+        lastCheckinDate: row.lastCheckinDate || null,
+        lastCheckinAt: row.lastCheckinAt ? Number(row.lastCheckinAt) : null,
+        totalCheckins: Number(row.totalCheckins) || 0
+    };
+}
+
+async function recordDailyCheckin(groupChatId, userId, currentDateKey, currentTimestampSec) {
+    const existing = await getDailyCheckinState(groupChatId, userId);
+
+    if (existing && existing.lastCheckinDate === currentDateKey) {
+        return {
+            alreadyCheckedIn: true,
+            streak: existing.streak,
+            totalCheckins: existing.totalCheckins,
+            rewardUnlocked: false,
+            streakReset: false
+        };
+    }
+
+    const nowSeconds = Number(currentTimestampSec) || Math.floor(Date.now() / 1000);
+    const todayIndex = toDayIndex(currentDateKey);
+    let newStreak = 1;
+    let streakReset = false;
+
+    if (existing && existing.lastCheckinDate) {
+        const previousIndex = toDayIndex(existing.lastCheckinDate);
+        if (previousIndex !== null && todayIndex !== null) {
+            const diff = todayIndex - previousIndex;
+            if (diff === 1) {
+                newStreak = existing.streak + 1;
+            } else {
+                newStreak = 1;
+                streakReset = true;
+            }
+        } else {
+            newStreak = 1;
+            streakReset = true;
+        }
+    }
+
+    const totalCheckins = (existing?.totalCheckins || 0) + 1;
+    const rewardUnlocked = newStreak > 0 && newStreak % 7 === 0;
+    const updatedAt = nowSeconds;
+
+    if (existing) {
+        await dbRun(
+            'UPDATE daily_checkins SET streak = ?, lastCheckinDate = ?, lastCheckinAt = ?, totalCheckins = ?, updatedAt = ? WHERE groupChatId = ? AND userId = ?',
+            [newStreak, currentDateKey, nowSeconds, totalCheckins, updatedAt, groupChatId, userId]
+        );
+    } else {
+        await dbRun(
+            'INSERT INTO daily_checkins (groupChatId, userId, streak, lastCheckinDate, lastCheckinAt, totalCheckins, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [groupChatId, userId, newStreak, currentDateKey, nowSeconds, totalCheckins, updatedAt]
+        );
+    }
+
+    await dbRun(
+        'INSERT INTO daily_checkin_logs (groupChatId, userId, checkinDate, checkinAt, streak) VALUES (?, ?, ?, ?, ?)',
+        [groupChatId, userId, currentDateKey, nowSeconds, newStreak]
+    );
+
+    return {
+        alreadyCheckedIn: false,
+        streak: newStreak,
+        totalCheckins,
+        rewardUnlocked,
+        streakReset
+    };
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -387,5 +506,7 @@ module.exports = {
     setGroupMemberLanguage,
     removeGroupMemberLanguage,
     updateGroupSubscriptionLanguage,
-    updateGroupSubscriptionTopic
+    updateGroupSubscriptionTopic,
+    getDailyCheckinState,
+    recordDailyCheckin
 };
