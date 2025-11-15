@@ -1,4 +1,5 @@
 const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const { normalizeLanguageCode } = require('./i18n.js');
 
 const db = new sqlite3.Database('banmao.db', (err) => {
@@ -9,6 +10,44 @@ const db = new sqlite3.Database('banmao.db', (err) => {
     console.log("Cơ sở dữ liệu SQLite đã kết nối.");
 });
 const ethers = require('ethers');
+
+const SUPABASE_CONNECTION_STRING =
+    process.env.SUPABASE_CONNECTION_STRING ||
+    process.env.SUPABASE_DB_URL ||
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    null;
+const SUPABASE_POOL_MAX = Number(process.env.SUPABASE_POOL_MAX || 5);
+
+let supabasePool = null;
+
+if (SUPABASE_CONNECTION_STRING) {
+    try {
+        supabasePool = new Pool({
+            connectionString: SUPABASE_CONNECTION_STRING,
+            max: Number.isFinite(SUPABASE_POOL_MAX) ? SUPABASE_POOL_MAX : 5,
+            idleTimeoutMillis: 30_000,
+            ssl: { rejectUnauthorized: false }
+        });
+
+        supabasePool.on('error', (err) => {
+            console.error('[Supabase] Lỗi kết nối không mong muốn:', err);
+        });
+
+        supabasePool
+            .query('select 1')
+            .then(() => {
+                console.log('[Supabase] Đã kết nối tới PostgreSQL.');
+            })
+            .catch((err) => {
+                console.error('[Supabase] Không thể kiểm tra kết nối:', err.message);
+            });
+    } catch (error) {
+        console.error('[Supabase] Lỗi khởi tạo Pool:', error.message);
+    }
+} else {
+    console.log('[Supabase] Không tìm thấy chuỗi kết nối, bỏ qua đồng bộ Supabase.');
+}
 
 // --- Hàm Helper (Promisify) ---
 const dbRun = (sql, params = []) => new Promise((resolve, reject) => {
@@ -399,7 +438,7 @@ function toDayIndex(dateKey) {
     return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
 }
 
-async function getDailyCheckinState(groupChatId, userId) {
+async function fetchLocalDailyCheckinState(groupChatId, userId) {
     const row = await dbGet(
         'SELECT streak, lastCheckinDate, lastCheckinAt, totalCheckins FROM daily_checkins WHERE groupChatId = ? AND userId = ?',
         [groupChatId, userId]
@@ -415,6 +454,139 @@ async function getDailyCheckinState(groupChatId, userId) {
         lastCheckinAt: row.lastCheckinAt ? Number(row.lastCheckinAt) : null,
         totalCheckins: Number(row.totalCheckins) || 0
     };
+}
+
+async function persistLocalDailyCheckinSnapshot(groupChatId, userId, state, updatedAt) {
+    if (!state) {
+        return;
+    }
+
+    const normalizedUpdatedAt = Number(updatedAt) || Math.floor(Date.now() / 1000);
+    const existing = await dbGet(
+        'SELECT 1 FROM daily_checkins WHERE groupChatId = ? AND userId = ?',
+        [groupChatId, userId]
+    );
+
+    const params = [
+        state.streak || 0,
+        state.lastCheckinDate || null,
+        state.lastCheckinAt ? Number(state.lastCheckinAt) : null,
+        state.totalCheckins || 0,
+        normalizedUpdatedAt,
+        groupChatId,
+        userId
+    ];
+
+    if (existing) {
+        await dbRun(
+            'UPDATE daily_checkins SET streak = ?, lastCheckinDate = ?, lastCheckinAt = ?, totalCheckins = ?, updatedAt = ? WHERE groupChatId = ? AND userId = ?',
+            params
+        );
+    } else {
+        await dbRun(
+            'INSERT INTO daily_checkins (groupChatId, userId, streak, lastCheckinDate, lastCheckinAt, totalCheckins, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [groupChatId, userId, params[0], params[1], params[2], params[3], params[4]]
+        );
+    }
+}
+
+async function insertLocalDailyCheckinLog(groupChatId, userId, checkinDate, checkinAt, streak) {
+    await dbRun(
+        'INSERT INTO daily_checkin_logs (groupChatId, userId, checkinDate, checkinAt, streak) VALUES (?, ?, ?, ?, ?)',
+        [groupChatId, userId, checkinDate, checkinAt, streak]
+    );
+}
+
+async function fetchSupabaseDailyCheckinState(groupChatId, userId) {
+    if (!supabasePool) {
+        return null;
+    }
+
+    try {
+        const result = await supabasePool.query(
+            'select streak, last_checkin_date, last_checkin_at, total_checkins, updated_at from public.daily_checkins where group_chat_id = $1 and user_id = $2 limit 1',
+            [groupChatId, userId]
+        );
+
+        if (!result?.rows?.length) {
+            return null;
+        }
+
+        const row = result.rows[0];
+        return {
+            streak: Number(row.streak) || 0,
+            lastCheckinDate: row.last_checkin_date || null,
+            lastCheckinAt: row.last_checkin_at ? Number(row.last_checkin_at) : null,
+            totalCheckins: Number(row.total_checkins) || 0,
+            updatedAt: row.updated_at ? Number(row.updated_at) : null
+        };
+    } catch (error) {
+        console.error('[Supabase] Không thể đọc daily_checkins:', error.message);
+        return null;
+    }
+}
+
+async function persistSupabaseDailyCheckin(groupChatId, userId, state, updatedAt) {
+    if (!supabasePool || !state) {
+        return;
+    }
+
+    const normalizedUpdatedAt = Number(updatedAt) || Math.floor(Date.now() / 1000);
+
+    try {
+        await supabasePool.query(
+            `insert into public.daily_checkins (group_chat_id, user_id, streak, last_checkin_date, last_checkin_at, total_checkins, updated_at)
+             values ($1, $2, $3, $4, $5, $6, $7)
+             on conflict (group_chat_id, user_id) do update
+             set streak = excluded.streak,
+                 last_checkin_date = excluded.last_checkin_date,
+                 last_checkin_at = excluded.last_checkin_at,
+                 total_checkins = excluded.total_checkins,
+                 updated_at = excluded.updated_at`,
+            [
+                groupChatId,
+                userId,
+                state.streak || 0,
+                state.lastCheckinDate || null,
+                state.lastCheckinAt ? Number(state.lastCheckinAt) : null,
+                state.totalCheckins || 0,
+                normalizedUpdatedAt
+            ]
+        );
+    } catch (error) {
+        console.error('[Supabase] Không thể ghi daily_checkins:', error.message);
+    }
+}
+
+async function insertSupabaseDailyCheckinLog(groupChatId, userId, checkinDate, checkinAt, streak) {
+    if (!supabasePool) {
+        return;
+    }
+
+    try {
+        await supabasePool.query(
+            'insert into public.daily_checkin_logs (group_chat_id, user_id, checkin_date, checkin_at, streak) values ($1, $2, $3, $4, $5)',
+            [groupChatId, userId, checkinDate, Number(checkinAt) || 0, streak || 0]
+        );
+    } catch (error) {
+        console.error('[Supabase] Không thể ghi daily_checkin_logs:', error.message);
+    }
+}
+
+async function getDailyCheckinState(groupChatId, userId) {
+    const supabaseState = await fetchSupabaseDailyCheckinState(groupChatId, userId);
+
+    if (supabaseState) {
+        const { updatedAt, ...rest } = supabaseState;
+        try {
+            await persistLocalDailyCheckinSnapshot(groupChatId, userId, rest, updatedAt);
+        } catch (error) {
+            console.error('[DB] Không thể đồng bộ daily_checkins từ Supabase:', error.message);
+        }
+        return rest;
+    }
+
+    return await fetchLocalDailyCheckinState(groupChatId, userId);
 }
 
 async function recordDailyCheckin(groupChatId, userId, currentDateKey, currentTimestampSec) {
@@ -454,23 +626,22 @@ async function recordDailyCheckin(groupChatId, userId, currentDateKey, currentTi
     const totalCheckins = (existing?.totalCheckins || 0) + 1;
     const rewardUnlocked = newStreak > 0 && newStreak % 7 === 0;
     const updatedAt = nowSeconds;
+    const newState = {
+        streak: newStreak,
+        lastCheckinDate: currentDateKey,
+        lastCheckinAt: nowSeconds,
+        totalCheckins
+    };
 
-    if (existing) {
-        await dbRun(
-            'UPDATE daily_checkins SET streak = ?, lastCheckinDate = ?, lastCheckinAt = ?, totalCheckins = ?, updatedAt = ? WHERE groupChatId = ? AND userId = ?',
-            [newStreak, currentDateKey, nowSeconds, totalCheckins, updatedAt, groupChatId, userId]
-        );
-    } else {
-        await dbRun(
-            'INSERT INTO daily_checkins (groupChatId, userId, streak, lastCheckinDate, lastCheckinAt, totalCheckins, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [groupChatId, userId, newStreak, currentDateKey, nowSeconds, totalCheckins, updatedAt]
-        );
+    try {
+        await persistLocalDailyCheckinSnapshot(groupChatId, userId, newState, updatedAt);
+        await insertLocalDailyCheckinLog(groupChatId, userId, currentDateKey, nowSeconds, newStreak);
+    } catch (error) {
+        console.error('[DB] Không thể lưu daily_checkins nội bộ:', error.message);
     }
 
-    await dbRun(
-        'INSERT INTO daily_checkin_logs (groupChatId, userId, checkinDate, checkinAt, streak) VALUES (?, ?, ?, ?, ?)',
-        [groupChatId, userId, currentDateKey, nowSeconds, newStreak]
-    );
+    await persistSupabaseDailyCheckin(groupChatId, userId, newState, updatedAt);
+    await insertSupabaseDailyCheckinLog(groupChatId, userId, currentDateKey, nowSeconds, newStreak);
 
     return {
         alreadyCheckedIn: false,
