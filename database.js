@@ -9,6 +9,45 @@ try {
     supabaseCreateClient = null;
 }
 
+function parsePostgresConfigFromUrl(connectionString) {
+    if (!connectionString || typeof connectionString !== 'string') {
+        return null;
+    }
+
+    try {
+        const parsed = new URL(connectionString);
+        if (!/^postgres(?:ql)?:$/i.test(parsed.protocol)) {
+            return null;
+        }
+
+        const config = {
+            host: parsed.hostname,
+            port: parsed.port ? Number(parsed.port) : 5432,
+            user: parsed.username ? decodeURIComponent(parsed.username) : 'postgres',
+            password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+            database: undefined,
+            ssl: { require: true, rejectUnauthorized: false }
+        };
+
+        const pathname = parsed.pathname ? parsed.pathname.replace(/^\//, '') : '';
+        if (pathname) {
+            config.database = decodeURIComponent(pathname);
+        } else {
+            config.database = config.user;
+        }
+
+        const sslMode = parsed.searchParams.get('sslmode');
+        if (typeof sslMode === 'string' && sslMode.toLowerCase() === 'disable') {
+            config.ssl = false;
+        }
+
+        return config;
+    } catch (error) {
+        console.error('[Supabase] Không thể phân tích cấu hình PostgreSQL:', error.message);
+        return null;
+    }
+}
+
 function resolveSupabaseConnectionString() {
     const candidates = [
         'SUPABASE_CONNECTION_STRING',
@@ -341,11 +380,16 @@ let supabaseSchemaEnsured = false;
 if (SUPABASE_CONNECTION_STRING) {
     if (Pool) {
         try {
+            const poolConfig = parsePostgresConfigFromUrl(SUPABASE_CONNECTION_STRING);
+
+            if (!poolConfig) {
+                throw new Error('Chuỗi kết nối Supabase không hợp lệ');
+            }
+
             supabasePool = new Pool({
-                connectionString: SUPABASE_CONNECTION_STRING,
+                ...poolConfig,
                 max: Number.isFinite(SUPABASE_POOL_MAX) ? SUPABASE_POOL_MAX : 5,
-                idleTimeoutMillis: 30_000,
-                ssl: { require: true, rejectUnauthorized: false }
+                idleTimeoutMillis: 30_000
             });
 
             supabasePool.on('error', (err) => {
