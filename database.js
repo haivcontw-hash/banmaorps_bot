@@ -1,5 +1,434 @@
 const sqlite3 = require('sqlite3').verbose();
+const https = require('https');
 const { normalizeLanguageCode } = require('./i18n.js');
+
+let supabaseCreateClient = null;
+try {
+    ({ createClient: supabaseCreateClient } = require('@supabase/supabase-js'));
+} catch (error) {
+    supabaseCreateClient = null;
+}
+
+function parsePostgresConfigFromUrl(connectionString) {
+    if (!connectionString || typeof connectionString !== 'string') {
+        return null;
+    }
+
+    const sanitised = sanitisePostgresConnectionString(connectionString);
+    if (!sanitised) {
+        return null;
+    }
+
+    try {
+        const parsed = new URL(sanitised);
+        if (!/^postgres(?:ql)?:$/i.test(parsed.protocol)) {
+            return null;
+        }
+
+        const sslMode = parsed.searchParams.get('sslmode');
+        const ssl = typeof sslMode === 'string' && sslMode.toLowerCase() === 'disable'
+            ? false
+            : { rejectUnauthorized: false, require: true };
+
+        const host = parsed.hostname || null;
+        const port = parsed.port ? Number(parsed.port) : 5432;
+        const user = parsed.username ? decodeURIComponent(parsed.username) : null;
+        const password = parsed.password ? decodeURIComponent(parsed.password) : null;
+        let database = parsed.pathname ? decodeURIComponent(parsed.pathname.replace(/^\//, '')) || null : null;
+        if (!database && user) {
+            database = user;
+        }
+
+        return {
+            connectionString: sanitised.replace(/^postgresql:/i, 'postgres:'),
+            ssl,
+            host,
+            port,
+            user,
+            password,
+            database
+        };
+    } catch (error) {
+        console.error('[Supabase] Không thể phân tích cấu hình PostgreSQL:', error.message);
+        return null;
+    }
+}
+
+function buildConnectionStringFromParts() {
+    const hostCandidates = ['SUPABASE_HOST', 'POSTGRES_HOST', 'PGHOST'];
+    const userCandidates = ['SUPABASE_USER', 'POSTGRES_USER', 'PGUSER'];
+    const passwordCandidates = ['SUPABASE_PASSWORD', 'POSTGRES_PASSWORD', 'PGPASSWORD'];
+    const databaseCandidates = ['SUPABASE_DATABASE', 'POSTGRES_DATABASE', 'PGDATABASE'];
+    const portCandidates = ['SUPABASE_PORT', 'POSTGRES_PORT', 'PGPORT'];
+
+    const host = hostCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string' && value.trim());
+    const user = userCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string' && value.trim());
+
+    if (!host || !user) {
+        return null;
+    }
+
+    const password = passwordCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string');
+    const database = databaseCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string' && value.trim());
+    const portRaw = portCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string' && value.trim());
+
+    const port = portRaw ? Number(portRaw) : 5432;
+    const encodedUser = encodeURIComponent(user.trim());
+    const encodedPassword = typeof password === 'string'
+        ? `:${encodeURIComponent(password)}`
+        : '';
+    const encodedHost = host.trim();
+    const encodedPort = Number.isFinite(port) && port > 0 ? `:${port}` : '';
+    const encodedDatabase = database ? `/${encodeURIComponent(database.trim())}` : '';
+
+    const url = `postgresql://${encodedUser}${encodedPassword}@${encodedHost}${encodedPort}${encodedDatabase}`;
+
+    const sslMode = process.env.SUPABASE_SSLMODE || process.env.POSTGRES_SSLMODE || process.env.PGSSLMODE;
+    const hasSupabaseHost = /\.supabase\.co$/i.test(encodedHost);
+
+    if (sslMode) {
+        return `${url}?sslmode=${encodeURIComponent(sslMode)}`;
+    }
+
+    if (hasSupabaseHost) {
+        return `${url}?sslmode=require`;
+    }
+
+    return url;
+}
+
+function resolveSupabaseConnectionString() {
+    const candidates = [
+        'SUPABASE_CONNECTION_STRING',
+        'SUPABASE_CONNECTION_URI',
+        'SUPABASE_DATABASE_URL',
+        'SUPABASE_DB_URL',
+        'SUPABASE_URL',
+        'DATABASE_URL',
+        'POSTGRES_URL'
+    ];
+
+    for (const key of candidates) {
+        const raw = process.env[key];
+        if (typeof raw !== 'string') {
+            continue;
+        }
+
+        const trimmed = raw.trim();
+        if (!trimmed) {
+            continue;
+        }
+
+        const sanitised = sanitisePostgresConnectionString(trimmed);
+        if (sanitised) {
+            return sanitised;
+        }
+    }
+
+    const built = buildConnectionStringFromParts();
+    if (built) {
+        const sanitised = sanitisePostgresConnectionString(built);
+        if (sanitised) {
+            return sanitised;
+        }
+    }
+
+    return null;
+}
+
+function sanitisePostgresConnectionString(raw) {
+    try {
+        const parsed = new URL(raw);
+
+        if (!/^postgres(?:ql)?:$/i.test(parsed.protocol)) {
+            return null;
+        }
+
+        if (parsed.username) {
+            parsed.username = decodeURIComponent(parsed.username);
+        }
+
+        if (parsed.password) {
+            parsed.password = decodeURIComponent(parsed.password);
+        }
+
+        const host = parsed.hostname || '';
+        const isSupabaseHost = /\.supabase\.co$/i.test(host);
+
+        if (isSupabaseHost && !parsed.searchParams.has('sslmode')) {
+            parsed.searchParams.set('sslmode', 'require');
+        }
+
+        // URL sẽ tự động encode lại khi toString()
+        parsed.protocol = 'postgres:';
+        return parsed.toString();
+    } catch (error) {
+        const match = raw.match(/^(postgres(?:ql)?:\/\/[^:]+:)([^@]+)@(.+)$/i);
+        if (match) {
+            return `${match[1]}${encodeURIComponent(match[2])}@${match[3]}`;
+        }
+
+        console.error('[Supabase] Chuỗi kết nối không hợp lệ:', error.message);
+        return null;
+    }
+}
+
+function resolveSupabaseServiceRoleKey() {
+    const candidates = [
+        'SUPABASE_SERVICE_ROLE_KEY',
+        'SUPABASE_SERVICE_KEY',
+        'SUPABASE_SECRET_KEY',
+        'SUPABASE_API_KEY',
+        'SUPABASE_KEY',
+        'SUPABASE_ANON_KEY',
+        'SUPABASE_PUBLIC_ANON_KEY',
+        'SUPABASE_PRIVATE_KEY'
+    ];
+
+    for (const key of candidates) {
+        const value = process.env[key];
+        if (typeof value !== 'string') {
+            continue;
+        }
+
+        const trimmed = value.trim();
+        if (trimmed) {
+            return trimmed;
+        }
+    }
+
+    return null;
+}
+
+function normaliseSupabaseRestUrl(raw) {
+    try {
+        const parsed = new URL(raw);
+        parsed.search = '';
+        parsed.hash = '';
+
+        const currentPath = parsed.pathname.replace(/\/+$/, '');
+        if (!currentPath || currentPath === '' || currentPath === '/') {
+            parsed.pathname = '/rest/v1';
+        } else if (!/\/rest\/v1$/i.test(currentPath)) {
+            parsed.pathname = `${currentPath.replace(/\/+$/, '')}/rest/v1`;
+        }
+
+        return parsed.toString().replace(/\/+$/, '');
+    } catch (error) {
+        return null;
+    }
+}
+
+function resolveSupabaseRestUrl(connectionString) {
+    const candidates = [
+        'SUPABASE_REST_URL',
+        'SUPABASE_REST_ENDPOINT',
+        'SUPABASE_API_URL',
+        'SUPABASE_URL'
+    ];
+
+    for (const key of candidates) {
+        const value = process.env[key];
+        if (typeof value !== 'string') {
+            continue;
+        }
+
+        const trimmed = value.trim();
+        if (!trimmed || !/^https?:\/\//i.test(trimmed)) {
+            continue;
+        }
+
+        const normalised = normaliseSupabaseRestUrl(trimmed);
+        if (normalised) {
+            return normalised;
+        }
+    }
+
+    if (!connectionString) {
+        return null;
+    }
+
+    try {
+        const parsed = new URL(connectionString);
+        const host = parsed.hostname;
+        if (!host) {
+            return null;
+        }
+
+        const apiHost = host.replace(/^db\./i, '');
+        return normaliseSupabaseRestUrl(`https://${apiHost}`);
+    } catch (error) {
+        return null;
+    }
+}
+
+function normaliseSupabaseProjectUrl(raw) {
+    try {
+        const parsed = new URL(raw);
+        parsed.search = '';
+        parsed.hash = '';
+
+        const cleanPath = parsed.pathname.replace(/\/rest\/v1\/?$/i, '/').replace(/\/+$/, '');
+        parsed.pathname = cleanPath ? `${cleanPath}/` : '/';
+
+        return parsed.toString().replace(/\/+$/, '');
+    } catch (error) {
+        return null;
+    }
+}
+
+function resolveSupabaseProjectUrl(connectionString) {
+    const candidates = [
+        'SUPABASE_PROJECT_URL',
+        'SUPABASE_URL',
+        'SUPABASE_API_URL'
+    ];
+
+    for (const key of candidates) {
+        const value = process.env[key];
+        if (typeof value !== 'string') {
+            continue;
+        }
+
+        const trimmed = value.trim();
+        if (!trimmed || !/^https?:\/\//i.test(trimmed)) {
+            continue;
+        }
+
+        const normalised = normaliseSupabaseProjectUrl(trimmed);
+        if (normalised) {
+            return normalised;
+        }
+    }
+
+    if (!connectionString) {
+        return null;
+    }
+
+    try {
+        const parsed = new URL(connectionString);
+        const host = parsed.hostname;
+        if (!host) {
+            return null;
+        }
+
+        const apiHost = host.replace(/^db\./i, '');
+        return normaliseSupabaseProjectUrl(`https://${apiHost}`);
+    } catch (error) {
+        return null;
+    }
+}
+
+function createSupabaseRestClient(baseUrl, apiKey) {
+    const base = new URL(baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
+
+    return {
+        async request(method, path, options = {}) {
+            const { query, body, headers: extraHeaders, prefer } = options;
+            const targetPath = path.startsWith('/') ? path.slice(1) : path;
+            const url = new URL(targetPath, base);
+
+            if (query) {
+                if (query instanceof URLSearchParams) {
+                    for (const [key, value] of query.entries()) {
+                        url.searchParams.append(key, value);
+                    }
+                } else if (typeof query === 'object') {
+                    for (const [key, value] of Object.entries(query)) {
+                        if (value === undefined || value === null) {
+                            continue;
+                        }
+
+                        if (Array.isArray(value)) {
+                            for (const entry of value) {
+                                url.searchParams.append(key, entry);
+                            }
+                        } else {
+                            url.searchParams.append(key, value);
+                        }
+                    }
+                }
+            }
+
+            const headers = {
+                apikey: apiKey,
+                Authorization: `Bearer ${apiKey}`,
+                Accept: 'application/json',
+                ...extraHeaders
+            };
+
+            let payload = null;
+            if (body !== undefined) {
+                payload = JSON.stringify(body);
+                headers['Content-Type'] = 'application/json';
+            }
+
+            if (prefer) {
+                headers['Prefer'] = prefer;
+            }
+
+            return await new Promise((resolve, reject) => {
+                const req = https.request(url, { method, headers }, (res) => {
+                    let data = '';
+                    res.on('data', (chunk) => {
+                        data += chunk;
+                    });
+                    res.on('end', () => {
+                        let parsed = null;
+                        if (data) {
+                            try {
+                                parsed = JSON.parse(data);
+                            } catch (error) {
+                                parsed = null;
+                            }
+                        }
+
+                        const statusCode = res.statusCode || 0;
+                        if (statusCode >= 200 && statusCode < 300) {
+                            resolve({ ok: true, status: statusCode, data: parsed, headers: res.headers });
+                        } else {
+                            const message = parsed?.message || parsed?.error || parsed?.hint || data || `HTTP ${statusCode}`;
+                            resolve({ ok: false, status: statusCode, error: message, data: parsed, headers: res.headers });
+                        }
+                    });
+                });
+
+                req.on('error', (error) => {
+                    reject(error);
+                });
+
+                if (payload) {
+                    req.write(payload);
+                }
+
+                req.end();
+            });
+        }
+    };
+}
+
+let Pool = null;
+let createPgLitePool = null;
+try {
+    ({ Pool } = require('pg'));
+} catch (error) {
+    try {
+        ({ createPgLitePool } = require('./supabase-pg-lite.js'));
+    } catch (fallbackError) {
+        createPgLitePool = null;
+    }
+    // Module pg có thể chưa được cài đặt – sẽ cảnh báo khi cố kết nối.
+}
 
 const db = new sqlite3.Database('banmao.db', (err) => {
     if (err) {
@@ -9,6 +438,178 @@ const db = new sqlite3.Database('banmao.db', (err) => {
     console.log("Cơ sở dữ liệu SQLite đã kết nối.");
 });
 const ethers = require('ethers');
+
+const SUPABASE_CONNECTION_STRING = resolveSupabaseConnectionString();
+const SUPABASE_POOL_MAX = Number(process.env.SUPABASE_POOL_MAX || 5);
+const SUPABASE_SERVICE_ROLE_KEY = resolveSupabaseServiceRoleKey();
+const SUPABASE_REST_URL = resolveSupabaseRestUrl(SUPABASE_CONNECTION_STRING);
+const SUPABASE_PROJECT_URL = resolveSupabaseProjectUrl(SUPABASE_CONNECTION_STRING);
+
+let supabasePool = null;
+let supabaseClient = null;
+let supabaseRestClient = null;
+let supabaseSchemaEnsured = false;
+
+if (SUPABASE_CONNECTION_STRING) {
+    if (Pool) {
+        try {
+            const poolConfig = parsePostgresConfigFromUrl(SUPABASE_CONNECTION_STRING);
+
+            if (!poolConfig) {
+                throw new Error('Chuỗi kết nối Supabase không hợp lệ');
+            }
+
+            const { host, port, user, password, database, connectionString } = poolConfig;
+
+            const baseConfig = {};
+
+            if (host) {
+                baseConfig.host = host;
+            }
+            if (port) {
+                baseConfig.port = port;
+            }
+            if (user) {
+                baseConfig.user = user;
+            }
+            if (password !== null && password !== undefined) {
+                baseConfig.password = password;
+            }
+            if (database) {
+                baseConfig.database = database;
+            }
+
+            supabasePool = new Pool({
+                ...baseConfig,
+                connectionString,
+                ssl: poolConfig.ssl,
+                max: Number.isFinite(SUPABASE_POOL_MAX) ? SUPABASE_POOL_MAX : 5,
+                idleTimeoutMillis: 30_000
+            });
+
+            supabasePool.on('error', (err) => {
+                console.error('[Supabase] Lỗi kết nối không mong muốn:', err);
+            });
+
+            supabasePool
+                .query('select 1')
+                .then(() => {
+                    const targetHost = host ? `${host}:${port || 5432}` : 'Supabase';
+                    console.log(`[Supabase] Đã kết nối tới PostgreSQL (${targetHost}).`);
+                })
+                .catch((err) => {
+                    console.error('[Supabase] Không thể kiểm tra kết nối:', err.message);
+                });
+        } catch (error) {
+            console.error('[Supabase] Lỗi khởi tạo Pool:', error.message);
+        }
+    } else if (createPgLitePool) {
+        try {
+            supabasePool = createPgLitePool(SUPABASE_CONNECTION_STRING);
+            supabasePool
+                .query('select 1')
+                .then(() => {
+                    const poolConfig = parsePostgresConfigFromUrl(SUPABASE_CONNECTION_STRING);
+                    const targetHost = poolConfig?.host ? `${poolConfig.host}:${poolConfig.port || 5432}` : 'Supabase';
+                    console.log(`[Supabase] Đã kết nối tới PostgreSQL (trình điều khiển tích hợp, ${targetHost}).`);
+                })
+                .catch((err) => {
+                    console.error('[Supabase] Không thể kiểm tra kết nối (trình điều khiển tích hợp):', err.message);
+                });
+        } catch (error) {
+            console.error('[Supabase] Lỗi khởi tạo trình điều khiển tích hợp:', error.message);
+        }
+    } else {
+        console.warn('[Supabase] Module "pg" chưa được cài đặt và không thể tải trình điều khiển tích hợp. Vui lòng chạy npm install trước khi đồng bộ.');
+    }
+} else {
+    console.log('[Supabase] Không tìm thấy chuỗi kết nối, bỏ qua đồng bộ Supabase. (Thiết lập SUPABASE_CONNECTION_STRING để kích hoạt)');
+}
+
+if (SUPABASE_PROJECT_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    if (supabaseCreateClient) {
+        try {
+            supabaseClient = supabaseCreateClient(SUPABASE_PROJECT_URL, SUPABASE_SERVICE_ROLE_KEY, {
+                auth: {
+                    persistSession: false,
+                    autoRefreshToken: false
+                }
+            });
+            console.log(`[Supabase] Supabase JS client đã khởi tạo tại ${SUPABASE_PROJECT_URL}.`);
+        } catch (error) {
+            console.error('[Supabase] Không thể khởi tạo Supabase JS client:', error.message);
+        }
+    } else {
+        console.warn('[Supabase] Thiếu module "@supabase/supabase-js". Vui lòng chạy npm install @supabase/supabase-js.');
+    }
+} else if (SUPABASE_PROJECT_URL && !SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn('[Supabase] Thiếu SUPABASE_SERVICE_ROLE_KEY nên không thể khởi tạo Supabase JS client.');
+} else if (!SUPABASE_PROJECT_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn('[Supabase] Thiếu SUPABASE_URL nên không thể khởi tạo Supabase JS client.');
+}
+
+if (SUPABASE_REST_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    try {
+        supabaseRestClient = createSupabaseRestClient(SUPABASE_REST_URL, SUPABASE_SERVICE_ROLE_KEY);
+        console.log(`[Supabase] REST API đã sẵn sàng tại ${SUPABASE_REST_URL}.`);
+    } catch (error) {
+        console.error('[Supabase] Không thể khởi tạo REST client:', error.message);
+    }
+} else if (SUPABASE_REST_URL && !SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn('[Supabase] Thiếu SUPABASE_SERVICE_ROLE_KEY nên không thể dùng REST API.');
+} else if (!SUPABASE_REST_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn('[Supabase] Đã có khóa dịch vụ nhưng thiếu URL REST. Vui lòng cấu hình SUPABASE_REST_URL hoặc SUPABASE_URL.');
+}
+
+async function ensureSupabaseDailyCheckinSchema() {
+    if (supabaseSchemaEnsured) {
+        return;
+    }
+
+    if (supabasePool) {
+        try {
+            await supabasePool.query(`
+                create table if not exists public.daily_checkins (
+                    group_chat_id text not null,
+                    user_id text not null,
+                    streak integer not null default 0,
+                    last_checkin_date text,
+                    last_checkin_at bigint,
+                    total_checkins integer not null default 0,
+                    updated_at bigint,
+                    constraint daily_checkins_pk primary key (group_chat_id, user_id)
+                )
+            `);
+
+            await supabasePool.query(`
+                create table if not exists public.daily_checkin_logs (
+                    id bigserial primary key,
+                    group_chat_id text not null,
+                    user_id text not null,
+                    checkin_date text not null,
+                    checkin_at bigint not null,
+                    streak integer not null
+                )
+            `);
+
+            await supabasePool.query(`
+                create index if not exists daily_checkin_logs_group_date_idx
+                    on public.daily_checkin_logs (group_chat_id, checkin_date)
+            `);
+
+            supabaseSchemaEnsured = true;
+            console.log('[Supabase] Đã đảm bảo cấu trúc bảng daily_checkins.');
+        } catch (error) {
+            console.error('[Supabase] Không thể khởi tạo bảng daily_checkins:', error.message);
+        }
+        return;
+    }
+
+    if (supabaseRestClient) {
+        supabaseSchemaEnsured = true;
+        console.warn('[Supabase] REST API đang được sử dụng. Vui lòng chạy sql/supabase_checkins.sql trong Supabase để tạo bảng nếu chưa có.');
+    }
+}
 
 // --- Hàm Helper (Promisify) ---
 const dbRun = (sql, params = []) => new Promise((resolve, reject) => {
@@ -92,6 +693,31 @@ async function init() {
             PRIMARY KEY (groupChatId, userId)
         );
     `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS daily_checkins (
+            groupChatId TEXT NOT NULL,
+            userId TEXT NOT NULL,
+            streak INTEGER NOT NULL DEFAULT 0,
+            lastCheckinDate TEXT,
+            lastCheckinAt INTEGER,
+            totalCheckins INTEGER NOT NULL DEFAULT 0,
+            updatedAt INTEGER,
+            PRIMARY KEY (groupChatId, userId)
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS daily_checkin_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            groupChatId TEXT NOT NULL,
+            userId TEXT NOT NULL,
+            checkinDate TEXT NOT NULL,
+            checkinAt INTEGER NOT NULL,
+            streak INTEGER NOT NULL
+        );
+    `);
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_daily_checkin_logs_group_date ON daily_checkin_logs (groupChatId, checkinDate);');
+
+    await ensureSupabaseDailyCheckinSchema();
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -362,6 +988,709 @@ async function updateGroupSubscriptionTopic(chatId, messageThreadId) {
     );
 }
 
+function toDayIndex(dateKey) {
+    if (!dateKey || typeof dateKey !== 'string') {
+        return null;
+    }
+
+    const parts = dateKey.split('-').map(part => Number(part));
+    if (parts.length !== 3 || parts.some(Number.isNaN)) {
+        return null;
+    }
+
+    const [year, month, day] = parts;
+    return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+}
+
+async function fetchLocalDailyCheckinState(groupChatId, userId) {
+    const row = await dbGet(
+        'SELECT streak, lastCheckinDate, lastCheckinAt, totalCheckins FROM daily_checkins WHERE groupChatId = ? AND userId = ?',
+        [groupChatId, userId]
+    );
+
+    if (!row) {
+        return null;
+    }
+
+    return {
+        streak: Number(row.streak) || 0,
+        lastCheckinDate: row.lastCheckinDate || null,
+        lastCheckinAt: row.lastCheckinAt ? Number(row.lastCheckinAt) : null,
+        totalCheckins: Number(row.totalCheckins) || 0
+    };
+}
+
+async function persistLocalDailyCheckinSnapshot(groupChatId, userId, state, updatedAt) {
+    if (!state) {
+        return;
+    }
+
+    const normalizedUpdatedAt = Number(updatedAt) || Math.floor(Date.now() / 1000);
+    const existing = await dbGet(
+        'SELECT 1 FROM daily_checkins WHERE groupChatId = ? AND userId = ?',
+        [groupChatId, userId]
+    );
+
+    const params = [
+        state.streak || 0,
+        state.lastCheckinDate || null,
+        state.lastCheckinAt ? Number(state.lastCheckinAt) : null,
+        state.totalCheckins || 0,
+        normalizedUpdatedAt,
+        groupChatId,
+        userId
+    ];
+
+    if (existing) {
+        await dbRun(
+            'UPDATE daily_checkins SET streak = ?, lastCheckinDate = ?, lastCheckinAt = ?, totalCheckins = ?, updatedAt = ? WHERE groupChatId = ? AND userId = ?',
+            params
+        );
+    } else {
+        await dbRun(
+            'INSERT INTO daily_checkins (groupChatId, userId, streak, lastCheckinDate, lastCheckinAt, totalCheckins, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [groupChatId, userId, params[0], params[1], params[2], params[3], params[4]]
+        );
+    }
+}
+
+async function insertLocalDailyCheckinLog(groupChatId, userId, checkinDate, checkinAt, streak) {
+    await dbRun(
+        'INSERT INTO daily_checkin_logs (groupChatId, userId, checkinDate, checkinAt, streak) VALUES (?, ?, ?, ?, ?)',
+        [groupChatId, userId, checkinDate, checkinAt, streak]
+    );
+}
+
+async function removeLocalDailyCheckinLog(groupChatId, userId, checkinDate) {
+    const result = await dbRun(
+        'DELETE FROM daily_checkin_logs WHERE groupChatId = ? AND userId = ? AND checkinDate = ?',
+        [groupChatId, userId, checkinDate]
+    );
+
+    return result?.changes || 0;
+}
+
+async function rebuildLocalDailyCheckinSnapshot(groupChatId, userId) {
+    const latest = await dbGet(
+        'SELECT checkinDate, checkinAt, streak FROM daily_checkin_logs WHERE groupChatId = ? AND userId = ? ORDER BY checkinAt DESC LIMIT 1',
+        [groupChatId, userId]
+    );
+
+    if (!latest) {
+        await dbRun('DELETE FROM daily_checkins WHERE groupChatId = ? AND userId = ?', [groupChatId, userId]);
+        return null;
+    }
+
+    const totalRow = await dbGet(
+        'SELECT COUNT(1) AS total FROM daily_checkin_logs WHERE groupChatId = ? AND userId = ?',
+        [groupChatId, userId]
+    );
+
+    const normalizedTotal = Number(totalRow?.total) || 0;
+    const normalizedState = {
+        streak: Number(latest.streak) || 0,
+        lastCheckinDate: latest.checkinDate || null,
+        lastCheckinAt: latest.checkinAt ? Number(latest.checkinAt) : null,
+        totalCheckins: normalizedTotal
+    };
+
+    await persistLocalDailyCheckinSnapshot(groupChatId, userId, normalizedState, Math.floor(Date.now() / 1000));
+    return normalizedState;
+}
+
+async function fetchSupabaseDailyCheckinState(groupChatId, userId) {
+    if (supabaseClient) {
+        try {
+            const { data, error } = await supabaseClient
+                .from('daily_checkins')
+                .select('streak,last_checkin_date,last_checkin_at,total_checkins,updated_at')
+                .eq('group_chat_id', groupChatId)
+                .eq('user_id', userId)
+                .maybeSingle();
+
+            if (error) {
+                console.error('[Supabase] Không thể đọc daily_checkins (JS client):', error.message);
+            } else if (data) {
+                return {
+                    streak: Number(data.streak) || 0,
+                    lastCheckinDate: data.last_checkin_date || null,
+                    lastCheckinAt: data.last_checkin_at ? Number(data.last_checkin_at) : null,
+                    totalCheckins: Number(data.total_checkins) || 0,
+                    updatedAt: data.updated_at ? Number(data.updated_at) : null
+                };
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS daily_checkins:', error.message);
+        }
+    }
+
+    if (supabasePool) {
+        try {
+            const result = await supabasePool.query(
+                'select streak, last_checkin_date, last_checkin_at, total_checkins, updated_at from public.daily_checkins where group_chat_id = $1 and user_id = $2 limit 1',
+                [groupChatId, userId]
+            );
+
+            if (result?.rows?.length) {
+                const row = result.rows[0];
+                return {
+                    streak: Number(row.streak) || 0,
+                    lastCheckinDate: row.last_checkin_date || null,
+                    lastCheckinAt: row.last_checkin_at ? Number(row.last_checkin_at) : null,
+                    totalCheckins: Number(row.total_checkins) || 0,
+                    updatedAt: row.updated_at ? Number(row.updated_at) : null
+                };
+            }
+        } catch (error) {
+            console.error('[Supabase] Không thể đọc daily_checkins:', error.message);
+            return null;
+        }
+    }
+
+    if (supabaseRestClient) {
+        try {
+            const query = new URLSearchParams();
+            query.set('select', 'streak,last_checkin_date,last_checkin_at,total_checkins,updated_at');
+            query.set('group_chat_id', `eq.${groupChatId}`);
+            query.set('user_id', `eq.${userId}`);
+            query.set('limit', '1');
+
+            const response = await supabaseRestClient.request('GET', 'daily_checkins', { query });
+            if (!response.ok) {
+                console.error('[Supabase] Không thể đọc daily_checkins (REST):', response.error);
+                return null;
+            }
+
+            const rows = Array.isArray(response.data) ? response.data : [];
+            if (!rows.length) {
+                return null;
+            }
+
+            const row = rows[0] || {};
+            return {
+                streak: Number(row.streak) || 0,
+                lastCheckinDate: row.last_checkin_date || null,
+                lastCheckinAt: row.last_checkin_at ? Number(row.last_checkin_at) : null,
+                totalCheckins: Number(row.total_checkins) || 0,
+                updatedAt: row.updated_at ? Number(row.updated_at) : null
+            };
+        } catch (error) {
+            console.error('[Supabase] Lỗi REST daily_checkins:', error.message);
+        }
+    }
+
+    return null;
+}
+
+async function persistSupabaseDailyCheckin(groupChatId, userId, state, updatedAt) {
+    if (!state) {
+        return;
+    }
+
+    const normalizedUpdatedAt = Number(updatedAt) || Math.floor(Date.now() / 1000);
+
+    if (!supabaseSchemaEnsured) {
+        try {
+            await ensureSupabaseDailyCheckinSchema();
+        } catch (error) {
+            console.error('[Supabase] Không thể đảm bảo cấu trúc trước khi ghi daily_checkins:', error.message);
+        }
+    }
+
+    if (supabaseClient) {
+        try {
+            const payload = {
+                group_chat_id: groupChatId,
+                user_id: userId,
+                streak: state.streak || 0,
+                last_checkin_date: state.lastCheckinDate || null,
+                last_checkin_at: state.lastCheckinAt ? Number(state.lastCheckinAt) : null,
+                total_checkins: state.totalCheckins || 0,
+                updated_at: normalizedUpdatedAt
+            };
+
+            const { error } = await supabaseClient
+                .from('daily_checkins')
+                .upsert([payload], { onConflict: 'group_chat_id,user_id' })
+                .select();
+
+            if (!error) {
+                return;
+            }
+
+            const details = error.details ? ` (${error.details})` : '';
+            console.error('[Supabase] Không thể ghi daily_checkins (JS client):', `${error.message}${details}`);
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi ghi daily_checkins:', error.message);
+        }
+    }
+
+    if (supabasePool) {
+        try {
+            await supabasePool.query(
+                `insert into public.daily_checkins (group_chat_id, user_id, streak, last_checkin_date, last_checkin_at, total_checkins, updated_at)
+                 values ($1, $2, $3, $4, $5, $6, $7)
+                 on conflict (group_chat_id, user_id) do update
+                 set streak = excluded.streak,
+                     last_checkin_date = excluded.last_checkin_date,
+                     last_checkin_at = excluded.last_checkin_at,
+                     total_checkins = excluded.total_checkins,
+                     updated_at = excluded.updated_at`,
+                [
+                    groupChatId,
+                    userId,
+                    state.streak || 0,
+                    state.lastCheckinDate || null,
+                    state.lastCheckinAt ? Number(state.lastCheckinAt) : null,
+                    state.totalCheckins || 0,
+                    normalizedUpdatedAt
+                ]
+            );
+            return;
+        } catch (error) {
+            console.error('[Supabase] Không thể ghi daily_checkins:', error.message);
+        }
+    }
+
+    if (supabaseRestClient) {
+        try {
+            const query = new URLSearchParams();
+            query.set('on_conflict', 'group_chat_id,user_id');
+
+            const payload = [{
+                group_chat_id: groupChatId,
+                user_id: userId,
+                streak: state.streak || 0,
+                last_checkin_date: state.lastCheckinDate || null,
+                last_checkin_at: state.lastCheckinAt ? Number(state.lastCheckinAt) : null,
+                total_checkins: state.totalCheckins || 0,
+                updated_at: normalizedUpdatedAt
+            }];
+
+            const response = await supabaseRestClient.request('POST', 'daily_checkins', {
+                query,
+                body: payload,
+                prefer: 'resolution=merge-duplicates'
+            });
+
+            if (!response.ok) {
+                console.error('[Supabase] Không thể ghi daily_checkins (REST):', response.error);
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi REST khi ghi daily_checkins:', error.message);
+        }
+    }
+}
+
+async function deleteSupabaseDailyCheckin(groupChatId, userId) {
+    if (!supabaseSchemaEnsured) {
+        try {
+            await ensureSupabaseDailyCheckinSchema();
+        } catch (error) {
+            console.error('[Supabase] Không thể đảm bảo cấu trúc trước khi xóa daily_checkins:', error.message);
+        }
+    }
+
+    if (supabaseClient) {
+        try {
+            const { error } = await supabaseClient
+                .from('daily_checkins')
+                .delete()
+                .eq('group_chat_id', groupChatId)
+                .eq('user_id', userId)
+                .select();
+
+            if (!error) {
+                return;
+            }
+
+            const details = error.details ? ` (${error.details})` : '';
+            console.error('[Supabase] Không thể xóa daily_checkins (JS client):', `${error.message}${details}`);
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi xóa daily_checkins:', error.message);
+        }
+    }
+
+    if (supabasePool) {
+        try {
+            await supabasePool.query(
+                'delete from public.daily_checkins where group_chat_id = $1 and user_id = $2',
+                [groupChatId, userId]
+            );
+            return;
+        } catch (error) {
+            console.error('[Supabase] Không thể xóa daily_checkins:', error.message);
+        }
+    }
+
+    if (supabaseRestClient) {
+        try {
+            const query = new URLSearchParams();
+            query.set('group_chat_id', `eq.${groupChatId}`);
+            query.set('user_id', `eq.${userId}`);
+
+            const response = await supabaseRestClient.request('DELETE', 'daily_checkins', { query });
+            if (!response.ok) {
+                console.error('[Supabase] Không thể xóa daily_checkins (REST):', response.error);
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi REST khi xóa daily_checkins:', error.message);
+        }
+    }
+}
+
+async function deleteSupabaseDailyCheckinLog(groupChatId, userId, checkinDate) {
+    if (!supabaseSchemaEnsured) {
+        try {
+            await ensureSupabaseDailyCheckinSchema();
+        } catch (error) {
+            console.error('[Supabase] Không thể đảm bảo cấu trúc trước khi xóa daily_checkin_logs:', error.message);
+        }
+    }
+
+    if (supabaseClient) {
+        try {
+            const { error } = await supabaseClient
+                .from('daily_checkin_logs')
+                .delete()
+                .eq('group_chat_id', groupChatId)
+                .eq('user_id', userId)
+                .eq('checkin_date', checkinDate)
+                .select();
+
+            if (!error) {
+                return;
+            }
+
+            const details = error.details ? ` (${error.details})` : '';
+            console.error('[Supabase] Không thể xóa daily_checkin_logs (JS client):', `${error.message}${details}`);
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi xóa daily_checkin_logs:', error.message);
+        }
+    }
+
+    if (supabasePool) {
+        try {
+            await supabasePool.query(
+                'delete from public.daily_checkin_logs where group_chat_id = $1 and user_id = $2 and checkin_date = $3',
+                [groupChatId, userId, checkinDate]
+            );
+            return;
+        } catch (error) {
+            console.error('[Supabase] Không thể xóa daily_checkin_logs:', error.message);
+        }
+    }
+
+    if (supabaseRestClient) {
+        try {
+            const query = new URLSearchParams();
+            query.set('group_chat_id', `eq.${groupChatId}`);
+            query.set('user_id', `eq.${userId}`);
+            query.set('checkin_date', `eq.${checkinDate}`);
+
+            const response = await supabaseRestClient.request('DELETE', 'daily_checkin_logs', { query });
+            if (!response.ok) {
+                console.error('[Supabase] Không thể xóa daily_checkin_logs (REST):', response.error);
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi REST khi xóa daily_checkin_logs:', error.message);
+        }
+    }
+}
+
+async function insertSupabaseDailyCheckinLog(groupChatId, userId, checkinDate, checkinAt, streak) {
+    if (!supabaseSchemaEnsured) {
+        try {
+            await ensureSupabaseDailyCheckinSchema();
+        } catch (error) {
+            console.error('[Supabase] Không thể đảm bảo cấu trúc trước khi ghi daily_checkin_logs:', error.message);
+        }
+    }
+
+    if (supabaseClient) {
+        try {
+            const { error } = await supabaseClient
+                .from('daily_checkin_logs')
+                .insert([
+                    {
+                        group_chat_id: groupChatId,
+                        user_id: userId,
+                        checkin_date: checkinDate,
+                        checkin_at: Number(checkinAt) || 0,
+                        streak: streak || 0
+                    }
+                ])
+                .select();
+
+            if (!error) {
+                return;
+            }
+
+            const details = error.details ? ` (${error.details})` : '';
+            console.error('[Supabase] Không thể ghi daily_checkin_logs (JS client):', `${error.message}${details}`);
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi ghi daily_checkin_logs:', error.message);
+        }
+    }
+
+    if (supabasePool) {
+        try {
+            await supabasePool.query(
+                'insert into public.daily_checkin_logs (group_chat_id, user_id, checkin_date, checkin_at, streak) values ($1, $2, $3, $4, $5)',
+                [groupChatId, userId, checkinDate, Number(checkinAt) || 0, streak || 0]
+            );
+            return;
+        } catch (error) {
+            console.error('[Supabase] Không thể ghi daily_checkin_logs:', error.message);
+        }
+    }
+
+    if (supabaseRestClient) {
+        try {
+            const payload = [{
+                group_chat_id: groupChatId,
+                user_id: userId,
+                checkin_date: checkinDate,
+                checkin_at: Number(checkinAt) || 0,
+                streak: streak || 0
+            }];
+
+            const response = await supabaseRestClient.request('POST', 'daily_checkin_logs', {
+                body: payload,
+                prefer: 'return=representation'
+            });
+
+            if (!response.ok) {
+                console.error('[Supabase] Không thể ghi daily_checkin_logs (REST):', response.error);
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi REST khi ghi daily_checkin_logs:', error.message);
+        }
+    }
+}
+
+async function getDailyCheckinState(groupChatId, userId) {
+    const supabaseState = await fetchSupabaseDailyCheckinState(groupChatId, userId);
+
+    if (supabaseState) {
+        const { updatedAt, ...rest } = supabaseState;
+        try {
+            await persistLocalDailyCheckinSnapshot(groupChatId, userId, rest, updatedAt);
+        } catch (error) {
+            console.error('[DB] Không thể đồng bộ daily_checkins từ Supabase:', error.message);
+        }
+        return rest;
+    }
+
+    return await fetchLocalDailyCheckinState(groupChatId, userId);
+}
+
+async function recordDailyCheckin(groupChatId, userId, currentDateKey, currentTimestampSec) {
+    const existing = await getDailyCheckinState(groupChatId, userId);
+
+    if (existing && existing.lastCheckinDate === currentDateKey) {
+        return {
+            alreadyCheckedIn: true,
+            streak: existing.streak,
+            totalCheckins: existing.totalCheckins,
+            rewardUnlocked: false,
+            streakReset: false
+        };
+    }
+
+    const nowSeconds = Number(currentTimestampSec) || Math.floor(Date.now() / 1000);
+    const todayIndex = toDayIndex(currentDateKey);
+    let newStreak = 1;
+    let streakReset = false;
+
+    if (existing && existing.lastCheckinDate) {
+        const previousIndex = toDayIndex(existing.lastCheckinDate);
+        if (previousIndex !== null && todayIndex !== null) {
+            const diff = todayIndex - previousIndex;
+            if (diff === 1) {
+                newStreak = existing.streak + 1;
+            } else {
+                newStreak = 1;
+                streakReset = true;
+            }
+        } else {
+            newStreak = 1;
+            streakReset = true;
+        }
+    }
+
+    const totalCheckins = (existing?.totalCheckins || 0) + 1;
+    const rewardUnlocked = newStreak > 0 && newStreak % 7 === 0;
+    const updatedAt = nowSeconds;
+    const newState = {
+        streak: newStreak,
+        lastCheckinDate: currentDateKey,
+        lastCheckinAt: nowSeconds,
+        totalCheckins
+    };
+
+    try {
+        await persistLocalDailyCheckinSnapshot(groupChatId, userId, newState, updatedAt);
+        await insertLocalDailyCheckinLog(groupChatId, userId, currentDateKey, nowSeconds, newStreak);
+    } catch (error) {
+        console.error('[DB] Không thể lưu daily_checkins nội bộ:', error.message);
+    }
+
+    await persistSupabaseDailyCheckin(groupChatId, userId, newState, updatedAt);
+    await insertSupabaseDailyCheckinLog(groupChatId, userId, currentDateKey, nowSeconds, newStreak);
+
+    return {
+        alreadyCheckedIn: false,
+        streak: newStreak,
+        totalCheckins,
+        rewardUnlocked,
+        streakReset
+    };
+}
+
+async function cancelDailyCheckin(groupChatId, userId, targetDateKey) {
+    const existing = await getDailyCheckinState(groupChatId, userId);
+
+    if (!existing || existing.lastCheckinDate !== targetDateKey) {
+        return { cancelled: false, reason: 'not_found' };
+    }
+
+    try {
+        const deleted = await removeLocalDailyCheckinLog(groupChatId, userId, targetDateKey);
+        if (!deleted) {
+            return { cancelled: false, reason: 'not_found' };
+        }
+
+        const newState = await rebuildLocalDailyCheckinSnapshot(groupChatId, userId);
+
+        await deleteSupabaseDailyCheckinLog(groupChatId, userId, targetDateKey);
+
+        if (newState) {
+            await persistSupabaseDailyCheckin(groupChatId, userId, newState, Math.floor(Date.now() / 1000));
+        } else {
+            await deleteSupabaseDailyCheckin(groupChatId, userId);
+        }
+
+        return {
+            cancelled: true,
+            rewardRevoked: existing.streak > 0 && existing.streak % 7 === 0,
+            streak: newState ? newState.streak : 0,
+            totalCheckins: newState ? newState.totalCheckins : 0
+        };
+    } catch (error) {
+        console.error('[DB] Không thể hủy daily_checkin:', error.message);
+        return { cancelled: false, reason: 'error' };
+    }
+}
+
+function normaliseCheckinLogRow(row) {
+    if (!row) {
+        return null;
+    }
+
+    const rawUserId = row.user_id ?? row.userId ?? null;
+    if (!rawUserId) {
+        return null;
+    }
+
+    const rawTimestamp = row.checkin_at ?? row.checkinAt ?? null;
+
+    return {
+        userId: String(rawUserId),
+        checkinAt: rawTimestamp !== null && rawTimestamp !== undefined ? Number(rawTimestamp) : null,
+        streak: Number(row.streak) || 0
+    };
+}
+
+async function fetchSupabaseCheckinsForDate(groupChatId, dateKey, limit = 200) {
+    const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Number(limit))) : 200;
+
+    if (supabaseClient) {
+        try {
+            const { data, error } = await supabaseClient
+                .from('daily_checkin_logs')
+                .select('user_id,checkin_at,streak')
+                .eq('group_chat_id', groupChatId)
+                .eq('checkin_date', dateKey)
+                .order('checkin_at', { ascending: true })
+                .limit(normalizedLimit);
+
+            if (error) {
+                console.error('[Supabase] Không thể đọc check-in logs theo ngày (JS client):', error.message);
+            } else if (Array.isArray(data) && data.length > 0) {
+                return data
+                    .map((row) => normaliseCheckinLogRow(row))
+                    .filter(Boolean);
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi đọc check-in logs theo ngày:', error.message);
+        }
+    }
+
+    if (supabasePool) {
+        try {
+            const result = await supabasePool.query(
+                'select user_id, checkin_at, streak from public.daily_checkin_logs where group_chat_id = $1 and checkin_date = $2 order by checkin_at asc limit $3',
+                [groupChatId, dateKey, normalizedLimit]
+            );
+
+            if (result?.rows?.length) {
+                return result.rows
+                    .map((row) => normaliseCheckinLogRow(row))
+                    .filter(Boolean);
+            }
+        } catch (error) {
+            console.error('[Supabase] Không thể đọc check-in logs theo ngày:', error.message);
+        }
+    }
+
+    if (supabaseRestClient) {
+        try {
+            const query = new URLSearchParams();
+            query.set('group_chat_id', `eq.${groupChatId}`);
+            query.set('checkin_date', `eq.${dateKey}`);
+            query.set('select', 'user_id,checkin_at,streak');
+            query.set('order', 'checkin_at.asc');
+            query.set('limit', String(normalizedLimit));
+
+            const response = await supabaseRestClient.request('GET', 'daily_checkin_logs', { query });
+            if (!response.ok) {
+                console.error('[Supabase] Không thể đọc check-in logs theo ngày (REST):', response.error);
+            } else {
+                const rows = Array.isArray(response.data) ? response.data : [];
+                if (rows.length > 0) {
+                    return rows
+                        .map((row) => normaliseCheckinLogRow(row))
+                        .filter(Boolean);
+                }
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi REST khi đọc check-in logs theo ngày:', error.message);
+        }
+    }
+
+    return null;
+}
+
+async function getDailyCheckinsForDate(groupChatId, dateKey, limit = 200) {
+    const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Number(limit))) : 200;
+
+    const remote = await fetchSupabaseCheckinsForDate(groupChatId, dateKey, normalizedLimit);
+    if (Array.isArray(remote) && remote.length > 0) {
+        return remote.slice(0, normalizedLimit);
+    }
+
+    const rows = await dbAll(
+        'SELECT userId, checkinAt, streak FROM daily_checkin_logs WHERE groupChatId = ? AND checkinDate = ? ORDER BY checkinAt ASC',
+        [groupChatId, dateKey]
+    );
+
+    return rows
+        .map((row) => normaliseCheckinLogRow(row))
+        .filter(Boolean)
+        .slice(0, normalizedLimit);
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -387,5 +1716,9 @@ module.exports = {
     setGroupMemberLanguage,
     removeGroupMemberLanguage,
     updateGroupSubscriptionLanguage,
-    updateGroupSubscriptionTopic
+    updateGroupSubscriptionTopic,
+    getDailyCheckinState,
+    recordDailyCheckin,
+    cancelDailyCheckin,
+    getDailyCheckinsForDate
 };
