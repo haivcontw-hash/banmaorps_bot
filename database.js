@@ -14,34 +14,26 @@ function parsePostgresConfigFromUrl(connectionString) {
         return null;
     }
 
+    const sanitised = sanitisePostgresConnectionString(connectionString);
+    if (!sanitised) {
+        return null;
+    }
+
     try {
-        const parsed = new URL(connectionString);
+        const parsed = new URL(sanitised);
         if (!/^postgres(?:ql)?:$/i.test(parsed.protocol)) {
             return null;
         }
 
-        const config = {
-            host: parsed.hostname,
-            port: parsed.port ? Number(parsed.port) : 5432,
-            user: parsed.username ? decodeURIComponent(parsed.username) : 'postgres',
-            password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
-            database: undefined,
-            ssl: { require: true, rejectUnauthorized: false }
-        };
-
-        const pathname = parsed.pathname ? parsed.pathname.replace(/^\//, '') : '';
-        if (pathname) {
-            config.database = decodeURIComponent(pathname);
-        } else {
-            config.database = config.user;
-        }
-
         const sslMode = parsed.searchParams.get('sslmode');
-        if (typeof sslMode === 'string' && sslMode.toLowerCase() === 'disable') {
-            config.ssl = false;
-        }
+        const ssl = typeof sslMode === 'string' && sslMode.toLowerCase() === 'disable'
+            ? false
+            : { rejectUnauthorized: false };
 
-        return config;
+        return {
+            connectionString: sanitised.replace(/^postgresql:/i, 'postgres:'),
+            ssl
+        };
     } catch (error) {
         console.error('[Supabase] Không thể phân tích cấu hình PostgreSQL:', error.message);
         return null;
@@ -96,8 +88,7 @@ function sanitisePostgresConnectionString(raw) {
         }
 
         // URL sẽ tự động encode lại khi toString()
-        const normalisedProtocol = parsed.protocol.toLowerCase() === 'postgres:' ? 'postgresql:' : parsed.protocol;
-        parsed.protocol = normalisedProtocol;
+        parsed.protocol = 'postgres:';
         return parsed.toString();
     } catch (error) {
         const match = raw.match(/^(postgres(?:ql)?:\/\/[^:]+:)([^@]+)@(.+)$/i);
@@ -387,7 +378,8 @@ if (SUPABASE_CONNECTION_STRING) {
             }
 
             supabasePool = new Pool({
-                ...poolConfig,
+                connectionString: poolConfig.connectionString,
+                ssl: poolConfig.ssl,
                 max: Number.isFinite(SUPABASE_POOL_MAX) ? SUPABASE_POOL_MAX : 5,
                 idleTimeoutMillis: 30_000
             });
