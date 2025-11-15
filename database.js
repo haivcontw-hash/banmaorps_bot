@@ -83,6 +83,7 @@ const SUPABASE_CONNECTION_STRING = resolveSupabaseConnectionString();
 const SUPABASE_POOL_MAX = Number(process.env.SUPABASE_POOL_MAX || 5);
 
 let supabasePool = null;
+let supabaseSchemaEnsured = false;
 
 if (SUPABASE_CONNECTION_STRING) {
     if (!Pool) {
@@ -114,6 +115,48 @@ if (SUPABASE_CONNECTION_STRING) {
     }
 } else {
     console.log('[Supabase] Không tìm thấy chuỗi kết nối, bỏ qua đồng bộ Supabase.');
+}
+
+async function ensureSupabaseDailyCheckinSchema() {
+    if (!supabasePool || supabaseSchemaEnsured) {
+        return;
+    }
+
+    try {
+        await supabasePool.query(`
+            create table if not exists public.daily_checkins (
+                group_chat_id text not null,
+                user_id text not null,
+                streak integer not null default 0,
+                last_checkin_date text,
+                last_checkin_at bigint,
+                total_checkins integer not null default 0,
+                updated_at bigint,
+                constraint daily_checkins_pk primary key (group_chat_id, user_id)
+            )
+        `);
+
+        await supabasePool.query(`
+            create table if not exists public.daily_checkin_logs (
+                id bigserial primary key,
+                group_chat_id text not null,
+                user_id text not null,
+                checkin_date text not null,
+                checkin_at bigint not null,
+                streak integer not null
+            )
+        `);
+
+        await supabasePool.query(`
+            create index if not exists daily_checkin_logs_group_date_idx
+                on public.daily_checkin_logs (group_chat_id, checkin_date)
+        `);
+
+        supabaseSchemaEnsured = true;
+        console.log('[Supabase] Đã đảm bảo cấu trúc bảng daily_checkins.');
+    } catch (error) {
+        console.error('[Supabase] Không thể khởi tạo bảng daily_checkins:', error.message);
+    }
 }
 
 // --- Hàm Helper (Promisify) ---
@@ -221,6 +264,8 @@ async function init() {
         );
     `);
     await dbRun('CREATE INDEX IF NOT EXISTS idx_daily_checkin_logs_group_date ON daily_checkin_logs (groupChatId, checkinDate);');
+
+    await ensureSupabaseDailyCheckinSchema();
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
