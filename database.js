@@ -1,4 +1,5 @@
 const sqlite3 = require('sqlite3').verbose();
+const crypto = require('crypto');
 const { normalizeLanguageCode } = require('./i18n.js');
 
 const db = new sqlite3.Database('banmao.db', (err) => {
@@ -31,6 +32,563 @@ const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
         else resolve(rows);
     });
 });
+
+const CHECKIN_DEFAULTS = {
+    checkinTime: '08:00',
+    timezone: 'UTC',
+    autoMessageEnabled: 1,
+    dailyPoints: 10,
+    summaryWindow: 7
+};
+
+function getTodayDateString(timezone = 'UTC') {
+    try {
+        const formatter = new Intl.DateTimeFormat('en-CA', {
+            timeZone: timezone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        });
+
+        return formatter.format(new Date());
+    } catch (error) {
+        console.warn(`[Checkin] Không thể format ngày với timezone ${timezone}: ${error.message}`);
+    }
+
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    const month = String(now.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(now.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function normalizeDateString(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        return null;
+    }
+
+    return trimmed;
+}
+
+function compareDateStrings(dateA, dateB) {
+    const normalizedA = normalizeDateString(dateA);
+    const normalizedB = normalizeDateString(dateB);
+
+    if (!normalizedA || !normalizedB) {
+        return null;
+    }
+
+    if (normalizedA === normalizedB) {
+        return 0;
+    }
+
+    return normalizedA < normalizedB ? -1 : 1;
+}
+
+function getPreviousDate(dateStr) {
+    const normalized = normalizeDateString(dateStr);
+    if (!normalized) {
+        return null;
+    }
+
+    const [year, month, day] = normalized.split('-').map((v) => Number(v));
+    const date = new Date(Date.UTC(year, month - 1, day));
+    date.setUTCDate(date.getUTCDate() - 1);
+    const prevYear = date.getUTCFullYear();
+    const prevMonth = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const prevDay = String(date.getUTCDate()).padStart(2, '0');
+    return `${prevYear}-${prevMonth}-${prevDay}`;
+}
+
+async function ensureCheckinGroup(chatId) {
+    const now = Math.floor(Date.now() / 1000);
+    const existing = await dbGet('SELECT chatId FROM checkin_groups WHERE chatId = ?', [chatId]);
+    if (existing) {
+        return existing.chatId;
+    }
+
+    await dbRun(
+        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            chatId,
+            CHECKIN_DEFAULTS.checkinTime,
+            CHECKIN_DEFAULTS.timezone,
+            CHECKIN_DEFAULTS.autoMessageEnabled,
+            CHECKIN_DEFAULTS.dailyPoints,
+            CHECKIN_DEFAULTS.summaryWindow,
+            now,
+            now
+        ]
+    );
+
+    return chatId;
+}
+
+async function getCheckinGroup(chatId) {
+    const row = await dbGet('SELECT * FROM checkin_groups WHERE chatId = ?', [chatId]);
+    if (!row) {
+        return {
+            chatId,
+            ...CHECKIN_DEFAULTS,
+            lastAutoMessageDate: null
+        };
+    }
+
+    return {
+        chatId: row.chatId,
+        checkinTime: row.checkinTime || CHECKIN_DEFAULTS.checkinTime,
+        timezone: row.timezone || CHECKIN_DEFAULTS.timezone,
+        autoMessageEnabled: row.autoMessageEnabled ?? CHECKIN_DEFAULTS.autoMessageEnabled,
+        dailyPoints: row.dailyPoints ?? CHECKIN_DEFAULTS.dailyPoints,
+        summaryWindow: row.summaryWindow ?? CHECKIN_DEFAULTS.summaryWindow,
+        lastAutoMessageDate: row.lastAutoMessageDate || null
+    };
+}
+
+async function listCheckinGroups() {
+    const rows = await dbAll('SELECT * FROM checkin_groups');
+    if (!rows || rows.length === 0) {
+        return [];
+    }
+
+    return rows.map((row) => ({
+        chatId: row.chatId,
+        checkinTime: row.checkinTime || CHECKIN_DEFAULTS.checkinTime,
+        timezone: row.timezone || CHECKIN_DEFAULTS.timezone,
+        autoMessageEnabled: row.autoMessageEnabled ?? CHECKIN_DEFAULTS.autoMessageEnabled,
+        dailyPoints: row.dailyPoints ?? CHECKIN_DEFAULTS.dailyPoints,
+        summaryWindow: row.summaryWindow ?? CHECKIN_DEFAULTS.summaryWindow,
+        lastAutoMessageDate: row.lastAutoMessageDate || null
+    }));
+}
+
+async function updateCheckinGroup(chatId, patch = {}) {
+    await ensureCheckinGroup(chatId);
+    const fields = [];
+    const values = [];
+    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate'];
+    for (const key of allowed) {
+        if (Object.prototype.hasOwnProperty.call(patch, key)) {
+            fields.push(`${key} = ?`);
+            values.push(patch[key]);
+        }
+    }
+
+    if (fields.length === 0) {
+        return getCheckinGroup(chatId);
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    fields.push('updatedAt = ?');
+    values.push(now);
+    values.push(chatId);
+
+    const sql = `UPDATE checkin_groups SET ${fields.join(', ')} WHERE chatId = ?`;
+    await dbRun(sql, values);
+    return getCheckinGroup(chatId);
+}
+
+async function updateAutoMessageDate(chatId, dateStr) {
+    const normalized = normalizeDateString(dateStr);
+    if (!normalized) {
+        return updateCheckinGroup(chatId, { lastAutoMessageDate: null });
+    }
+
+    return updateCheckinGroup(chatId, { lastAutoMessageDate: normalized });
+}
+
+async function getCheckinAttempt(chatId, userId, checkinDate) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        return null;
+    }
+
+    const row = await dbGet(
+        'SELECT attempts, locked FROM checkin_attempts WHERE chatId = ? AND userId = ? AND checkinDate = ?',
+        [chatId, userId, normalized]
+    );
+
+    if (!row) {
+        return { attempts: 0, locked: 0 };
+    }
+
+    return { attempts: Number(row.attempts || 0), locked: Number(row.locked || 0) };
+}
+
+async function setCheckinAttempt(chatId, userId, checkinDate, attempts, locked) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        throw new Error('Invalid checkin date');
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const existing = await dbGet(
+        'SELECT chatId FROM checkin_attempts WHERE chatId = ? AND userId = ? AND checkinDate = ?',
+        [chatId, userId, normalized]
+    );
+
+    if (existing) {
+        await dbRun(
+            'UPDATE checkin_attempts SET attempts = ?, locked = ?, updatedAt = ? WHERE chatId = ? AND userId = ? AND checkinDate = ?',
+            [attempts, locked ? 1 : 0, now, chatId, userId, normalized]
+        );
+    } else {
+        await dbRun(
+            'INSERT INTO checkin_attempts (chatId, userId, checkinDate, attempts, locked, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
+            [chatId, userId, normalized, attempts, locked ? 1 : 0, now]
+        );
+    }
+}
+
+async function incrementCheckinAttempt(chatId, userId, checkinDate, maxAttempts = 3) {
+    const status = await getCheckinAttempt(chatId, userId, checkinDate);
+    const nextAttempts = status ? status.attempts + 1 : 1;
+    const shouldLock = nextAttempts >= maxAttempts;
+    await setCheckinAttempt(chatId, userId, checkinDate, nextAttempts, shouldLock);
+    return { attempts: nextAttempts, locked: shouldLock };
+}
+
+async function clearDailyAttempts(chatId, userId, checkinDate) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        return;
+    }
+
+    await dbRun('DELETE FROM checkin_attempts WHERE chatId = ? AND userId = ? AND checkinDate = ?', [chatId, userId, normalized]);
+}
+
+async function getCheckinRecord(chatId, userId, checkinDate) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        return null;
+    }
+
+    const row = await dbGet(
+        'SELECT * FROM checkin_records WHERE chatId = ? AND userId = ? AND checkinDate = ?',
+        [chatId, userId, normalized]
+    );
+
+    if (!row) {
+        return null;
+    }
+
+    return { ...row };
+}
+
+async function ensureMemberRow(chatId, userId) {
+    const existing = await dbGet('SELECT userId FROM checkin_members WHERE chatId = ? AND userId = ?', [chatId, userId]);
+    if (existing) {
+        return existing.userId;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        `INSERT INTO checkin_members (chatId, userId, streak, longestStreak, totalCheckins, totalPoints, createdAt, updatedAt)
+         VALUES (?, ?, 0, 0, 0, 0, ?, ?)`
+        ,
+        [chatId, userId, now, now]
+    );
+    return userId;
+}
+
+function calculateConsecutiveStreak(dates) {
+    if (!Array.isArray(dates) || dates.length === 0) {
+        return { streak: 0, longest: 0, lastDate: null };
+    }
+
+    const sorted = [...dates].sort();
+    let longest = 1;
+    let current = 1;
+    for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1];
+        const prevDate = new Date(`${prev}T00:00:00Z`);
+        const currentDate = new Date(`${sorted[i]}T00:00:00Z`);
+        const diffMs = currentDate - prevDate;
+        const diffDays = Math.round(diffMs / (24 * 60 * 60 * 1000));
+        if (diffDays === 1) {
+            current += 1;
+        } else if (diffDays === 0) {
+            continue;
+        } else {
+            current = 1;
+        }
+
+        if (current > longest) {
+            longest = current;
+        }
+    }
+
+    const lastDate = sorted[sorted.length - 1];
+    // Calculate streak ending at lastDate
+    let streak = 1;
+    for (let i = sorted.length - 2; i >= 0; i--) {
+        const prev = sorted[i];
+        const prevDate = new Date(`${prev}T00:00:00Z`);
+        const nextDate = new Date(`${sorted[i + 1]}T00:00:00Z`);
+        const diffMs = nextDate - prevDate;
+        const diffDays = Math.round(diffMs / (24 * 60 * 60 * 1000));
+        if (diffDays === 1) {
+            streak += 1;
+        } else if (diffDays === 0) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    return { streak, longest, lastDate };
+}
+
+async function recalculateMemberStats(chatId, userId) {
+    await ensureMemberRow(chatId, userId);
+    const records = await dbAll(
+        'SELECT checkinDate, pointsAwarded FROM checkin_records WHERE chatId = ? AND userId = ? ORDER BY checkinDate ASC',
+        [chatId, userId]
+    );
+
+    const dates = records.map((row) => row.checkinDate).filter(Boolean);
+    const { streak, longest, lastDate } = calculateConsecutiveStreak(dates);
+    const totalCheckins = records.length;
+    const totalPoints = records.reduce((sum, row) => sum + Number(row.pointsAwarded || 0), 0);
+
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        `UPDATE checkin_members
+         SET streak = ?, longestStreak = CASE WHEN ? > longestStreak THEN ? ELSE longestStreak END,
+             totalCheckins = ?, totalPoints = ?, lastCheckinDate = ?, updatedAt = ?, lockedUntilDate = NULL
+         WHERE chatId = ? AND userId = ?`,
+        [streak, longest, longest, totalCheckins, totalPoints, lastDate, now, chatId, userId]
+    );
+
+    return { streak, longest, totalCheckins, totalPoints, lastCheckinDate: lastDate };
+}
+
+async function completeCheckin({ chatId, userId, checkinDate, walletAddress = null, pointsAwarded = 0 }) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        throw new Error('Invalid checkin date');
+    }
+
+    await ensureCheckinGroup(chatId);
+    await ensureMemberRow(chatId, userId);
+
+    const existingRecord = await getCheckinRecord(chatId, userId, normalized);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (existingRecord) {
+        await dbRun(
+            'UPDATE checkin_records SET walletAddress = ?, pointsAwarded = ?, updatedAt = ? WHERE id = ?',
+            [walletAddress, pointsAwarded, now, existingRecord.id]
+        );
+    } else {
+        const id = crypto.randomUUID();
+        await dbRun(
+            'INSERT INTO checkin_records (id, chatId, userId, checkinDate, walletAddress, pointsAwarded, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [id, chatId, userId, normalized, walletAddress, pointsAwarded, now, now]
+        );
+    }
+
+    await clearDailyAttempts(chatId, userId, normalized);
+
+    const memberRow = await dbGet('SELECT streak, lastCheckinDate, longestStreak, totalCheckins, totalPoints FROM checkin_members WHERE chatId = ? AND userId = ?', [chatId, userId]);
+
+    let streak = 1;
+    let longestStreak = 1;
+    let totalCheckins = 1;
+    let totalPoints = Number(pointsAwarded || 0);
+
+    if (memberRow) {
+        totalCheckins = Number(memberRow.totalCheckins || 0) + (existingRecord ? 0 : 1);
+        totalPoints = Number(memberRow.totalPoints || 0) + Number(pointsAwarded || 0) - Number(existingRecord?.pointsAwarded || 0);
+
+        const lastDate = memberRow.lastCheckinDate;
+        if (lastDate) {
+            if (lastDate === normalized) {
+                streak = Number(memberRow.streak || 1);
+            } else {
+                const prevDate = getPreviousDate(normalized);
+                if (prevDate && prevDate === lastDate) {
+                    streak = Number(memberRow.streak || 0) + 1;
+                } else {
+                    streak = 1;
+                }
+            }
+        }
+
+        longestStreak = streak > Number(memberRow.longestStreak || 0) ? streak : Number(memberRow.longestStreak || 0);
+        if (existingRecord && !memberRow.lastCheckinDate) {
+            streak = Number(memberRow.streak || 1);
+        }
+    }
+
+    const nowTs = Math.floor(Date.now() / 1000);
+    await dbRun(
+        `UPDATE checkin_members
+         SET streak = ?, longestStreak = CASE WHEN ? > longestStreak THEN ? ELSE longestStreak END,
+             totalCheckins = ?, totalPoints = ?, lastCheckinDate = ?, lockedUntilDate = NULL, updatedAt = ?
+         WHERE chatId = ? AND userId = ?`,
+        [streak, longestStreak, longestStreak, totalCheckins, totalPoints, normalized, nowTs, chatId, userId]
+    );
+
+    return { streak, longestStreak, totalCheckins, totalPoints };
+}
+
+async function updateCheckinFeedback(chatId, userId, checkinDate, { emotion = null, goal = null } = {}) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        throw new Error('Invalid checkin date');
+    }
+
+    const record = await getCheckinRecord(chatId, userId, normalized);
+    if (!record) {
+        throw new Error('Check-in record not found');
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const updates = [];
+    const params = [];
+
+    if (emotion !== null) {
+        updates.push('emotion = ?');
+        params.push(emotion);
+    }
+
+    if (goal !== null) {
+        updates.push('goal = ?');
+        params.push(goal);
+    }
+
+    if (updates.length === 0) {
+        return record;
+    }
+
+    updates.push('updatedAt = ?');
+    params.push(now);
+    params.push(record.id);
+
+    await dbRun(`UPDATE checkin_records SET ${updates.join(', ')} WHERE id = ?`, params);
+    return getCheckinRecord(chatId, userId, normalized);
+}
+
+async function getCheckinsForDate(chatId, checkinDate) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        return [];
+    }
+
+    const rows = await dbAll(
+        'SELECT * FROM checkin_records WHERE chatId = ? AND checkinDate = ? ORDER BY updatedAt ASC',
+        [chatId, normalized]
+    );
+
+    return rows;
+}
+
+async function getCheckinMemberSummary(chatId, userId) {
+    if (!chatId || !userId) {
+        return null;
+    }
+
+    const row = await dbGet(
+        'SELECT streak, longestStreak, totalCheckins, totalPoints FROM checkin_members WHERE chatId = ? AND userId = ?',
+        [chatId, userId]
+    );
+
+    if (!row) {
+        return null;
+    }
+
+    return {
+        streak: Number(row.streak || 0),
+        longestStreak: Number(row.longestStreak || 0),
+        totalCheckins: Number(row.totalCheckins || 0),
+        totalPoints: Number(row.totalPoints || 0)
+    };
+}
+
+async function getTopCheckins(chatId, limit = 10, mode = 'streak') {
+    const allowedModes = new Set(['streak', 'total', 'points', 'longest']);
+    const finalMode = allowedModes.has(mode) ? mode : 'streak';
+    let orderClause = 'streak DESC, totalCheckins DESC';
+
+    if (finalMode === 'total') {
+        orderClause = 'totalCheckins DESC, streak DESC';
+    } else if (finalMode === 'points') {
+        orderClause = 'totalPoints DESC, streak DESC';
+    } else if (finalMode === 'longest') {
+        orderClause = 'longestStreak DESC, totalCheckins DESC';
+    }
+
+    const rows = await dbAll(
+        `SELECT * FROM checkin_members WHERE chatId = ? ORDER BY ${orderClause} LIMIT ?`,
+        [chatId, limit]
+    );
+
+    return rows || [];
+}
+
+async function removeCheckinRecord(chatId, userId, checkinDate) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        return false;
+    }
+
+    const record = await getCheckinRecord(chatId, userId, normalized);
+    if (!record) {
+        return false;
+    }
+
+    await dbRun('DELETE FROM checkin_records WHERE id = ?', [record.id]);
+    await recalculateMemberStats(chatId, userId);
+    await clearDailyAttempts(chatId, userId, normalized);
+    return true;
+}
+
+async function unlockMemberCheckin(chatId, userId) {
+    const now = Math.floor(Date.now() / 1000);
+    await ensureMemberRow(chatId, userId);
+    await dbRun(
+        'UPDATE checkin_members SET lockedUntilDate = NULL, updatedAt = ? WHERE chatId = ? AND userId = ?',
+        [now, chatId, userId]
+    );
+    await dbRun('UPDATE checkin_attempts SET locked = 0 WHERE chatId = ? AND userId = ?', [chatId, userId]);
+}
+
+async function markMemberLocked(chatId, userId, checkinDate) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        return;
+    }
+
+    await ensureMemberRow(chatId, userId);
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        'UPDATE checkin_members SET lockedUntilDate = ?, updatedAt = ? WHERE chatId = ? AND userId = ?',
+        [normalized, now, chatId, userId]
+    );
+}
+
+async function getLockedMembers(chatId, checkinDate) {
+    const normalized = normalizeDateString(checkinDate);
+    if (!normalized) {
+        return [];
+    }
+
+    const rows = await dbAll(
+        `SELECT attempts.userId, attempts.attempts
+         FROM checkin_attempts attempts
+         WHERE attempts.chatId = ? AND attempts.checkinDate = ? AND attempts.locked = 1`,
+        [chatId, normalized]
+    );
+
+    return rows || [];
+}
 
 // Hàm khởi tạo database
 async function init() {
@@ -92,6 +650,73 @@ async function init() {
             PRIMARY KEY (groupChatId, userId)
         );
     `);
+
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS checkin_groups (
+            chatId TEXT PRIMARY KEY,
+            checkinTime TEXT NOT NULL DEFAULT '08:00',
+            timezone TEXT NOT NULL DEFAULT 'UTC',
+            autoMessageEnabled INTEGER NOT NULL DEFAULT 1,
+            dailyPoints INTEGER NOT NULL DEFAULT 10,
+            summaryWindow INTEGER NOT NULL DEFAULT 7,
+            lastAutoMessageDate TEXT,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL
+        );
+    `);
+
+    await dbRun(`
+        UPDATE checkin_groups
+        SET timezone = 'UTC'
+        WHERE timezone IS NULL OR timezone = 'Asia/Ho_Chi_Minh'
+    `);
+
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS checkin_members (
+            chatId TEXT NOT NULL,
+            userId TEXT NOT NULL,
+            streak INTEGER NOT NULL DEFAULT 0,
+            longestStreak INTEGER NOT NULL DEFAULT 0,
+            totalCheckins INTEGER NOT NULL DEFAULT 0,
+            totalPoints INTEGER NOT NULL DEFAULT 0,
+            lastCheckinDate TEXT,
+            lockedUntilDate TEXT,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            PRIMARY KEY (chatId, userId)
+        );
+    `);
+
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS checkin_records (
+            id TEXT PRIMARY KEY,
+            chatId TEXT NOT NULL,
+            userId TEXT NOT NULL,
+            checkinDate TEXT NOT NULL,
+            walletAddress TEXT,
+            emotion TEXT,
+            goal TEXT,
+            pointsAwarded INTEGER NOT NULL DEFAULT 0,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL
+        );
+    `);
+
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS checkin_attempts (
+            chatId TEXT NOT NULL,
+            userId TEXT NOT NULL,
+            checkinDate TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            locked INTEGER NOT NULL DEFAULT 0,
+            updatedAt INTEGER NOT NULL,
+            PRIMARY KEY (chatId, userId, checkinDate)
+        );
+    `);
+
+    await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_records_chat_date ON checkin_records (chatId, checkinDate);`);
+    await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_records_user ON checkin_records (chatId, userId, checkinDate);`);
+    await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_attempts_locked ON checkin_attempts (chatId, checkinDate, locked);`);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -364,6 +989,23 @@ async function updateGroupSubscriptionTopic(chatId, messageThreadId) {
 
 module.exports = {
     init,
+    getCheckinGroup,
+    listCheckinGroups,
+    updateCheckinGroup,
+    updateAutoMessageDate,
+    incrementCheckinAttempt,
+    clearDailyAttempts,
+    getCheckinAttempt,
+    getCheckinRecord,
+    completeCheckin,
+    updateCheckinFeedback,
+    getCheckinsForDate,
+    getCheckinMemberSummary,
+    getTopCheckins,
+    removeCheckinRecord,
+    unlockMemberCheckin,
+    markMemberLocked,
+    getLockedMembers,
     addWalletToUser,
     removeWalletFromUser,
     removeAllWalletsFromUser,

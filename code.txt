@@ -1,10 +1,12 @@
 ssh root@103.75.183.59
-100700
+0908
 scp .\package.json root@103.75.183.59:/root/banmaorps_bot/
 scp .\i18n.js root@103.75.183.59:/root/banmaorps_bot/
 scp .\index.js root@103.75.183.59:/root/banmaorps_bot/
 scp -r .\locales root@103.75.183.59:/root/banmaorps_bot/
 scp .\database.js root@103.75.183.59:/root/banmaorps_bot/
+scp .\supabase-pg-lite.js root@103.75.183.59:/root/banmaorps_bot/
+
 scp .\.env root@103.75.183.59:/root/banmaorps_bot/
 
 pm2 restart banmaorps_bot
