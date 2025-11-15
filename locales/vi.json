@@ -181,6 +181,7 @@
   "checkin_goal_button_custom": "✍️ Nhập mục tiêu riêng",
   "checkin_goal_button_later": "⏭️ Để sau",
   "checkin_dm_intro": "🌞 Xin chào! Hãy trả lời câu hỏi nhỏ này để hoàn tất điểm danh.",
+  "checkin_math_question": "🧠 Câu hỏi xác minh: {expression} = ?",
   "checkin_dm_choose_option": "Chọn đáp án đúng bằng các nút bên dưới:",
   "checkin_dm_retry_intro": "🔁 Hãy thử lại với một câu hỏi khác!",
   "checkin_error_locked": "❌ Bạn đã hết lượt thử hôm nay. Liên hệ quản trị viên để được hỗ trợ.",

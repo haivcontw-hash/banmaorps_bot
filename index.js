@@ -329,7 +329,8 @@ function formatTimeForTimezone(timezone = CHECKIN_DEFAULT_TIMEZONE, date = new D
     }
 }
 
-function generateMathChallenge() {
+function generateMathChallenge(lang = 'en') {
+    const resolvedLang = lang || 'en';
     const operations = ['+', '-', '×', '÷'];
     const op = operations[Math.floor(Math.random() * operations.length)];
     let a = Math.floor(Math.random() * 12) + 1;
@@ -380,7 +381,7 @@ function generateMathChallenge() {
     }
 
     const correctIndex = optionArray.findIndex((value) => value === answer);
-    const questionText = `🧠 Câu hỏi xác minh: ${expression} = ?`;
+    const questionText = t(resolvedLang, 'checkin_math_question', { expression });
 
     return {
         question: questionText,
@@ -526,7 +527,7 @@ async function initiateCheckinChallenge(chatId, user, { replyMessage = null } = 
         }
     }
 
-    const challenge = generateMathChallenge();
+    const challenge = generateMathChallenge(userLang);
     const token = createShortToken('chk');
     pendingCheckinChallenges.set(token, {
         chatId: chatId.toString(),
@@ -693,7 +694,7 @@ async function handleCheckinAnswerCallback(query, token, answerIndexRaw) {
         // ignore edit errors
     }
 
-    const newChallenge = generateMathChallenge();
+    const newChallenge = generateMathChallenge(lang);
     challenge.correctIndex = newChallenge.correctIndex;
     const inline_keyboard = newChallenge.options.map((option) => ([{
         text: option.text,

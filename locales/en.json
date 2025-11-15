@@ -181,6 +181,7 @@
   "checkin_goal_button_custom": "✍️ Enter a custom goal",
   "checkin_goal_button_later": "⏭️ Later",
   "checkin_dm_intro": "🌞 Hi! Answer this quick question to complete your check-in.",
+  "checkin_math_question": "🧠 Verification question: {expression} = ?",
   "checkin_dm_choose_option": "Pick the correct answer using the buttons below:",
   "checkin_dm_retry_intro": "🔁 Let's try a different question!",
   "checkin_error_locked": "❌ You've used all attempts today. Please contact an admin for help.",
