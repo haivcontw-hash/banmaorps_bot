@@ -2,6 +2,13 @@ const sqlite3 = require('sqlite3').verbose();
 const https = require('https');
 const { normalizeLanguageCode } = require('./i18n.js');
 
+let supabaseCreateClient = null;
+try {
+    ({ createClient: supabaseCreateClient } = require('@supabase/supabase-js'));
+} catch (error) {
+    supabaseCreateClient = null;
+}
+
 function resolveSupabaseConnectionString() {
     const candidates = [
         'SUPABASE_CONNECTION_STRING',
@@ -150,6 +157,63 @@ function resolveSupabaseRestUrl(connectionString) {
     }
 }
 
+function normaliseSupabaseProjectUrl(raw) {
+    try {
+        const parsed = new URL(raw);
+        parsed.search = '';
+        parsed.hash = '';
+
+        const cleanPath = parsed.pathname.replace(/\/rest\/v1\/?$/i, '/').replace(/\/+$/, '');
+        parsed.pathname = cleanPath ? `${cleanPath}/` : '/';
+
+        return parsed.toString().replace(/\/+$/, '');
+    } catch (error) {
+        return null;
+    }
+}
+
+function resolveSupabaseProjectUrl(connectionString) {
+    const candidates = [
+        'SUPABASE_PROJECT_URL',
+        'SUPABASE_URL',
+        'SUPABASE_API_URL'
+    ];
+
+    for (const key of candidates) {
+        const value = process.env[key];
+        if (typeof value !== 'string') {
+            continue;
+        }
+
+        const trimmed = value.trim();
+        if (!trimmed || !/^https?:\/\//i.test(trimmed)) {
+            continue;
+        }
+
+        const normalised = normaliseSupabaseProjectUrl(trimmed);
+        if (normalised) {
+            return normalised;
+        }
+    }
+
+    if (!connectionString) {
+        return null;
+    }
+
+    try {
+        const parsed = new URL(connectionString);
+        const host = parsed.hostname;
+        if (!host) {
+            return null;
+        }
+
+        const apiHost = host.replace(/^db\./i, '');
+        return normaliseSupabaseProjectUrl(`https://${apiHost}`);
+    } catch (error) {
+        return null;
+    }
+}
+
 function createSupabaseRestClient(baseUrl, apiKey) {
     const base = new URL(baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
 
@@ -258,8 +322,10 @@ const SUPABASE_CONNECTION_STRING = resolveSupabaseConnectionString();
 const SUPABASE_POOL_MAX = Number(process.env.SUPABASE_POOL_MAX || 5);
 const SUPABASE_SERVICE_ROLE_KEY = resolveSupabaseServiceRoleKey();
 const SUPABASE_REST_URL = resolveSupabaseRestUrl(SUPABASE_CONNECTION_STRING);
+const SUPABASE_PROJECT_URL = resolveSupabaseProjectUrl(SUPABASE_CONNECTION_STRING);
 
 let supabasePool = null;
+let supabaseClient = null;
 let supabaseRestClient = null;
 let supabaseSchemaEnsured = false;
 
@@ -293,6 +359,28 @@ if (SUPABASE_CONNECTION_STRING) {
     }
 } else {
     console.log('[Supabase] Không tìm thấy chuỗi kết nối, bỏ qua đồng bộ Supabase.');
+}
+
+if (SUPABASE_PROJECT_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    if (supabaseCreateClient) {
+        try {
+            supabaseClient = supabaseCreateClient(SUPABASE_PROJECT_URL, SUPABASE_SERVICE_ROLE_KEY, {
+                auth: {
+                    persistSession: false,
+                    autoRefreshToken: false
+                }
+            });
+            console.log(`[Supabase] Supabase JS client đã khởi tạo tại ${SUPABASE_PROJECT_URL}.`);
+        } catch (error) {
+            console.error('[Supabase] Không thể khởi tạo Supabase JS client:', error.message);
+        }
+    } else {
+        console.warn('[Supabase] Thiếu module "@supabase/supabase-js". Vui lòng chạy npm install @supabase/supabase-js.');
+    }
+} else if (SUPABASE_PROJECT_URL && !SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn('[Supabase] Thiếu SUPABASE_SERVICE_ROLE_KEY nên không thể khởi tạo Supabase JS client.');
+} else if (!SUPABASE_PROJECT_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn('[Supabase] Thiếu SUPABASE_URL nên không thể khởi tạo Supabase JS client.');
 }
 
 if (SUPABASE_REST_URL && SUPABASE_SERVICE_ROLE_KEY) {
@@ -846,6 +934,31 @@ async function rebuildLocalDailyCheckinSnapshot(groupChatId, userId) {
 }
 
 async function fetchSupabaseDailyCheckinState(groupChatId, userId) {
+    if (supabaseClient) {
+        try {
+            const { data, error } = await supabaseClient
+                .from('daily_checkins')
+                .select('streak,last_checkin_date,last_checkin_at,total_checkins,updated_at')
+                .eq('group_chat_id', groupChatId)
+                .eq('user_id', userId)
+                .maybeSingle();
+
+            if (error) {
+                console.error('[Supabase] Không thể đọc daily_checkins (JS client):', error.message);
+            } else if (data) {
+                return {
+                    streak: Number(data.streak) || 0,
+                    lastCheckinDate: data.last_checkin_date || null,
+                    lastCheckinAt: data.last_checkin_at ? Number(data.last_checkin_at) : null,
+                    totalCheckins: Number(data.total_checkins) || 0,
+                    updatedAt: data.updated_at ? Number(data.updated_at) : null
+                };
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS daily_checkins:', error.message);
+        }
+    }
+
     if (supabasePool) {
         try {
             const result = await supabasePool.query(
@@ -911,6 +1024,32 @@ async function persistSupabaseDailyCheckin(groupChatId, userId, state, updatedAt
 
     const normalizedUpdatedAt = Number(updatedAt) || Math.floor(Date.now() / 1000);
 
+    if (supabaseClient) {
+        try {
+            const payload = {
+                group_chat_id: groupChatId,
+                user_id: userId,
+                streak: state.streak || 0,
+                last_checkin_date: state.lastCheckinDate || null,
+                last_checkin_at: state.lastCheckinAt ? Number(state.lastCheckinAt) : null,
+                total_checkins: state.totalCheckins || 0,
+                updated_at: normalizedUpdatedAt
+            };
+
+            const { error } = await supabaseClient
+                .from('daily_checkins')
+                .upsert(payload, { onConflict: 'group_chat_id,user_id' });
+
+            if (!error) {
+                return;
+            }
+
+            console.error('[Supabase] Không thể ghi daily_checkins (JS client):', error.message);
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi ghi daily_checkins:', error.message);
+        }
+    }
+
     if (supabasePool) {
         try {
             await supabasePool.query(
@@ -969,6 +1108,24 @@ async function persistSupabaseDailyCheckin(groupChatId, userId, state, updatedAt
 }
 
 async function deleteSupabaseDailyCheckin(groupChatId, userId) {
+    if (supabaseClient) {
+        try {
+            const { error } = await supabaseClient
+                .from('daily_checkins')
+                .delete()
+                .eq('group_chat_id', groupChatId)
+                .eq('user_id', userId);
+
+            if (!error) {
+                return;
+            }
+
+            console.error('[Supabase] Không thể xóa daily_checkins (JS client):', error.message);
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi xóa daily_checkins:', error.message);
+        }
+    }
+
     if (supabasePool) {
         try {
             await supabasePool.query(
@@ -998,6 +1155,25 @@ async function deleteSupabaseDailyCheckin(groupChatId, userId) {
 }
 
 async function deleteSupabaseDailyCheckinLog(groupChatId, userId, checkinDate) {
+    if (supabaseClient) {
+        try {
+            const { error } = await supabaseClient
+                .from('daily_checkin_logs')
+                .delete()
+                .eq('group_chat_id', groupChatId)
+                .eq('user_id', userId)
+                .eq('checkin_date', checkinDate);
+
+            if (!error) {
+                return;
+            }
+
+            console.error('[Supabase] Không thể xóa daily_checkin_logs (JS client):', error.message);
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi xóa daily_checkin_logs:', error.message);
+        }
+    }
+
     if (supabasePool) {
         try {
             await supabasePool.query(
@@ -1028,6 +1204,30 @@ async function deleteSupabaseDailyCheckinLog(groupChatId, userId, checkinDate) {
 }
 
 async function insertSupabaseDailyCheckinLog(groupChatId, userId, checkinDate, checkinAt, streak) {
+    if (supabaseClient) {
+        try {
+            const { error } = await supabaseClient
+                .from('daily_checkin_logs')
+                .insert([
+                    {
+                        group_chat_id: groupChatId,
+                        user_id: userId,
+                        checkin_date: checkinDate,
+                        checkin_at: Number(checkinAt) || 0,
+                        streak: streak || 0
+                    }
+                ]);
+
+            if (!error) {
+                return;
+            }
+
+            console.error('[Supabase] Không thể ghi daily_checkin_logs (JS client):', error.message);
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi ghi daily_checkin_logs:', error.message);
+        }
+    }
+
     if (supabasePool) {
         try {
             await supabasePool.query(
