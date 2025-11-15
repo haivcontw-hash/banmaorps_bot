@@ -4060,7 +4060,7 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: "Markdown" });
     });
 
-    bot.onText(/\/checkin/, async (msg) => {
+    bot.onText(/^\/checkin(?:@[\w_]+)?$/, async (msg) => {
         const chatType = msg.chat?.type;
         const chatId = msg.chat.id.toString();
         const userLang = await resolveNotificationLanguage(msg.from.id.toString(), msg.from.language_code);
@@ -4082,7 +4082,7 @@ function startTelegramBot() {
         }
     });
 
-    bot.onText(/\/topcheckin(?:\s+(streak|total|points|longest))?/, async (msg, match) => {
+    bot.onText(/^\/topcheckin(?:@[\w_]+)?(?:\s+(streak|total|points|longest))?$/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat?.type;
         const mode = (match && match[1]) ? match[1] : 'streak';
@@ -4122,6 +4122,53 @@ function startTelegramBot() {
         } catch (error) {
             console.error(`[OkxChains] Failed to load supported chains: ${error.message}`);
             sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+        }
+    });
+
+    bot.onText(/^\/checkinadmin(?:@[\w_]+)?$/, async (msg) => {
+        const chatId = msg.chat.id;
+        const userId = msg.from?.id;
+        const chatType = msg.chat.type;
+        const isGroupChat = ['group', 'supergroup'].includes(chatType);
+        const replyLang = isGroupChat
+            ? await resolveGroupLanguage(chatId, defaultLang)
+            : await resolveNotificationLanguage(userId);
+
+        if (!isGroupChat) {
+            await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_group_only'), {
+                reply_to_message_id: msg.message_id,
+                allow_sending_without_reply: true
+            });
+            return;
+        }
+
+        const isAdmin = await isGroupAdmin(chatId, userId);
+        if (!isAdmin) {
+            await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_menu_no_permission'), {
+                reply_to_message_id: msg.message_id,
+                allow_sending_without_reply: true
+            });
+            return;
+        }
+
+        try {
+            await sendAdminMenu(userId, chatId);
+            await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_dm_notice'), {
+                reply_to_message_id: msg.message_id,
+                allow_sending_without_reply: true
+            });
+        } catch (error) {
+            console.error(`[Checkin] Failed to send admin menu for ${userId} in ${chatId}: ${error.message}`);
+
+            const statusCode = error?.response?.statusCode;
+            const errorKey = statusCode === 403
+                ? 'checkin_admin_command_dm_error'
+                : 'checkin_admin_command_error';
+
+            await bot.sendMessage(chatId, t(replyLang, errorKey), {
+                reply_to_message_id: msg.message_id,
+                allow_sending_without_reply: true
+            });
         }
     });
 
