@@ -3261,6 +3261,53 @@ function startTelegramBot() {
         }
     });
 
+    bot.onText(/\/cancelcheckin(?:@[\w_]+)?$/, async (msg) => {
+        const chatType = msg.chat?.type;
+        const lang = await getLang(msg);
+
+        if (chatType !== 'group' && chatType !== 'supergroup') {
+            sendReply(msg, t(lang, 'checkin_group_only'));
+            return;
+        }
+
+        if (!msg.from) {
+            return;
+        }
+
+        const chatId = msg.chat.id.toString();
+        const userId = msg.from.id.toString();
+        const todayKey = getUtcDateKey(new Date());
+
+        try {
+            const result = await db.cancelDailyCheckin(chatId, userId, todayKey);
+
+            if (!result?.cancelled) {
+                if (result?.reason === 'not_found') {
+                    sendReply(msg, t(lang, 'checkin_cancel_not_found'));
+                } else {
+                    sendReply(msg, t(lang, 'checkin_cancel_error'));
+                }
+                return;
+            }
+
+            const responses = [
+                t(lang, 'checkin_cancel_success', {
+                    streak: result.streak || 0,
+                    total: result.totalCheckins || 0
+                })
+            ];
+
+            if (result.rewardRevoked) {
+                responses.push(t(lang, 'checkin_cancel_reward_revoked'));
+            }
+
+            sendReply(msg, responses.join('\n\n'));
+        } catch (error) {
+            console.error(`[CheckIn] Không thể hủy check-in cho ${chatId}:${userId}: ${error.message}`);
+            sendReply(msg, t(lang, 'checkin_cancel_error'));
+        }
+    });
+
     bot.onText(/\/okxchains/, async (msg) => {
         const lang = await getLang(msg);
         try {
@@ -3674,6 +3721,7 @@ function startTelegramBot() {
             t(lang, 'help_command_mywallet'),
             t(lang, 'help_command_stats'),
             t(lang, 'help_command_checkin'),
+            t(lang, 'help_command_cancelcheckin'),
             t(lang, 'help_command_banmaoprice'),
             t(lang, 'help_command_okxchains'),
             t(lang, 'help_command_okx402status'),

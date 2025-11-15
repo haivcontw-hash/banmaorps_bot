@@ -564,6 +564,43 @@ async function insertLocalDailyCheckinLog(groupChatId, userId, checkinDate, chec
     );
 }
 
+async function removeLocalDailyCheckinLog(groupChatId, userId, checkinDate) {
+    const result = await dbRun(
+        'DELETE FROM daily_checkin_logs WHERE groupChatId = ? AND userId = ? AND checkinDate = ?',
+        [groupChatId, userId, checkinDate]
+    );
+
+    return result?.changes || 0;
+}
+
+async function rebuildLocalDailyCheckinSnapshot(groupChatId, userId) {
+    const latest = await dbGet(
+        'SELECT checkinDate, checkinAt, streak FROM daily_checkin_logs WHERE groupChatId = ? AND userId = ? ORDER BY checkinAt DESC LIMIT 1',
+        [groupChatId, userId]
+    );
+
+    if (!latest) {
+        await dbRun('DELETE FROM daily_checkins WHERE groupChatId = ? AND userId = ?', [groupChatId, userId]);
+        return null;
+    }
+
+    const totalRow = await dbGet(
+        'SELECT COUNT(1) AS total FROM daily_checkin_logs WHERE groupChatId = ? AND userId = ?',
+        [groupChatId, userId]
+    );
+
+    const normalizedTotal = Number(totalRow?.total) || 0;
+    const normalizedState = {
+        streak: Number(latest.streak) || 0,
+        lastCheckinDate: latest.checkinDate || null,
+        lastCheckinAt: latest.checkinAt ? Number(latest.checkinAt) : null,
+        totalCheckins: normalizedTotal
+    };
+
+    await persistLocalDailyCheckinSnapshot(groupChatId, userId, normalizedState, Math.floor(Date.now() / 1000));
+    return normalizedState;
+}
+
 async function fetchSupabaseDailyCheckinState(groupChatId, userId) {
     if (!supabasePool) {
         return null;
@@ -622,6 +659,36 @@ async function persistSupabaseDailyCheckin(groupChatId, userId, state, updatedAt
         );
     } catch (error) {
         console.error('[Supabase] Không thể ghi daily_checkins:', error.message);
+    }
+}
+
+async function deleteSupabaseDailyCheckin(groupChatId, userId) {
+    if (!supabasePool) {
+        return;
+    }
+
+    try {
+        await supabasePool.query(
+            'delete from public.daily_checkins where group_chat_id = $1 and user_id = $2',
+            [groupChatId, userId]
+        );
+    } catch (error) {
+        console.error('[Supabase] Không thể xóa daily_checkins:', error.message);
+    }
+}
+
+async function deleteSupabaseDailyCheckinLog(groupChatId, userId, checkinDate) {
+    if (!supabasePool) {
+        return;
+    }
+
+    try {
+        await supabasePool.query(
+            'delete from public.daily_checkin_logs where group_chat_id = $1 and user_id = $2 and checkin_date = $3',
+            [groupChatId, userId, checkinDate]
+        );
+    } catch (error) {
+        console.error('[Supabase] Không thể xóa daily_checkin_logs:', error.message);
     }
 }
 
@@ -719,6 +786,41 @@ async function recordDailyCheckin(groupChatId, userId, currentDateKey, currentTi
     };
 }
 
+async function cancelDailyCheckin(groupChatId, userId, targetDateKey) {
+    const existing = await getDailyCheckinState(groupChatId, userId);
+
+    if (!existing || existing.lastCheckinDate !== targetDateKey) {
+        return { cancelled: false, reason: 'not_found' };
+    }
+
+    try {
+        const deleted = await removeLocalDailyCheckinLog(groupChatId, userId, targetDateKey);
+        if (!deleted) {
+            return { cancelled: false, reason: 'not_found' };
+        }
+
+        const newState = await rebuildLocalDailyCheckinSnapshot(groupChatId, userId);
+
+        await deleteSupabaseDailyCheckinLog(groupChatId, userId, targetDateKey);
+
+        if (newState) {
+            await persistSupabaseDailyCheckin(groupChatId, userId, newState, Math.floor(Date.now() / 1000));
+        } else {
+            await deleteSupabaseDailyCheckin(groupChatId, userId);
+        }
+
+        return {
+            cancelled: true,
+            rewardRevoked: existing.streak > 0 && existing.streak % 7 === 0,
+            streak: newState ? newState.streak : 0,
+            totalCheckins: newState ? newState.totalCheckins : 0
+        };
+    } catch (error) {
+        console.error('[DB] Không thể hủy daily_checkin:', error.message);
+        return { cancelled: false, reason: 'error' };
+    }
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -746,5 +848,6 @@ module.exports = {
     updateGroupSubscriptionLanguage,
     updateGroupSubscriptionTopic,
     getDailyCheckinState,
-    recordDailyCheckin
+    recordDailyCheckin,
+    cancelDailyCheckin
 };
