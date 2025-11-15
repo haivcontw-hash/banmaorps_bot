@@ -28,7 +28,7 @@ function parsePostgresConfigFromUrl(connectionString) {
         const sslMode = parsed.searchParams.get('sslmode');
         const ssl = typeof sslMode === 'string' && sslMode.toLowerCase() === 'disable'
             ? false
-            : { rejectUnauthorized: false };
+            : { rejectUnauthorized: false, require: true };
 
         const host = parsed.hostname || null;
         const port = parsed.port ? Number(parsed.port) : 5432;
@@ -54,6 +54,59 @@ function parsePostgresConfigFromUrl(connectionString) {
     }
 }
 
+function buildConnectionStringFromParts() {
+    const hostCandidates = ['SUPABASE_HOST', 'POSTGRES_HOST', 'PGHOST'];
+    const userCandidates = ['SUPABASE_USER', 'POSTGRES_USER', 'PGUSER'];
+    const passwordCandidates = ['SUPABASE_PASSWORD', 'POSTGRES_PASSWORD', 'PGPASSWORD'];
+    const databaseCandidates = ['SUPABASE_DATABASE', 'POSTGRES_DATABASE', 'PGDATABASE'];
+    const portCandidates = ['SUPABASE_PORT', 'POSTGRES_PORT', 'PGPORT'];
+
+    const host = hostCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string' && value.trim());
+    const user = userCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string' && value.trim());
+
+    if (!host || !user) {
+        return null;
+    }
+
+    const password = passwordCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string');
+    const database = databaseCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string' && value.trim());
+    const portRaw = portCandidates
+        .map((key) => process.env[key])
+        .find((value) => typeof value === 'string' && value.trim());
+
+    const port = portRaw ? Number(portRaw) : 5432;
+    const encodedUser = encodeURIComponent(user.trim());
+    const encodedPassword = typeof password === 'string'
+        ? `:${encodeURIComponent(password)}`
+        : '';
+    const encodedHost = host.trim();
+    const encodedPort = Number.isFinite(port) && port > 0 ? `:${port}` : '';
+    const encodedDatabase = database ? `/${encodeURIComponent(database.trim())}` : '';
+
+    const url = `postgresql://${encodedUser}${encodedPassword}@${encodedHost}${encodedPort}${encodedDatabase}`;
+
+    const sslMode = process.env.SUPABASE_SSLMODE || process.env.POSTGRES_SSLMODE || process.env.PGSSLMODE;
+    const hasSupabaseHost = /\.supabase\.co$/i.test(encodedHost);
+
+    if (sslMode) {
+        return `${url}?sslmode=${encodeURIComponent(sslMode)}`;
+    }
+
+    if (hasSupabaseHost) {
+        return `${url}?sslmode=require`;
+    }
+
+    return url;
+}
+
 function resolveSupabaseConnectionString() {
     const candidates = [
         'SUPABASE_CONNECTION_STRING',
@@ -77,6 +130,14 @@ function resolveSupabaseConnectionString() {
         }
 
         const sanitised = sanitisePostgresConnectionString(trimmed);
+        if (sanitised) {
+            return sanitised;
+        }
+    }
+
+    const built = buildConnectionStringFromParts();
+    if (built) {
+        const sanitised = sanitisePostgresConnectionString(built);
         if (sanitised) {
             return sanitised;
         }
@@ -398,7 +459,7 @@ if (SUPABASE_CONNECTION_STRING) {
                 throw new Error('Chuỗi kết nối Supabase không hợp lệ');
             }
 
-            const { host, port, user, password, database } = poolConfig;
+            const { host, port, user, password, database, connectionString } = poolConfig;
 
             const baseConfig = {};
 
@@ -420,6 +481,7 @@ if (SUPABASE_CONNECTION_STRING) {
 
             supabasePool = new Pool({
                 ...baseConfig,
+                connectionString,
                 ssl: poolConfig.ssl,
                 max: Number.isFinite(SUPABASE_POOL_MAX) ? SUPABASE_POOL_MAX : 5,
                 idleTimeoutMillis: 30_000
