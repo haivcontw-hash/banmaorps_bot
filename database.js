@@ -398,25 +398,24 @@ if (SUPABASE_CONNECTION_STRING) {
                 throw new Error('Chuỗi kết nối Supabase không hợp lệ');
             }
 
+            const { host, port, user, password, database } = poolConfig;
+
             const baseConfig = {};
 
-            if (poolConfig.connectionString) {
-                baseConfig.connectionString = poolConfig.connectionString;
+            if (host) {
+                baseConfig.host = host;
             }
-            if (poolConfig.host) {
-                baseConfig.host = poolConfig.host;
+            if (port) {
+                baseConfig.port = port;
             }
-            if (poolConfig.port) {
-                baseConfig.port = poolConfig.port;
+            if (user) {
+                baseConfig.user = user;
             }
-            if (poolConfig.user) {
-                baseConfig.user = poolConfig.user;
+            if (password !== null && password !== undefined) {
+                baseConfig.password = password;
             }
-            if (poolConfig.password !== null && poolConfig.password !== undefined) {
-                baseConfig.password = poolConfig.password;
-            }
-            if (poolConfig.database) {
-                baseConfig.database = poolConfig.database;
+            if (database) {
+                baseConfig.database = database;
             }
 
             supabasePool = new Pool({
@@ -433,7 +432,8 @@ if (SUPABASE_CONNECTION_STRING) {
             supabasePool
                 .query('select 1')
                 .then(() => {
-                    console.log('[Supabase] Đã kết nối tới PostgreSQL.');
+                    const targetHost = host ? `${host}:${port || 5432}` : 'Supabase';
+                    console.log(`[Supabase] Đã kết nối tới PostgreSQL (${targetHost}).`);
                 })
                 .catch((err) => {
                     console.error('[Supabase] Không thể kiểm tra kết nối:', err.message);
@@ -447,7 +447,9 @@ if (SUPABASE_CONNECTION_STRING) {
             supabasePool
                 .query('select 1')
                 .then(() => {
-                    console.log('[Supabase] Đã kết nối tới PostgreSQL (trình điều khiển tích hợp).');
+                    const poolConfig = parsePostgresConfigFromUrl(SUPABASE_CONNECTION_STRING);
+                    const targetHost = poolConfig?.host ? `${poolConfig.host}:${poolConfig.port || 5432}` : 'Supabase';
+                    console.log(`[Supabase] Đã kết nối tới PostgreSQL (trình điều khiển tích hợp, ${targetHost}).`);
                 })
                 .catch((err) => {
                     console.error('[Supabase] Không thể kiểm tra kết nối (trình điều khiển tích hợp):', err.message);
@@ -459,7 +461,7 @@ if (SUPABASE_CONNECTION_STRING) {
         console.warn('[Supabase] Module "pg" chưa được cài đặt và không thể tải trình điều khiển tích hợp. Vui lòng chạy npm install trước khi đồng bộ.');
     }
 } else {
-    console.log('[Supabase] Không tìm thấy chuỗi kết nối, bỏ qua đồng bộ Supabase.');
+    console.log('[Supabase] Không tìm thấy chuỗi kết nối, bỏ qua đồng bộ Supabase. (Thiết lập SUPABASE_CONNECTION_STRING để kích hoạt)');
 }
 
 if (SUPABASE_PROJECT_URL && SUPABASE_SERVICE_ROLE_KEY) {
