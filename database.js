@@ -1047,6 +1047,14 @@ async function persistSupabaseDailyCheckin(groupChatId, userId, state, updatedAt
 
     const normalizedUpdatedAt = Number(updatedAt) || Math.floor(Date.now() / 1000);
 
+    if (!supabaseSchemaEnsured) {
+        try {
+            await ensureSupabaseDailyCheckinSchema();
+        } catch (error) {
+            console.error('[Supabase] Không thể đảm bảo cấu trúc trước khi ghi daily_checkins:', error.message);
+        }
+    }
+
     if (supabaseClient) {
         try {
             const payload = {
@@ -1133,6 +1141,14 @@ async function persistSupabaseDailyCheckin(groupChatId, userId, state, updatedAt
 }
 
 async function deleteSupabaseDailyCheckin(groupChatId, userId) {
+    if (!supabaseSchemaEnsured) {
+        try {
+            await ensureSupabaseDailyCheckinSchema();
+        } catch (error) {
+            console.error('[Supabase] Không thể đảm bảo cấu trúc trước khi xóa daily_checkins:', error.message);
+        }
+    }
+
     if (supabaseClient) {
         try {
             const { error } = await supabaseClient
@@ -1182,6 +1198,14 @@ async function deleteSupabaseDailyCheckin(groupChatId, userId) {
 }
 
 async function deleteSupabaseDailyCheckinLog(groupChatId, userId, checkinDate) {
+    if (!supabaseSchemaEnsured) {
+        try {
+            await ensureSupabaseDailyCheckinSchema();
+        } catch (error) {
+            console.error('[Supabase] Không thể đảm bảo cấu trúc trước khi xóa daily_checkin_logs:', error.message);
+        }
+    }
+
     if (supabaseClient) {
         try {
             const { error } = await supabaseClient
@@ -1233,6 +1257,14 @@ async function deleteSupabaseDailyCheckinLog(groupChatId, userId, checkinDate) {
 }
 
 async function insertSupabaseDailyCheckinLog(groupChatId, userId, checkinDate, checkinAt, streak) {
+    if (!supabaseSchemaEnsured) {
+        try {
+            await ensureSupabaseDailyCheckinSchema();
+        } catch (error) {
+            console.error('[Supabase] Không thể đảm bảo cấu trúc trước khi ghi daily_checkin_logs:', error.message);
+        }
+    }
+
     if (supabaseClient) {
         try {
             const { error } = await supabaseClient
@@ -1409,6 +1441,114 @@ async function cancelDailyCheckin(groupChatId, userId, targetDateKey) {
     }
 }
 
+function normaliseCheckinLogRow(row) {
+    if (!row) {
+        return null;
+    }
+
+    const rawUserId = row.user_id ?? row.userId ?? null;
+    if (!rawUserId) {
+        return null;
+    }
+
+    const rawTimestamp = row.checkin_at ?? row.checkinAt ?? null;
+
+    return {
+        userId: String(rawUserId),
+        checkinAt: rawTimestamp !== null && rawTimestamp !== undefined ? Number(rawTimestamp) : null,
+        streak: Number(row.streak) || 0
+    };
+}
+
+async function fetchSupabaseCheckinsForDate(groupChatId, dateKey, limit = 200) {
+    const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Number(limit))) : 200;
+
+    if (supabaseClient) {
+        try {
+            const { data, error } = await supabaseClient
+                .from('daily_checkin_logs')
+                .select('user_id,checkin_at,streak')
+                .eq('group_chat_id', groupChatId)
+                .eq('checkin_date', dateKey)
+                .order('checkin_at', { ascending: true })
+                .limit(normalizedLimit);
+
+            if (error) {
+                console.error('[Supabase] Không thể đọc check-in logs theo ngày (JS client):', error.message);
+            } else if (Array.isArray(data) && data.length > 0) {
+                return data
+                    .map((row) => normaliseCheckinLogRow(row))
+                    .filter(Boolean);
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi Supabase JS khi đọc check-in logs theo ngày:', error.message);
+        }
+    }
+
+    if (supabasePool) {
+        try {
+            const result = await supabasePool.query(
+                'select user_id, checkin_at, streak from public.daily_checkin_logs where group_chat_id = $1 and checkin_date = $2 order by checkin_at asc limit $3',
+                [groupChatId, dateKey, normalizedLimit]
+            );
+
+            if (result?.rows?.length) {
+                return result.rows
+                    .map((row) => normaliseCheckinLogRow(row))
+                    .filter(Boolean);
+            }
+        } catch (error) {
+            console.error('[Supabase] Không thể đọc check-in logs theo ngày:', error.message);
+        }
+    }
+
+    if (supabaseRestClient) {
+        try {
+            const query = new URLSearchParams();
+            query.set('group_chat_id', `eq.${groupChatId}`);
+            query.set('checkin_date', `eq.${dateKey}`);
+            query.set('select', 'user_id,checkin_at,streak');
+            query.set('order', 'checkin_at.asc');
+            query.set('limit', String(normalizedLimit));
+
+            const response = await supabaseRestClient.request('GET', 'daily_checkin_logs', { query });
+            if (!response.ok) {
+                console.error('[Supabase] Không thể đọc check-in logs theo ngày (REST):', response.error);
+            } else {
+                const rows = Array.isArray(response.data) ? response.data : [];
+                if (rows.length > 0) {
+                    return rows
+                        .map((row) => normaliseCheckinLogRow(row))
+                        .filter(Boolean);
+                }
+            }
+        } catch (error) {
+            console.error('[Supabase] Lỗi REST khi đọc check-in logs theo ngày:', error.message);
+        }
+    }
+
+    return null;
+}
+
+async function getDailyCheckinsForDate(groupChatId, dateKey, limit = 200) {
+    const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Number(limit))) : 200;
+
+    const remote = await fetchSupabaseCheckinsForDate(groupChatId, dateKey, normalizedLimit);
+    if (Array.isArray(remote) && remote.length > 0) {
+        return remote.slice(0, normalizedLimit);
+    }
+
+    const rows = await dbAll(
+        'SELECT userId, checkinAt, streak FROM daily_checkin_logs WHERE groupChatId = ? AND checkinDate = ? ORDER BY checkinAt ASC',
+        [groupChatId, dateKey]
+    );
+
+    return rows
+        .map((row) => normaliseCheckinLogRow(row))
+        .filter(Boolean)
+        .slice(0, normalizedLimit);
+}
+
 module.exports = {
     init,
     addWalletToUser,
@@ -1437,5 +1577,6 @@ module.exports = {
     updateGroupSubscriptionTopic,
     getDailyCheckinState,
     recordDailyCheckin,
-    cancelDailyCheckin
+    cancelDailyCheckin,
+    getDailyCheckinsForDate
 };

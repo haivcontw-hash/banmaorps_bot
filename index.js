@@ -212,6 +212,49 @@ function createMathChallenge() {
     };
 }
 
+function formatUtcTimeFromSeconds(seconds) {
+    if (!Number.isFinite(seconds)) {
+        return null;
+    }
+
+    const date = new Date(seconds * 1000);
+    const hours = String(date.getUTCHours()).padStart(2, '0');
+    const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+    return `${hours}:${minutes} UTC`;
+}
+
+async function resolveUserMention(chatId, userId) {
+    const numericId = Number(userId);
+
+    if (!Number.isFinite(numericId)) {
+        const fallback = escapeHtml(String(userId));
+        return {
+            html: `<code>${fallback}</code>`,
+            plain: String(userId)
+        };
+    }
+
+    try {
+        const member = await bot.getChatMember(chatId, numericId);
+        const user = member?.user;
+        if (user) {
+            const displayName = escapeHtml(user.first_name || user.last_name || user.username || String(userId));
+            return {
+                html: `<a href="tg://user?id=${user.id}">${displayName}</a>`,
+                plain: displayName
+            };
+        }
+    } catch (error) {
+        console.warn(`[CheckIns] Không thể lấy tên cho ${chatId}:${userId}: ${error.message}`);
+    }
+
+    const fallback = escapeHtml(String(userId));
+    return {
+        html: `<code>${fallback}</code>`,
+        plain: String(userId)
+    };
+}
+
 function parseNumericAnswer(raw) {
     if (typeof raw !== 'string') {
         return null;
@@ -3261,6 +3304,50 @@ function startTelegramBot() {
         }
     });
 
+    bot.onText(/\/checkins(?:@[\w_]+)?$/, async (msg) => {
+        const chatType = msg.chat?.type;
+        const lang = await getLang(msg);
+
+        if (chatType !== 'group' && chatType !== 'supergroup') {
+            sendReply(msg, t(lang, 'checkin_group_only'));
+            return;
+        }
+
+        const chatId = msg.chat.id.toString();
+        const todayKey = getUtcDateKey(new Date());
+
+        try {
+            const checkins = await db.getDailyCheckinsForDate(chatId, todayKey, 100);
+
+            if (!Array.isArray(checkins) || checkins.length === 0) {
+                sendReply(msg, t(lang, 'checkins_today_empty'));
+                return;
+            }
+
+            const limited = checkins.slice(0, 50);
+            const mentions = await Promise.all(limited.map((entry) => resolveUserMention(chatId, entry.userId)));
+
+            const lines = limited.map((entry, index) => {
+                const mention = mentions[index] || { html: `<code>${escapeHtml(entry.userId)}</code>` };
+                const time = formatUtcTimeFromSeconds(entry.checkinAt) || '—';
+                return t(lang, 'checkins_today_entry', {
+                    index: index + 1,
+                    name: mention.html,
+                    streak: entry.streak,
+                    time
+                });
+            });
+
+            const header = t(lang, 'checkins_today_title', { date: todayKey });
+            const message = [header, '', ...lines].join('\n');
+
+            sendReply(msg, message, buildThreadedOptions(msg, { parse_mode: 'HTML' }));
+        } catch (error) {
+            console.error(`[CheckIns] Không thể tải danh sách điểm danh cho ${chatId}: ${error.message}`);
+            sendReply(msg, t(lang, 'checkins_today_error'));
+        }
+    });
+
     bot.onText(/\/cancelcheckin(?:@[\w_]+)?$/, async (msg) => {
         const chatType = msg.chat?.type;
         const lang = await getLang(msg);
@@ -3721,6 +3808,7 @@ function startTelegramBot() {
             t(lang, 'help_command_mywallet'),
             t(lang, 'help_command_stats'),
             t(lang, 'help_command_checkin'),
+            t(lang, 'help_command_checkins'),
             t(lang, 'help_command_cancelcheckin'),
             t(lang, 'help_command_banmaoprice'),
             t(lang, 'help_command_okxchains'),
