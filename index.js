@@ -100,6 +100,27 @@ let banmaoDecimalsFetchedAt = 0;
 const tokenDecimalsCache = new Map();
 const okxTokenDirectoryCache = new Map();
 
+const CHECKIN_MESSAGE_TEXT = "🌞 Bắt đầu ngày mới! Điểm danh thôi các Banmao! Hãy nhấn nút 'Điểm Danh' hoặc dùng lệnh /checkin để xác nhận sự hiện diện và sẵn sàng cho hôm nay nhé!";
+const CHECKIN_MAX_ATTEMPTS = 3;
+const CHECKIN_SCHEDULER_INTERVAL = 45 * 1000;
+const CHECKIN_DEFAULT_TIME = '08:00';
+const CHECKIN_DEFAULT_TIMEZONE = 'Asia/Ho_Chi_Minh';
+const CHECKIN_EMOTIONS = ['🤩', '👍', '💪', '😴', '😊', '🔥'];
+const CHECKIN_GOAL_PRESETS = [
+    '📚 Học tập 1 giờ',
+    '💼 Hoàn thành nhiệm vụ chính',
+    '🏃 Tập thể dục',
+    '🧘 Nghỉ ngơi thư giãn',
+    '🤝 Hỗ trợ thành viên khác'
+];
+
+const pendingCheckinChallenges = new Map();
+const pendingEmotionPrompts = new Map();
+const pendingGoalInputs = new Map();
+const pendingSecretMessages = new Map();
+const checkinAdminStates = new Map();
+let checkinSchedulerTimer = null;
+
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -270,6 +291,913 @@ function buildUserMention(user) {
         text: `<a href="tg://user?id=${user.id}">${displayName}</a>`,
         parseMode: 'HTML'
     };
+}
+
+function formatDateForTimezone(timezone = CHECKIN_DEFAULT_TIMEZONE, date = new Date()) {
+    try {
+        const formatter = new Intl.DateTimeFormat('en-CA', {
+            timeZone: timezone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        });
+
+        return formatter.format(date);
+    } catch (error) {
+        console.warn(`[Checkin] Không thể format ngày cho timezone ${timezone}: ${error.message}`);
+        const year = date.getUTCFullYear();
+        const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(date.getUTCDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+}
+
+function formatTimeForTimezone(timezone = CHECKIN_DEFAULT_TIMEZONE, date = new Date()) {
+    try {
+        const formatter = new Intl.DateTimeFormat('en-GB', {
+            timeZone: timezone,
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        });
+
+        return formatter.format(date);
+    } catch (error) {
+        console.warn(`[Checkin] Không thể format giờ cho timezone ${timezone}: ${error.message}`);
+        const hours = String(date.getUTCHours()).padStart(2, '0');
+        const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+        return `${hours}:${minutes}`;
+    }
+}
+
+function generateMathChallenge() {
+    const operations = ['+', '-', '×', '÷'];
+    const op = operations[Math.floor(Math.random() * operations.length)];
+    let a = Math.floor(Math.random() * 12) + 1;
+    let b = Math.floor(Math.random() * 12) + 1;
+    let expression = '';
+    let answer = 0;
+
+    switch (op) {
+        case '+':
+            answer = a + b;
+            expression = `${a} + ${b}`;
+            break;
+        case '-':
+            if (b > a) {
+                [a, b] = [b, a];
+            }
+            answer = a - b;
+            expression = `${a} - ${b}`;
+            break;
+        case '×':
+            answer = a * b;
+            expression = `${a} × ${b}`;
+            break;
+        case '÷':
+            answer = a;
+            expression = `${a * b} ÷ ${b}`;
+            break;
+        default:
+            answer = a + b;
+            expression = `${a} + ${b}`;
+            break;
+    }
+
+    const options = new Set([answer]);
+    while (options.size < 4) {
+        const delta = Math.floor(Math.random() * 10) + 1;
+        const sign = Math.random() > 0.5 ? 1 : -1;
+        const candidate = answer + sign * delta;
+        if (candidate >= 0) {
+            options.add(candidate);
+        }
+    }
+
+    const optionArray = Array.from(options);
+    for (let i = optionArray.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [optionArray[i], optionArray[j]] = [optionArray[j], optionArray[i]];
+    }
+
+    const correctIndex = optionArray.findIndex((value) => value === answer);
+    const questionText = `🧠 Câu hỏi xác minh: ${expression} = ?`;
+
+    return {
+        question: questionText,
+        options: optionArray.map((value, index) => ({
+            text: value.toString(),
+            isCorrect: index === correctIndex,
+            index
+        })),
+        correctIndex
+    };
+}
+
+function buildEmotionKeyboard(token) {
+    const rows = [];
+    for (let i = 0; i < CHECKIN_EMOTIONS.length; i += 3) {
+        const row = [];
+        for (let j = i; j < i + 3 && j < CHECKIN_EMOTIONS.length; j++) {
+            const emoji = CHECKIN_EMOTIONS[j];
+            row.push({ text: emoji, callback_data: `checkin_emotion|${token}|${encodeURIComponent(emoji)}` });
+        }
+        rows.push(row);
+    }
+    rows.push([{ text: '⏭️ Bỏ qua', callback_data: `checkin_emotion_skip|${token}` }]);
+    return { inline_keyboard: rows };
+}
+
+function buildGoalKeyboard(token) {
+    const rows = [];
+    for (const preset of CHECKIN_GOAL_PRESETS) {
+        rows.push([{ text: preset, callback_data: `checkin_goal_choose|${token}|${encodeURIComponent(preset)}` }]);
+    }
+    rows.push([
+        { text: '✍️ Nhập mục tiêu riêng', callback_data: `checkin_goal_custom|${token}` },
+        { text: '⏭️ Để sau', callback_data: `checkin_goal_skip|${token}` }
+    ]);
+    return { inline_keyboard: rows };
+}
+
+function sanitizeGoalInput(text) {
+    if (typeof text !== 'string') {
+        return null;
+    }
+
+    const trimmed = text.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    if (trimmed.length > 200) {
+        return trimmed.slice(0, 200);
+    }
+
+    return trimmed;
+}
+
+function createShortToken(prefix = 'chk') {
+    const raw = uuidv4().replace(/-/g, '');
+    const short = raw.slice(0, 16);
+    return `${prefix}_${short}`;
+}
+
+async function getGroupCheckinSettings(chatId) {
+    const chatKey = chatId.toString();
+    try {
+        return await db.getCheckinGroup(chatKey);
+    } catch (error) {
+        console.warn(`[Checkin] Không thể đọc cấu hình nhóm ${chatKey}: ${error.message}`);
+        return {
+            chatId: chatKey,
+            checkinTime: CHECKIN_DEFAULT_TIME,
+            timezone: CHECKIN_DEFAULT_TIMEZONE,
+            autoMessageEnabled: 1,
+            dailyPoints: 10,
+            summaryWindow: 7,
+            lastAutoMessageDate: null
+        };
+    }
+}
+
+function buildCheckinKeyboard(chatId) {
+    const chatKey = chatId.toString();
+    return {
+        inline_keyboard: [
+            [{ text: '✅ Điểm Danh', callback_data: `checkin_start|${chatKey}` }],
+            [{ text: '🏆 Bảng xếp hạng', callback_data: `checkin_leaderboard|${chatKey}` }],
+            [{ text: '⚙️ Quản lý điểm danh', callback_data: `checkin_admin|${chatKey}` }]
+        ]
+    };
+}
+
+async function sendCheckinAnnouncement(chatId, { sourceMessage = null, triggeredBy = 'auto' } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const today = formatDateForTimezone(timezone);
+    const options = { reply_markup: buildCheckinKeyboard(chatId) };
+
+    try {
+        if (sourceMessage) {
+            await sendMessageRespectingThread(chatId, sourceMessage, CHECKIN_MESSAGE_TEXT, options);
+        } else {
+            await bot.sendMessage(chatId, CHECKIN_MESSAGE_TEXT, options);
+        }
+        await db.updateAutoMessageDate(chatId, today);
+        console.log(`[Checkin] Đã gửi thông báo điểm danh tới ${chatId} (${triggeredBy}).`);
+    } catch (error) {
+        console.error(`[Checkin] Lỗi gửi thông báo tới ${chatId}: ${error.message}`);
+    }
+}
+
+async function ensureUserCanCheckin(chatId, userId, settings) {
+    const timezone = settings?.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const today = formatDateForTimezone(timezone);
+    const attempt = await db.getCheckinAttempt(chatId, userId, today);
+    if (attempt && Number(attempt.locked) === 1) {
+        return { allowed: false, reason: 'locked', attempts: attempt.attempts, date: today };
+    }
+
+    const record = await db.getCheckinRecord(chatId, userId, today);
+    if (record) {
+        return { allowed: false, reason: 'checked', record, date: today };
+    }
+
+    return { allowed: true, date: today, attempts: attempt?.attempts || 0 };
+}
+
+async function initiateCheckinChallenge(chatId, user, { replyMessage = null } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const userId = user.id.toString();
+    const check = await ensureUserCanCheckin(chatId, userId, settings);
+
+    if (!check.allowed) {
+        if (check.reason === 'locked') {
+            return {
+                status: 'locked',
+                message: '❌ Bạn đã hết lượt thử hôm nay. Liên hệ quản trị viên để được hỗ trợ.'
+            };
+        }
+
+        if (check.reason === 'checked') {
+            return {
+                status: 'checked',
+                message: '✅ Bạn đã điểm danh hôm nay rồi. Hẹn gặp bạn vào ngày mai!'
+            };
+        }
+    }
+
+    const challenge = generateMathChallenge();
+    const token = createShortToken('chk');
+    pendingCheckinChallenges.set(token, {
+        chatId: chatId.toString(),
+        userId,
+        timezone: settings.timezone || CHECKIN_DEFAULT_TIMEZONE,
+        date: check.date,
+        attempts: check.attempts || 0,
+        correctIndex: challenge.correctIndex,
+        settings,
+        sourceMessage: replyMessage ? { chatId: replyMessage.chat?.id, messageId: replyMessage.message_id } : null
+    });
+
+    const inline_keyboard = challenge.options.map((option) => ([{
+        text: option.text,
+        callback_data: `checkin_answer|${token}|${option.index}`
+    }]));
+
+    const dmText = [
+        '🌞 Xin chào! Hãy trả lời câu hỏi nhỏ này để hoàn tất điểm danh.',
+        '',
+        challenge.question,
+        '',
+        'Chọn đáp án đúng bằng các nút bên dưới:'
+    ].join('\n');
+
+    try {
+        await bot.sendMessage(userId, dmText, { reply_markup: { inline_keyboard } });
+        return { status: 'sent', token };
+    } catch (error) {
+        pendingCheckinChallenges.delete(token);
+        console.warn(`[Checkin] Không thể gửi DM cho ${userId}: ${error.message}`);
+
+        if (replyMessage) {
+            const mention = buildUserMention(user);
+            const nameText = mention.parseMode === 'HTML'
+                ? mention.text
+                : (user.username ? `@${user.username}` : (user.first_name || userId));
+            const noteLines = [
+                `${nameText} ơi, bot không thể gửi tin nhắn riêng.`,
+                'Vui lòng mở chat riêng với bot và nhấn Start, sau đó bấm lại nút Điểm Danh nhé!'
+            ];
+            const note = noteLines.join('\n');
+            const options = {};
+            if (mention.parseMode) {
+                options.parse_mode = mention.parseMode;
+            }
+            await sendMessageRespectingThread(replyMessage.chat.id, replyMessage, note, options);
+        }
+
+        return {
+            status: 'failed',
+            message: '⚠️ Không thể gửi câu hỏi. Vui lòng mở chat riêng với bot và thử lại.'
+        };
+    }
+}
+
+async function concludeCheckinSuccess(token, challenge) {
+    const userId = challenge.userId;
+    const chatId = challenge.chatId;
+    const settings = challenge.settings || await getGroupCheckinSettings(chatId);
+    const timezone = challenge.timezone || settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const today = challenge.date || formatDateForTimezone(timezone);
+
+    let walletAddress = null;
+    try {
+        const wallets = await db.getWalletsForUser(userId);
+        if (Array.isArray(wallets) && wallets.length > 0) {
+            walletAddress = wallets[0];
+        }
+    } catch (error) {
+        console.warn(`[Checkin] Không thể lấy ví cho ${userId}: ${error.message}`);
+    }
+
+    const points = Number(settings.dailyPoints || 0) || 0;
+    const result = await db.completeCheckin({
+        chatId,
+        userId,
+        checkinDate: today,
+        walletAddress,
+        pointsAwarded: points
+    });
+
+    const streak = result?.streak || 1;
+    const totalPoints = result?.totalPoints || points;
+    const walletNote = walletAddress
+        ? `🔗 Ví Xlayer: \`${walletAddress}\``
+        : '⚠️ Bạn chưa liên kết ví Xlayer. Dùng /register để cập nhật nhé!';
+
+    const emotionToken = createShortToken('emo');
+    pendingEmotionPrompts.set(emotionToken, {
+        chatId,
+        userId,
+        date: today,
+        stage: 'emotion'
+    });
+
+    const successMessage = [
+        '✅ Điểm danh thành công! 🎉',
+        `Chuỗi điểm danh liên tiếp của bạn: ${streak} ngày!`,
+        `🎯 Tổng điểm tích lũy: ${totalPoints}`,
+        walletNote,
+        '',
+        'Hôm nay bạn cảm thấy thế nào? Hãy chọn một biểu tượng cảm xúc!'
+    ].join('\n');
+
+    await bot.sendMessage(userId, successMessage, {
+        reply_markup: buildEmotionKeyboard(emotionToken),
+        parse_mode: 'Markdown'
+    });
+
+    pendingCheckinChallenges.delete(token);
+}
+
+async function handleCheckinAnswerCallback(query, token, answerIndexRaw) {
+    const challenge = pendingCheckinChallenges.get(token);
+    if (!challenge) {
+        bot.answerCallbackQuery(query.id, { text: '⏳ Câu hỏi đã hết hạn, hãy thử lại từ nhóm nhé.', show_alert: true });
+        return;
+    }
+
+    const userId = query.from.id.toString();
+    if (userId !== challenge.userId) {
+        bot.answerCallbackQuery(query.id, { text: 'Bạn không thể trả lời câu hỏi này.', show_alert: true });
+        return;
+    }
+
+    const answerIndex = Number(answerIndexRaw);
+    if (!Number.isInteger(answerIndex)) {
+        bot.answerCallbackQuery(query.id, { text: 'Lựa chọn không hợp lệ.', show_alert: true });
+        return;
+    }
+
+    if (answerIndex === challenge.correctIndex) {
+        await bot.answerCallbackQuery(query.id, { text: '🎉 Chính xác! Đang ghi nhận điểm danh...' });
+        try {
+            await concludeCheckinSuccess(token, challenge);
+        } catch (error) {
+            console.error(`[Checkin] Lỗi ghi nhận điểm danh: ${error.message}`);
+            await bot.sendMessage(userId, '⚠️ Có lỗi khi ghi nhận điểm danh. Vui lòng thử lại sau hoặc báo cho quản trị viên.');
+            pendingCheckinChallenges.delete(token);
+        }
+        return;
+    }
+
+    const attempts = await db.incrementCheckinAttempt(challenge.chatId, userId, challenge.date, CHECKIN_MAX_ATTEMPTS);
+    challenge.attempts = attempts.attempts;
+    const remaining = Math.max(CHECKIN_MAX_ATTEMPTS - attempts.attempts, 0);
+
+    if (attempts.locked) {
+        await db.markMemberLocked(challenge.chatId, userId, challenge.date);
+        pendingCheckinChallenges.delete(token);
+        await bot.answerCallbackQuery(query.id, { text: '❌ Sai rồi! Bạn đã hết lượt thử hôm nay.', show_alert: true });
+        await bot.sendMessage(userId, '❌ Bạn đã trả lời sai 3 lần. Liên hệ quản trị viên để được mở lại quyền điểm danh.');
+        return;
+    }
+
+    await bot.answerCallbackQuery(query.id, { text: `Sai rồi! Bạn còn ${remaining} lượt thử.`, show_alert: true });
+
+    try {
+        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+            chat_id: query.message.chat.id,
+            message_id: query.message.message_id
+        });
+    } catch (error) {
+        // ignore edit errors
+    }
+
+    const newChallenge = generateMathChallenge();
+    challenge.correctIndex = newChallenge.correctIndex;
+    const inline_keyboard = newChallenge.options.map((option) => ([{
+        text: option.text,
+        callback_data: `checkin_answer|${token}|${option.index}`
+    }]));
+
+    await bot.sendMessage(userId, [
+        '🔁 Hãy thử lại với một câu hỏi khác!',
+        '',
+        newChallenge.question,
+        '',
+        'Chọn đáp án đúng bên dưới:'
+    ].join('\n'), { reply_markup: { inline_keyboard } });
+}
+
+async function handleEmotionCallback(query, token, emoji, { skip = false } = {}) {
+    const prompt = pendingEmotionPrompts.get(token);
+    if (!prompt) {
+        bot.answerCallbackQuery(query.id, { text: 'Phiên phản hồi đã hết hạn.', show_alert: true });
+        return;
+    }
+
+    const userId = query.from.id.toString();
+    if (userId !== prompt.userId) {
+        bot.answerCallbackQuery(query.id, { text: 'Không thể sử dụng lựa chọn này.', show_alert: true });
+        return;
+    }
+
+    if (!skip) {
+        const decoded = decodeURIComponent(emoji || '');
+        if (!decoded) {
+            bot.answerCallbackQuery(query.id, { text: 'Cảm xúc không hợp lệ.', show_alert: true });
+            return;
+        }
+
+        try {
+            await db.updateCheckinFeedback(prompt.chatId, prompt.userId, prompt.date, { emotion: decoded });
+        } catch (error) {
+            console.error(`[Checkin] Không thể lưu cảm xúc: ${error.message}`);
+            bot.answerCallbackQuery(query.id, { text: 'Không thể lưu cảm xúc, thử lại sau nhé.', show_alert: true });
+            return;
+        }
+        bot.answerCallbackQuery(query.id, { text: 'Đã ghi nhận cảm xúc!' });
+    } else {
+        bot.answerCallbackQuery(query.id, { text: 'Đã bỏ qua cảm xúc.' });
+    }
+
+    pendingEmotionPrompts.set(token, { ...prompt, stage: 'goal' });
+    await bot.sendMessage(prompt.userId, '🎯 Đặt mục tiêu cho ngày hôm nay bằng cách chọn một tùy chọn hoặc nhập nội dung riêng:', {
+        reply_markup: buildGoalKeyboard(token)
+    });
+}
+
+async function handleGoalCallback(query, token, action, value = null) {
+    const prompt = pendingEmotionPrompts.get(token);
+    if (!prompt) {
+        bot.answerCallbackQuery(query.id, { text: 'Phiên phản hồi đã hết hạn.', show_alert: true });
+        return;
+    }
+
+    const userId = query.from.id.toString();
+    if (userId !== prompt.userId) {
+        bot.answerCallbackQuery(query.id, { text: 'Không thể sử dụng lựa chọn này.', show_alert: true });
+        return;
+    }
+
+    if (prompt.stage !== 'goal') {
+        bot.answerCallbackQuery(query.id, { text: 'Vui lòng hoàn tất bước cảm xúc trước.', show_alert: true });
+        return;
+    }
+
+    if (action === 'choose') {
+        const decoded = decodeURIComponent(value || '');
+        try {
+            await db.updateCheckinFeedback(prompt.chatId, prompt.userId, prompt.date, { goal: decoded });
+            bot.answerCallbackQuery(query.id, { text: '🎯 Đã ghi nhận mục tiêu!' });
+            await bot.sendMessage(prompt.userId, '🔥 Chúc bạn hoàn thành mục tiêu hôm nay!');
+            pendingEmotionPrompts.delete(token);
+        } catch (error) {
+            console.error(`[Checkin] Không thể lưu mục tiêu: ${error.message}`);
+            bot.answerCallbackQuery(query.id, { text: 'Không thể lưu mục tiêu, thử lại sau nhé.', show_alert: true });
+        }
+        return;
+    }
+
+    if (action === 'skip') {
+        bot.answerCallbackQuery(query.id, { text: 'Đã bỏ qua mục tiêu hôm nay.' });
+        await bot.sendMessage(prompt.userId, '✅ Điểm danh hoàn tất! Chúc bạn một ngày tuyệt vời!');
+        pendingEmotionPrompts.delete(token);
+        return;
+    }
+
+    if (action === 'custom') {
+        pendingGoalInputs.set(prompt.userId, { chatId: prompt.chatId, date: prompt.date, token });
+        bot.answerCallbackQuery(query.id, { text: 'Hãy nhập mục tiêu của bạn trong tin nhắn tiếp theo.' });
+        await bot.sendMessage(prompt.userId, '✍️ Gõ mục tiêu của bạn và gửi tin nhắn này.');
+        return;
+    }
+
+    bot.answerCallbackQuery(query.id, { text: 'Lựa chọn không hợp lệ.', show_alert: true });
+}
+
+async function handleGoalTextInput(msg) {
+    const userId = msg.from?.id?.toString();
+    if (!userId) {
+        return false;
+    }
+
+    const pending = pendingGoalInputs.get(userId);
+    if (!pending) {
+        return false;
+    }
+
+    const goalText = sanitizeGoalInput(msg.text || '');
+    if (!goalText) {
+        await bot.sendMessage(userId, '⚠️ Vui lòng nhập mục tiêu hợp lệ (không để trống).');
+        return true;
+    }
+
+    try {
+        await db.updateCheckinFeedback(pending.chatId, userId, pending.date, { goal: goalText });
+        await bot.sendMessage(userId, '🔥 Đã ghi nhận mục tiêu! Chúc bạn thành công!');
+        pendingEmotionPrompts.delete(pending.token);
+    } catch (error) {
+        console.error(`[Checkin] Không thể lưu mục tiêu nhập tay: ${error.message}`);
+        await bot.sendMessage(userId, '⚠️ Không thể lưu mục tiêu, thử lại sau nhé.');
+    } finally {
+        pendingGoalInputs.delete(userId);
+    }
+
+    return true;
+}
+
+async function buildLeaderboardText(chatId, mode = 'streak', limit = 10) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const rows = await db.getTopCheckins(chatId, limit, mode);
+    if (!rows || rows.length === 0) {
+        return 'Chưa có dữ liệu điểm danh nào để hiển thị.';
+    }
+
+    let header = '🏆 Top chuỗi điểm danh hiện tại';
+    if (mode === 'points') {
+        header = '🏆 Top thành viên theo điểm tích lũy';
+    } else if (mode === 'total') {
+        header = '🏆 Top thành viên theo số lần điểm danh';
+    } else if (mode === 'longest') {
+        header = '🏆 Top chuỗi điểm danh dài nhất';
+    }
+
+    const lines = [header, ''];
+
+    for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const rank = i + 1;
+        let displayName = `ID ${row.userId}`;
+        try {
+            const member = await bot.getChatMember(chatId, row.userId);
+            if (member?.user) {
+                if (member.user.username) {
+                    displayName = `@${member.user.username}`;
+                } else if (member.user.first_name || member.user.last_name) {
+                    displayName = `${member.user.first_name || ''} ${member.user.last_name || ''}`.trim();
+                }
+            }
+        } catch (error) {
+            // ignore fetch errors
+        }
+
+        let statText = '';
+        if (mode === 'points') {
+            statText = `${row.totalPoints} điểm`;
+        } else if (mode === 'total') {
+            statText = `${row.totalCheckins} lần`;
+        } else if (mode === 'longest') {
+            statText = `${row.longestStreak} ngày (chuỗi dài nhất)`;
+        } else {
+            statText = `${row.streak} ngày (chuỗi hiện tại)`;
+        }
+
+        lines.push(`${rank}. ${displayName} • ${statText}`);
+    }
+
+    lines.push('', `⏰ Giờ điểm danh: ${settings.checkinTime || CHECKIN_DEFAULT_TIME}`);
+    return lines.join('\n');
+}
+
+async function runCheckinSchedulerTick() {
+    let groups = [];
+    try {
+        groups = await db.listCheckinGroups();
+    } catch (error) {
+        console.error(`[Checkin] Không thể tải danh sách nhóm: ${error.message}`);
+        return;
+    }
+
+    if (!groups || groups.length === 0) {
+        return;
+    }
+
+    const now = new Date();
+    for (const group of groups) {
+        if (!group || Number(group.autoMessageEnabled) !== 1) {
+            continue;
+        }
+
+        const timezone = group.timezone || CHECKIN_DEFAULT_TIMEZONE;
+        const scheduledTime = group.checkinTime || CHECKIN_DEFAULT_TIME;
+        const currentTime = formatTimeForTimezone(timezone, now);
+        const today = formatDateForTimezone(timezone, now);
+
+        if (currentTime === scheduledTime && group.lastAutoMessageDate !== today) {
+            await sendCheckinAnnouncement(group.chatId, { triggeredBy: 'auto' });
+            group.lastAutoMessageDate = today;
+        }
+    }
+}
+
+function startCheckinScheduler() {
+    if (checkinSchedulerTimer) {
+        clearInterval(checkinSchedulerTimer);
+        checkinSchedulerTimer = null;
+    }
+
+    const tick = () => {
+        runCheckinSchedulerTick().catch((error) => {
+            console.error(`[Checkin] Tick lỗi: ${error.message}`);
+        });
+    };
+
+    tick();
+    checkinSchedulerTimer = setInterval(tick, CHECKIN_SCHEDULER_INTERVAL);
+    if (typeof checkinSchedulerTimer.unref === 'function') {
+        checkinSchedulerTimer.unref();
+    }
+}
+
+function buildAdminMenuKeyboard(chatId) {
+    const chatKey = chatId.toString();
+    return {
+        inline_keyboard: [
+            [{ text: '🚀 Gửi thông báo điểm danh', callback_data: `checkin_admin_broadcast|${chatKey}` }],
+            [{ text: '📋 Danh sách hôm nay', callback_data: `checkin_admin_list|${chatKey}` }],
+            [{ text: '⛔ Hủy điểm danh', callback_data: `checkin_admin_remove|${chatKey}` }],
+            [{ text: '♻️ Cấp lại quyền điểm danh', callback_data: `checkin_admin_unlock|${chatKey}` }],
+            [{ text: '💬 Gửi tin nhắn bí mật', callback_data: `checkin_admin_dm|${chatKey}` }],
+            [{ text: '🎯 Điểm mỗi ngày', callback_data: `checkin_admin_points|${chatKey}` }],
+            [{ text: '📆 Thiết lập số ngày tổng kết', callback_data: `checkin_admin_summary|${chatKey}` }],
+            [{ text: '🧮 Đặt lại câu hỏi toán', callback_data: `checkin_admin_reset|${chatKey}` }]
+        ]
+    };
+}
+
+async function isGroupAdmin(chatId, userId) {
+    try {
+        const member = await bot.getChatMember(chatId, userId);
+        if (!member) {
+            return false;
+        }
+        return ['creator', 'administrator'].includes(member.status);
+    } catch (error) {
+        console.warn(`[Checkin] Không thể kiểm tra quyền admin của ${userId} trong ${chatId}: ${error.message}`);
+        return false;
+    }
+}
+
+async function sendAdminMenu(adminId, chatId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const textLines = [
+        '⚙️ *Menu quản lý điểm danh*',
+        `• Giờ gửi tự động: ${settings.checkinTime || CHECKIN_DEFAULT_TIME}`,
+        `• Điểm mỗi ngày: ${settings.dailyPoints || 0}`,
+        `• Số ngày tổng kết: ${settings.summaryWindow || 7}`,
+        '',
+        'Chọn thao tác:'
+    ];
+
+    await bot.sendMessage(adminId, textLines.join('\n'), {
+        reply_markup: buildAdminMenuKeyboard(chatId),
+        parse_mode: 'Markdown'
+    });
+}
+
+async function sendTodayCheckinList(chatId, adminId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+    const records = await db.getCheckinsForDate(chatId, today);
+    if (!records || records.length === 0) {
+        await bot.sendMessage(adminId, '📋 Hôm nay chưa có ai điểm danh.');
+        return;
+    }
+
+    const lines = ['📋 Danh sách điểm danh hôm nay:', ''];
+    for (const record of records) {
+        let displayName = `ID ${record.userId}`;
+        try {
+            const member = await bot.getChatMember(chatId, record.userId);
+            if (member?.user) {
+                if (member.user.username) {
+                    displayName = `@${member.user.username}`;
+                } else if (member.user.first_name || member.user.last_name) {
+                    displayName = `${member.user.first_name || ''} ${member.user.last_name || ''}`.trim();
+                }
+            }
+        } catch (error) {
+            // ignore errors
+        }
+
+        const details = [];
+        if (record.walletAddress) {
+            details.push(`Ví: ${record.walletAddress}`);
+        }
+        if (record.emotion) {
+            details.push(`Cảm xúc: ${record.emotion}`);
+        }
+        if (record.goal) {
+            details.push(`Mục tiêu: ${record.goal}`);
+        }
+
+        const detailText = details.length > 0 ? ` (${details.join(' • ')})` : '';
+        lines.push(`• ${displayName}${detailText}`);
+    }
+
+    await bot.sendMessage(adminId, lines.join('\n'));
+}
+
+async function promptAdminForRemoval(chatId, adminId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+    const records = await db.getCheckinsForDate(chatId, today);
+    if (!records || records.length === 0) {
+        await bot.sendMessage(adminId, 'Không có thành viên nào để hủy điểm danh.');
+        return;
+    }
+
+    const inline_keyboard = records.slice(0, 20).map((record) => ([{
+        text: `Hủy ${record.userId}`,
+        callback_data: `checkin_admin_remove_confirm|${chatId}|${record.userId}`
+    }]));
+
+    await bot.sendMessage(adminId, 'Chọn thành viên cần hủy điểm danh hôm nay:', {
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function promptAdminUnlock(chatId, adminId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+    const locked = await db.getLockedMembers(chatId, today);
+    if (!locked || locked.length === 0) {
+        await bot.sendMessage(adminId, 'Không có ai bị khóa điểm danh hôm nay.');
+        return;
+    }
+
+    const inline_keyboard = locked.slice(0, 20).map((entry) => ([{
+        text: `Mở ${entry.userId}`,
+        callback_data: `checkin_admin_unlock_confirm|${chatId}|${entry.userId}`
+    }]));
+
+    await bot.sendMessage(adminId, 'Chọn thành viên cần cấp lại quyền điểm danh:', {
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function promptAdminSecretMessage(chatId, adminId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+    const records = await db.getCheckinsForDate(chatId, today);
+    if (!records || records.length === 0) {
+        await bot.sendMessage(adminId, 'Chưa có ai điểm danh để gửi tin nhắn.');
+        return;
+    }
+
+    const inline_keyboard = records.slice(0, 20).map((record) => ([{
+        text: `Nhắn ${record.userId}`,
+        callback_data: `checkin_admin_dm_target|${chatId}|${record.userId}`
+    }]));
+
+    await bot.sendMessage(adminId, 'Chọn người nhận tin nhắn bí mật:', {
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function promptAdminPoints(chatId, adminId) {
+    const options = [5, 10, 20, 30];
+    const inline_keyboard = options.map((value) => ([{
+        text: `${value} điểm`,
+        callback_data: `checkin_admin_points_set|${chatId}|${value}`
+    }]));
+    inline_keyboard.push([{ text: 'Tuỳ chỉnh...', callback_data: `checkin_admin_points_custom|${chatId}` }]);
+
+    await bot.sendMessage(adminId, 'Chọn số điểm điểm danh mỗi ngày:', {
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function promptAdminSummaryWindow(chatId, adminId) {
+    const options = [7, 14, 30];
+    const inline_keyboard = options.map((value) => ([{
+        text: `${value} ngày`,
+        callback_data: `checkin_admin_summary_set|${chatId}|${value}`
+    }]));
+    inline_keyboard.push([{ text: 'Tuỳ chỉnh...', callback_data: `checkin_admin_summary_custom|${chatId}` }]);
+
+    await bot.sendMessage(adminId, 'Chọn khoảng ngày để tổng kết chuỗi điểm danh:', {
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function promptAdminResetQuestion(chatId, adminId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+    const locked = await db.getLockedMembers(chatId, today);
+    if (!locked || locked.length === 0) {
+        await bot.sendMessage(adminId, 'Không có thành viên nào cần đặt lại câu hỏi.');
+        return;
+    }
+
+    const inline_keyboard = locked.slice(0, 20).map((entry) => ([{
+        text: `Đặt lại ${entry.userId}`,
+        callback_data: `checkin_admin_reset_confirm|${chatId}|${entry.userId}`
+    }]));
+
+    await bot.sendMessage(adminId, 'Chọn thành viên cần đặt lại câu hỏi toán:', {
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function executeAdminRemoval(chatId, adminId, targetUserId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+    const success = await db.removeCheckinRecord(chatId, targetUserId, today);
+    if (!success) {
+        await bot.sendMessage(adminId, '⚠️ Không tìm thấy dữ liệu điểm danh để hủy.');
+        return;
+    }
+
+    await bot.sendMessage(adminId, `✅ Đã hủy điểm danh của ${targetUserId} cho ngày hôm nay.`);
+    try {
+        await bot.sendMessage(targetUserId, '⚠️ Điểm danh hôm nay của bạn đã bị quản trị viên hủy. Vui lòng thực hiện lại nếu cần.');
+    } catch (error) {
+        // ignore DM failures
+    }
+}
+
+async function executeAdminUnlock(chatId, adminId, targetUserId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+    await db.unlockMemberCheckin(chatId, targetUserId);
+    await db.clearDailyAttempts(chatId, targetUserId, today);
+    await bot.sendMessage(adminId, `✅ Đã mở khóa điểm danh cho ${targetUserId}.`);
+    try {
+        await bot.sendMessage(targetUserId, '✅ Bạn đã được cấp lại quyền điểm danh. Hãy thử lại nhé!');
+    } catch (error) {
+        // ignore DM failures
+    }
+}
+
+async function executeAdminReset(chatId, adminId, targetUserId) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+    await db.unlockMemberCheckin(chatId, targetUserId);
+    await db.clearDailyAttempts(chatId, targetUserId, today);
+    await bot.sendMessage(adminId, `🔁 Đang gửi lại câu hỏi toán cho ${targetUserId}.`);
+    try {
+        const fakeUser = { id: Number(targetUserId), first_name: '' };
+        const result = await initiateCheckinChallenge(chatId, fakeUser);
+        if (result.status === 'sent') {
+            await bot.sendMessage(adminId, '✅ Đã gửi lại câu hỏi xác minh cho thành viên.');
+        } else if (result.status === 'failed') {
+            await bot.sendMessage(adminId, '⚠️ Không thể gửi lại câu hỏi. Thành viên cần mở chat riêng với bot.');
+        } else if (result.status === 'locked') {
+            await bot.sendMessage(adminId, '⚠️ Thành viên vẫn đang bị khóa.');
+        } else if (result.status === 'checked') {
+            await bot.sendMessage(adminId, 'ℹ️ Thành viên đã điểm danh hôm nay.');
+        }
+    } catch (error) {
+        console.error(`[Checkin] Không thể gửi lại câu hỏi cho ${targetUserId}: ${error.message}`);
+        await bot.sendMessage(adminId, '⚠️ Không thể gửi lại câu hỏi. Thành viên cần mở chat riêng với bot.');
+    }
+}
+
+async function setAdminDailyPoints(chatId, adminId, value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        await bot.sendMessage(adminId, '⚠️ Giá trị điểm không hợp lệ.');
+        return;
+    }
+
+    await db.updateCheckinGroup(chatId, { dailyPoints: numeric });
+    await bot.sendMessage(adminId, `✅ Đã cập nhật điểm điểm danh mỗi ngày: ${numeric}.`);
+}
+
+async function setAdminSummaryWindow(chatId, adminId, value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+        await bot.sendMessage(adminId, '⚠️ Số ngày không hợp lệ.');
+        return;
+    }
+
+    await db.updateCheckinGroup(chatId, { summaryWindow: Math.round(numeric) });
+    await bot.sendMessage(adminId, `✅ Đã cập nhật số ngày tổng kết chuỗi: ${Math.round(numeric)}.`);
 }
 
 // ===== HÀM HELPER: Dịch Lựa chọn (Kéo/Búa/Bao) =====
@@ -3045,7 +3973,7 @@ function startTelegramBot() {
     });
 
     // COMMAND: /mywallet - Cần async
-    bot.onText(/\/mywallet/, async (msg) => {
+    bot.onText(/\/mywallet/, async (msg) => { 
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg); // <-- SỬA LỖI
         const wallets = await db.getWalletsForUser(chatId);
@@ -3092,6 +4020,37 @@ function startTelegramBot() {
         message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
         message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
         sendReply(msg, message, { parse_mode: "Markdown" });
+    });
+
+    bot.onText(/\/checkin/, async (msg) => {
+        const chatType = msg.chat?.type;
+        const chatId = msg.chat.id.toString();
+        if (chatType === 'private') {
+            await bot.sendMessage(chatId, 'Vui lòng sử dụng nút "Điểm Danh" trong nhóm để bắt đầu.');
+            return;
+        }
+
+        const result = await initiateCheckinChallenge(chatId, msg.from, { replyMessage: msg });
+        if (result.status === 'locked' || result.status === 'checked') {
+            await bot.sendMessage(msg.from.id, result.message);
+        } else if (result.status === 'failed') {
+            await bot.sendMessage(msg.from.id, result.message);
+        } else {
+            await bot.sendMessage(msg.from.id, '📨 Bot đã gửi câu hỏi xác minh. Hãy kiểm tra tin nhắn riêng!');
+        }
+    });
+
+    bot.onText(/\/topcheckin(?:\s+(streak|total|points|longest))?/, async (msg, match) => {
+        const chatId = msg.chat.id.toString();
+        const chatType = msg.chat?.type;
+        const mode = (match && match[1]) ? match[1] : 'streak';
+        if (chatType === 'private') {
+            await bot.sendMessage(chatId, 'Lệnh này chỉ sử dụng trong nhóm.');
+            return;
+        }
+
+        const text = await buildLeaderboardText(chatId, mode, 10);
+        await sendMessageRespectingThread(chatId, msg, text);
     });
 
     bot.onText(/\/okxchains/, async (msg) => {
@@ -3540,8 +4499,305 @@ function startTelegramBot() {
         const chatId = query.message.chat.id.toString();
         const queryId = query.id;
         const lang = await getLang(query.message); // <-- SỬA LỖI
-        
+
         try {
+            if (query.data.startsWith('checkin_start|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const result = await initiateCheckinChallenge(targetChatId, query.from, { replyMessage: query.message });
+                if (result.status === 'locked' || result.status === 'checked' || result.status === 'failed') {
+                    await bot.answerCallbackQuery(queryId, { text: result.message, show_alert: true });
+                } else {
+                    await bot.answerCallbackQuery(queryId, { text: '📨 Bot đã gửi câu hỏi xác minh!' });
+                }
+                return;
+            }
+
+            if (query.data.startsWith('checkin_answer|')) {
+                const parts = query.data.split('|');
+                const token = parts[1];
+                const answerIndex = parts[2];
+                await handleCheckinAnswerCallback(query, token, answerIndex);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_emotion_skip|')) {
+                const parts = query.data.split('|');
+                const token = parts[1];
+                await handleEmotionCallback(query, token, null, { skip: true });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_emotion|')) {
+                const parts = query.data.split('|');
+                const token = parts[1];
+                const emoji = parts[2] || '';
+                await handleEmotionCallback(query, token, emoji);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_goal_choose|')) {
+                const parts = query.data.split('|');
+                await handleGoalCallback(query, parts[1], 'choose', parts[2] || '');
+                return;
+            }
+
+            if (query.data.startsWith('checkin_goal_skip|')) {
+                const parts = query.data.split('|');
+                await handleGoalCallback(query, parts[1], 'skip');
+                return;
+            }
+
+            if (query.data.startsWith('checkin_goal_custom|')) {
+                const parts = query.data.split('|');
+                await handleGoalCallback(query, parts[1], 'custom');
+                return;
+            }
+
+            if (query.data.startsWith('checkin_leaderboard|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const mode = parts[2] || 'streak';
+                const boardText = await buildLeaderboardText(targetChatId, mode, 10);
+                await sendMessageRespectingThread(targetChatId, query.message, boardText);
+                await bot.answerCallbackQuery(queryId, { text: '🏆 Đã gửi bảng xếp hạng!' });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_list|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền sử dụng chức năng này.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: '📋 Đang gửi danh sách...' });
+                await sendTodayCheckinList(targetChatId, query.from.id);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_broadcast|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: '🚀 Đang gửi thông báo.' });
+                await sendCheckinAnnouncement(targetChatId, { triggeredBy: 'manual' });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_remove_confirm|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const targetUserId = parts[2];
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: '⛔ Đang hủy điểm danh...' });
+                await executeAdminRemoval(targetChatId, query.from.id, targetUserId);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_remove|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: 'Chọn thành viên cần hủy.' });
+                await promptAdminForRemoval(targetChatId, query.from.id);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_unlock_confirm|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const targetUserId = parts[2];
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: '♻️ Đang cấp lại quyền...' });
+                await executeAdminUnlock(targetChatId, query.from.id, targetUserId);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_unlock|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: 'Chọn thành viên cần mở khóa.' });
+                await promptAdminUnlock(targetChatId, query.from.id);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_dm_target|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const targetUserId = parts[2];
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                pendingSecretMessages.set(query.from.id.toString(), { chatId: targetChatId, targetUserId });
+                await bot.answerCallbackQuery(queryId, { text: '💬 Hãy nhập tin nhắn bí mật và gửi cho bot.' });
+                await bot.sendMessage(query.from.id, `✍️ Nhập nội dung muốn gửi tới ${targetUserId}.`);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_dm|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: 'Chọn người nhận tin nhắn.' });
+                await promptAdminSecretMessage(targetChatId, query.from.id);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_points_set|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const value = parts[2];
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: '🎯 Đã cập nhật điểm.' });
+                await setAdminDailyPoints(targetChatId, query.from.id, value);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_points_custom|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                checkinAdminStates.set(query.from.id.toString(), { type: 'points_custom', chatId: targetChatId });
+                await bot.answerCallbackQuery(queryId, { text: 'Nhập số điểm mong muốn.' });
+                await bot.sendMessage(query.from.id, '✍️ Nhập số điểm điểm danh mỗi ngày mới:');
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_points|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: 'Chọn mức điểm.' });
+                await promptAdminPoints(targetChatId, query.from.id);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_summary_set|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const value = parts[2];
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: '📆 Đã cập nhật.' });
+                await setAdminSummaryWindow(targetChatId, query.from.id, value);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_summary_custom|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                checkinAdminStates.set(query.from.id.toString(), { type: 'summary_custom', chatId: targetChatId });
+                await bot.answerCallbackQuery(queryId, { text: 'Nhập số ngày mong muốn.' });
+                await bot.sendMessage(query.from.id, '✍️ Nhập số ngày để tổng kết chuỗi điểm danh:');
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_summary|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: 'Chọn số ngày tổng kết.' });
+                await promptAdminSummaryWindow(targetChatId, query.from.id);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_reset_confirm|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const targetUserId = parts[2];
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: '🧮 Đang đặt lại câu hỏi.' });
+                await executeAdminReset(targetChatId, query.from.id, targetUserId);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_reset|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: 'Chọn thành viên cần đặt lại câu hỏi.' });
+                await promptAdminResetQuestion(targetChatId, query.from.id);
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId).toString();
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: 'Bạn không có quyền mở menu quản lý.', show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: '⚙️ Đang mở menu quản lý.' });
+                try {
+                    await sendAdminMenu(query.from.id, targetChatId);
+                } catch (error) {
+                    console.error(`[Checkin] Không thể gửi menu quản lý: ${error.message}`);
+                }
+                return;
+            }
+
             if (query.data.startsWith('lang_')) {
                 const newLang = resolveLangCode(query.data.split('_')[1]);
                 const chatType = query.message.chat?.type;
@@ -3675,6 +4931,75 @@ function startTelegramBot() {
         } catch (error) {
             console.error("Lỗi khi xử lý callback_query:", error);
             bot.answerCallbackQuery(queryId, { text: "Error!" });
+        }
+    });
+
+    bot.on('message', async (msg) => {
+        if (await handleGoalTextInput(msg)) {
+            return;
+        }
+
+        const userId = msg.from?.id?.toString();
+        if (!userId) {
+            return;
+        }
+
+        const chatType = msg.chat?.type || '';
+
+        if (chatType === 'private') {
+            const secretState = pendingSecretMessages.get(userId);
+            if (secretState) {
+                const rawText = (msg.text || '').trim();
+                if (!rawText) {
+                    await bot.sendMessage(userId, '⚠️ Vui lòng nhập nội dung tin nhắn hợp lệ.');
+                    return;
+                }
+
+                const clipped = rawText.length > 500 ? rawText.slice(0, 500) : rawText;
+
+                try {
+                    await bot.sendMessage(secretState.targetUserId, `📩 Tin nhắn bí mật từ quản trị viên:
+${clipped}`);
+                    await bot.sendMessage(userId, '✅ Đã gửi tin nhắn bí mật.');
+                } catch (error) {
+                    console.error(`[Checkin] Không thể chuyển tiếp tin nhắn bí mật: ${error.message}`);
+                    await bot.sendMessage(userId, '⚠️ Không thể gửi tin nhắn, có thể người nhận chưa mở chat với bot.');
+                } finally {
+                    pendingSecretMessages.delete(userId);
+                }
+                return;
+            }
+
+            const adminState = checkinAdminStates.get(userId);
+            if (adminState) {
+                const rawText = (msg.text || '').trim();
+                if (!rawText) {
+                    await bot.sendMessage(userId, '⚠️ Vui lòng nhập giá trị hợp lệ.');
+                    return;
+                }
+
+                if (adminState.type === 'points_custom') {
+                    const normalized = Number(rawText.replace(',', '.'));
+                    if (!Number.isFinite(normalized) || normalized < 0) {
+                        await bot.sendMessage(userId, '⚠️ Giá trị điểm không hợp lệ.');
+                        return;
+                    }
+                    await setAdminDailyPoints(adminState.chatId, msg.from.id, normalized);
+                    checkinAdminStates.delete(userId);
+                    return;
+                }
+
+                if (adminState.type === 'summary_custom') {
+                    const normalized = Number(rawText.replace(',', '.'));
+                    if (!Number.isFinite(normalized) || normalized <= 0) {
+                        await bot.sendMessage(userId, '⚠️ Số ngày không hợp lệ.');
+                        return;
+                    }
+                    await setAdminSummaryWindow(adminState.chatId, msg.from.id, normalized);
+                    checkinAdminStates.delete(userId);
+                    return;
+                }
+            }
         }
     });
 
@@ -4671,6 +5996,7 @@ async function main() {
 
         // Bước 4: Bật Bot (bộ 'miệng')
         startTelegramBot();
+        startCheckinScheduler();
 
         console.log("🚀 TẤT CẢ DỊCH VỤ ĐÃ SẴN SÀNG!");
 
