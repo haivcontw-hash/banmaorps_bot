@@ -101,6 +101,13 @@ function sanitisePostgresConnectionString(raw) {
             parsed.password = decodeURIComponent(parsed.password);
         }
 
+        const host = parsed.hostname || '';
+        const isSupabaseHost = /\.supabase\.co$/i.test(host);
+
+        if (isSupabaseHost && !parsed.searchParams.has('sslmode')) {
+            parsed.searchParams.set('sslmode', 'require');
+        }
+
         // URL sẽ tự động encode lại khi toString()
         parsed.protocol = 'postgres:';
         return parsed.toString();
@@ -393,6 +400,9 @@ if (SUPABASE_CONNECTION_STRING) {
 
             const baseConfig = {};
 
+            if (poolConfig.connectionString) {
+                baseConfig.connectionString = poolConfig.connectionString;
+            }
             if (poolConfig.host) {
                 baseConfig.host = poolConfig.host;
             }
@@ -407,10 +417,6 @@ if (SUPABASE_CONNECTION_STRING) {
             }
             if (poolConfig.database) {
                 baseConfig.database = poolConfig.database;
-            }
-
-            if (!baseConfig.host && poolConfig.connectionString) {
-                baseConfig.connectionString = poolConfig.connectionString;
             }
 
             supabasePool = new Pool({
