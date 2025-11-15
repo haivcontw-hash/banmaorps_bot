@@ -4975,10 +4975,12 @@ function startTelegramBot() {
 
     // Xử lý tất cả CALLBACK QUERY (Nút bấm) - Cần async
     bot.on('callback_query', async (query) => {
-        const chatId = query.message.chat.id.toString();
         const queryId = query.id;
-        const lang = await getLang(query.message); // <-- SỬA LỖI
-        const callbackLang = await resolveNotificationLanguage(query.from.id, query.from.language_code);
+        const messageChatId = query.message?.chat?.id;
+        const chatId = messageChatId ? messageChatId.toString() : null;
+        const fallbackLang = resolveLangCode(query.from?.language_code || defaultLang);
+        const lang = query.message ? await getLang(query.message) : fallbackLang; // <-- SỬA LỖI
+        const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
             if (query.data === 'help_close') {
@@ -5021,9 +5023,13 @@ function startTelegramBot() {
                 const detail = HELP_COMMAND_DETAILS[commandKey];
                 if (detail) {
                     const description = t(callbackLang, detail.descKey);
+                    const maxLength = 195;
+                    const trimmed = description.length > maxLength
+                        ? `${description.slice(0, maxLength).trimEnd()}…`
+                        : description;
                     await bot.answerCallbackQuery(queryId, {
-                        text: description,
-                        show_alert: description.length > 120
+                        text: trimmed || detail.command,
+                        show_alert: trimmed.length > 120
                     });
                 } else {
                     await bot.answerCallbackQuery(queryId);
@@ -5092,7 +5098,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_start|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const result = await initiateCheckinChallenge(targetChatId, query.from, { replyMessage: query.message });
                 const responseLang = result.userLang || callbackLang;
 
@@ -5151,7 +5161,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_leaderboard|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const mode = parts[2] || 'streak';
                 const boardLang = await resolveGroupLanguage(targetChatId);
                 const boardText = await buildLeaderboardText(targetChatId, mode, 10, boardLang);
@@ -5167,7 +5181,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_close|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const userKey = query.from.id.toString();
                 checkinAdminStates.delete(userKey);
                 pendingSecretMessages.delete(userKey);
@@ -5185,7 +5203,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_back|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5211,7 +5233,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_refresh|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5225,7 +5251,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_cancel_input|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5266,7 +5296,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_user_prompt|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5280,7 +5314,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_user_leaderboard|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5294,7 +5332,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_list|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission_action'), show_alert: true });
@@ -5307,7 +5349,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_broadcast|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5320,7 +5366,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_remove_confirm|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const targetUserId = parts[2];
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
@@ -5341,7 +5391,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_remove|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5354,7 +5408,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_unlock_confirm|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const targetUserId = parts[2];
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
@@ -5375,7 +5433,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_unlock|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5388,7 +5450,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_dm_target|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const targetUserId = parts[2];
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
@@ -5424,7 +5490,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_dm|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5437,7 +5507,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_points_set|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const value = parts[2];
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
@@ -5458,7 +5532,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_points_custom|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5493,7 +5571,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_points|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5506,7 +5588,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_summary_set|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const value = parts[2];
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
@@ -5527,7 +5613,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_summary_custom|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5562,7 +5652,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_summary|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5575,7 +5669,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_reset_confirm|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const targetUserId = parts[2];
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
@@ -5596,7 +5694,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin_reset|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
@@ -5609,7 +5711,11 @@ function startTelegramBot() {
 
             if (query.data.startsWith('checkin_admin|')) {
                 const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId).toString();
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
                 if (!isAdminUser) {
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_menu_no_permission'), show_alert: true });
@@ -5626,6 +5732,10 @@ function startTelegramBot() {
 
             if (query.data.startsWith('lang_')) {
                 const newLang = resolveLangCode(query.data.split('_')[1]);
+                if (!chatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
                 const chatType = query.message.chat?.type;
                 const isGroupChat = chatType === 'group' || chatType === 'supergroup';
 
@@ -5741,6 +5851,11 @@ function startTelegramBot() {
                 }
             }
             else if (query.data.startsWith('delete_')) {
+                if (!chatId || !query.message?.message_id) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+
                 const walletToDelete = query.data.substring(7);
                 if (walletToDelete === 'all') {
                     await db.removeAllWalletsFromUser(chatId);
