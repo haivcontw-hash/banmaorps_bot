@@ -77,7 +77,10 @@ function resolveSupabaseServiceRoleKey() {
         'SUPABASE_SERVICE_KEY',
         'SUPABASE_SECRET_KEY',
         'SUPABASE_API_KEY',
-        'SUPABASE_KEY'
+        'SUPABASE_KEY',
+        'SUPABASE_ANON_KEY',
+        'SUPABASE_PUBLIC_ANON_KEY',
+        'SUPABASE_PRIVATE_KEY'
     ];
 
     for (const key of candidates) {
@@ -1038,13 +1041,15 @@ async function persistSupabaseDailyCheckin(groupChatId, userId, state, updatedAt
 
             const { error } = await supabaseClient
                 .from('daily_checkins')
-                .upsert(payload, { onConflict: 'group_chat_id,user_id' });
+                .upsert([payload], { onConflict: 'group_chat_id,user_id' })
+                .select();
 
             if (!error) {
                 return;
             }
 
-            console.error('[Supabase] Không thể ghi daily_checkins (JS client):', error.message);
+            const details = error.details ? ` (${error.details})` : '';
+            console.error('[Supabase] Không thể ghi daily_checkins (JS client):', `${error.message}${details}`);
         } catch (error) {
             console.error('[Supabase] Lỗi Supabase JS khi ghi daily_checkins:', error.message);
         }
@@ -1114,13 +1119,15 @@ async function deleteSupabaseDailyCheckin(groupChatId, userId) {
                 .from('daily_checkins')
                 .delete()
                 .eq('group_chat_id', groupChatId)
-                .eq('user_id', userId);
+                .eq('user_id', userId)
+                .select();
 
             if (!error) {
                 return;
             }
 
-            console.error('[Supabase] Không thể xóa daily_checkins (JS client):', error.message);
+            const details = error.details ? ` (${error.details})` : '';
+            console.error('[Supabase] Không thể xóa daily_checkins (JS client):', `${error.message}${details}`);
         } catch (error) {
             console.error('[Supabase] Lỗi Supabase JS khi xóa daily_checkins:', error.message);
         }
@@ -1162,13 +1169,15 @@ async function deleteSupabaseDailyCheckinLog(groupChatId, userId, checkinDate) {
                 .delete()
                 .eq('group_chat_id', groupChatId)
                 .eq('user_id', userId)
-                .eq('checkin_date', checkinDate);
+                .eq('checkin_date', checkinDate)
+                .select();
 
             if (!error) {
                 return;
             }
 
-            console.error('[Supabase] Không thể xóa daily_checkin_logs (JS client):', error.message);
+            const details = error.details ? ` (${error.details})` : '';
+            console.error('[Supabase] Không thể xóa daily_checkin_logs (JS client):', `${error.message}${details}`);
         } catch (error) {
             console.error('[Supabase] Lỗi Supabase JS khi xóa daily_checkin_logs:', error.message);
         }
@@ -1216,13 +1225,15 @@ async function insertSupabaseDailyCheckinLog(groupChatId, userId, checkinDate, c
                         checkin_at: Number(checkinAt) || 0,
                         streak: streak || 0
                     }
-                ]);
+                ])
+                .select();
 
             if (!error) {
                 return;
             }
 
-            console.error('[Supabase] Không thể ghi daily_checkin_logs (JS client):', error.message);
+            const details = error.details ? ` (${error.details})` : '';
+            console.error('[Supabase] Không thể ghi daily_checkin_logs (JS client):', `${error.message}${details}`);
         } catch (error) {
             console.error('[Supabase] Lỗi Supabase JS khi ghi daily_checkin_logs:', error.message);
         }
