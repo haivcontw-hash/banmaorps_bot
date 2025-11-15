@@ -4474,9 +4474,15 @@ function startTelegramBot() {
             t(lang, 'help_command_help')
         ];
 
+        const checkinCommands = [
+            t(lang, 'help_command_checkin'),
+            t(lang, 'help_command_topcheckin')
+        ];
+
         const adminCommands = [
             t(lang, 'help_command_banmaofeed'),
-            t(lang, 'help_command_feedtopic')
+            t(lang, 'help_command_feedtopic'),
+            t(lang, 'help_command_checkin_admin')
         ];
 
         const sections = [
@@ -4485,6 +4491,10 @@ function startTelegramBot() {
             t(lang, 'help_section_general_title'),
             generalCommands.join('\n')
         ];
+
+        if (checkinCommands.length > 0) {
+            sections.push('', t(lang, 'help_section_checkin_title'), checkinCommands.join('\n'));
+        }
 
         if (adminCommands.length > 0) {
             sections.push('', t(lang, 'help_section_admin_title'), adminCommands.join('\n'));
