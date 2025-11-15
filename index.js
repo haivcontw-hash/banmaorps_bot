@@ -1332,20 +1332,31 @@ async function resolveMemberProfile(chatId, userId, lang, cache = null) {
     }
 
     let displayName = t(lang, 'checkin_leaderboard_fallback_name', { userId });
+    let username = null;
+    let fullName = null;
+
     try {
         const member = await bot.getChatMember(chatId, userId);
         if (member?.user) {
             if (member.user.username) {
-                displayName = `@${member.user.username}`;
-            } else if (member.user.first_name || member.user.last_name) {
-                displayName = `${member.user.first_name || ''} ${member.user.last_name || ''}`.trim();
+                username = `@${member.user.username}`;
+            }
+
+            if (member.user.first_name || member.user.last_name) {
+                fullName = `${member.user.first_name || ''} ${member.user.last_name || ''}`.trim();
+            }
+
+            if (fullName) {
+                displayName = fullName;
+            } else if (username) {
+                displayName = username;
             }
         }
     } catch (error) {
         // ignore member lookup failures
     }
 
-    const profile = { displayName };
+    const profile = { displayName, username, fullName };
     if (cache) {
         cache.set(cacheKey, profile);
     }
@@ -1448,7 +1459,27 @@ async function sendTodayCheckinList(chatId, adminId, { fallbackLang } = {}) {
     for (const record of records) {
         const profile = await resolveMemberProfile(chatId, record.userId, lang, profileCache);
         const memberSummary = await db.getCheckinMemberSummary(chatId, record.userId);
-        const entryLines = [`• <b>${escapeHtml(profile.displayName)}</b>`];
+        const safeId = `<code>${escapeHtml(record.userId.toString())}</code>`;
+        const safeName = `<b>${escapeHtml(profile.displayName)}</b>`;
+        const entryLines = [
+            t(lang, 'checkin_admin_today_member_line', {
+                name: safeName,
+                id: safeId
+            })
+        ];
+
+        if (profile.username && profile.username !== profile.displayName) {
+            entryLines.push(`&nbsp;&nbsp;${t(lang, 'checkin_admin_today_username_line', {
+                username: `<code>${escapeHtml(profile.username)}</code>`
+            })}`);
+        }
+
+        if (profile.fullName && profile.fullName !== profile.displayName) {
+            entryLines.push(`&nbsp;&nbsp;${t(lang, 'checkin_admin_today_fullname_line', {
+                fullName: `<i>${escapeHtml(profile.fullName)}</i>`
+            })}`);
+        }
+
         const walletText = record.walletAddress
             ? t(lang, 'checkin_admin_today_wallet', { wallet: `<code>${escapeHtml(record.walletAddress)}</code>` })
             : t(lang, 'checkin_admin_today_wallet', { wallet: `<i>${escapeHtml(t(lang, 'checkin_admin_wallet_unknown'))}</i>` });
@@ -1513,6 +1544,8 @@ async function promptAdminForRemoval(chatId, adminId, { fallbackLang } = {}) {
         const profile = await resolveMemberProfile(chatId, record.userId, lang, profileCache);
         const walletPreview = formatWalletPreview(record.walletAddress)
             || t(lang, 'checkin_admin_wallet_unknown');
+        const safeId = `<code>${escapeHtml(record.userId.toString())}</code>`;
+        const safeName = `<b>${escapeHtml(profile.displayName)}</b>`;
         const walletDisplay = record.walletAddress
             ? t(lang, 'checkin_admin_today_wallet', { wallet: `<code>${escapeHtml(record.walletAddress)}</code>` })
             : t(lang, 'checkin_admin_today_wallet', { wallet: `<i>${escapeHtml(t(lang, 'checkin_admin_wallet_unknown'))}</i>` });
@@ -1525,17 +1558,35 @@ async function promptAdminForRemoval(chatId, adminId, { fallbackLang } = {}) {
             : pointsValue;
 
         const entryLines = [
-            `• <b>${escapeHtml(profile.displayName)}</b>`,
-            `&nbsp;&nbsp;${walletDisplay}`,
-            `&nbsp;&nbsp;${escapeHtml(t(lang, 'checkin_admin_today_points', { points: pointsValue }))}`,
-            `&nbsp;&nbsp;${escapeHtml(t(lang, 'checkin_admin_today_total_points', { points: totalPointsValue }))}`
+            t(lang, 'checkin_admin_today_member_line', {
+                name: safeName,
+                id: safeId
+            })
         ];
+
+        if (profile.username && profile.username !== profile.displayName) {
+            entryLines.push(`&nbsp;&nbsp;${t(lang, 'checkin_admin_today_username_line', {
+                username: `<code>${escapeHtml(profile.username)}</code>`
+            })}`);
+        }
+
+        if (profile.fullName && profile.fullName !== profile.displayName) {
+            entryLines.push(`&nbsp;&nbsp;${t(lang, 'checkin_admin_today_fullname_line', {
+                fullName: `<i>${escapeHtml(profile.fullName)}</i>`
+            })}`);
+        }
+
+        entryLines.push(`&nbsp;&nbsp;${walletDisplay}`);
+        entryLines.push(`&nbsp;&nbsp;${escapeHtml(t(lang, 'checkin_admin_today_points', { points: pointsValue }))}`);
+        entryLines.push(`&nbsp;&nbsp;${escapeHtml(t(lang, 'checkin_admin_today_total_points', { points: totalPointsValue }))}`);
+
         lines.push(entryLines.join('\n'));
         lines.push('');
 
         const buttonLabelRaw = t(lang, 'checkin_admin_remove_option_detail', {
             user: profile.displayName,
-            wallet: walletPreview
+            wallet: walletPreview,
+            id: record.userId
         });
         inline_keyboard.push([{
             text: truncateLabel(buttonLabelRaw, 64),
@@ -1711,11 +1762,14 @@ async function executeAdminRemoval(chatId, adminId, targetUserId, { fallbackLang
     const walletLabel = record.walletAddress
         ? `<code>${escapeHtml(record.walletAddress)}</code>`
         : `<i>${escapeHtml(t(adminLang, 'checkin_admin_wallet_unknown'))}</i>`;
+    const userLabel = `<b>${escapeHtml(profile.displayName)}</b>`;
+    const idLabel = `<code>${escapeHtml(targetUserId.toString())}</code>`;
 
     await sendEphemeralMessage(
         adminId,
         t(adminLang, 'checkin_admin_remove_success', {
-            user: escapeHtml(profile.displayName),
+            user: userLabel,
+            id: idLabel,
             wallet: walletLabel
         }),
         { parse_mode: 'HTML' }
@@ -4664,7 +4718,7 @@ function startTelegramBot() {
         const lang = await getLang(msg);
 
         try {
-            const snapshot = await fetchBanmaoQuoteSnapshot();
+            const snapshot = await fetchBanmaoPrice();
             if (!snapshot || !Number.isFinite(snapshot.price)) {
                 throw new Error('No price returned');
             }
@@ -4675,17 +4729,27 @@ function startTelegramBot() {
                 ? formatTokenQuantity(priceOkbNumeric, { minimumFractionDigits: 8, maximumFractionDigits: 8 })
                 : null;
 
-            const fromAmountText = formatTokenAmountFromUnits(
+            let fromAmountText = formatTokenAmountFromUnits(
                 snapshot.fromAmount ?? snapshot.amount,
                 snapshot.decimals,
                 { minimumFractionDigits: 0, maximumFractionDigits: 6 }
-            ) || '1';
+            );
+            if (!fromAmountText) {
+                fromAmountText = '1';
+            }
 
-            const toAmountText = formatTokenAmountFromUnits(
+            let toAmountText = formatTokenAmountFromUnits(
                 snapshot.toAmount,
                 snapshot.quoteDecimals,
                 { minimumFractionDigits: 6, maximumFractionDigits: 8 }
             );
+            const priceNumeric = Number(snapshot.price);
+            if (!toAmountText && Number.isFinite(priceNumeric)) {
+                toAmountText = formatTokenQuantity(priceNumeric, {
+                    minimumFractionDigits: 6,
+                    maximumFractionDigits: 8
+                });
+            }
 
             const priceImpactText = Number.isFinite(snapshot.priceImpactPercent)
                 ? formatPercentage(snapshot.priceImpactPercent, {
@@ -4699,6 +4763,10 @@ function startTelegramBot() {
                 ? formatUsdPrice(snapshot.tradeFeeUsd)
                 : null;
 
+            const routeText = typeof snapshot.routeLabel === 'string' && snapshot.routeLabel.trim()
+                ? snapshot.routeLabel.trim()
+                : null;
+
             const sourceLabelParts = [];
             if (typeof snapshot.source === 'string' && snapshot.source.trim()) {
                 sourceLabelParts.push(snapshot.source.trim());
@@ -4710,24 +4778,25 @@ function startTelegramBot() {
             }
             const sourceLabel = sourceLabelParts.join(' · ');
 
+            const timestamp = snapshot.timestamp ? new Date(snapshot.timestamp) : new Date();
+            const timestampIso = Number.isNaN(timestamp.getTime()) ? new Date().toISOString() : timestamp.toISOString();
+
             const lines = [
                 t(lang, 'banmaoprice_title'),
                 '',
-                t(lang, 'banmaoprice_rate', {
+                t(lang, 'banmaoprice_quote_line', {
                     fromAmount: fromAmountText,
-                    fromSymbol: snapshot.baseSymbol || 'BANMAO',
-                    toAmount: toAmountText,
-                    toSymbol: snapshot.quoteSymbol || 'USDT'
+                    fromSymbol: snapshot.fromSymbol || snapshot.baseSymbol || 'BANMAO',
+                    toAmount: toAmountText || '—',
+                    toSymbol: snapshot.toSymbol || snapshot.quoteSymbol || 'USDT'
                 }),
-                priceOkbText ? t(lang, 'banmaoprice_rate_okb', { price: priceOkbText }) : null,
-                t(lang, 'banmaoprice_rate_usd', { price: priceUsdText }),
-                priceImpactText ? t(lang, 'banmaoprice_price_impact', { impact: priceImpactText }) : null,
-                feeText ? t(lang, 'banmaoprice_fee', { fee: feeText }) : null,
-                '',
-                t(lang, 'banmaoprice_updated_at', {
-                    timestamp: new Date(snapshot.timestamp).toISOString()
-                }),
-                t(lang, 'banmaoprice_source', { source: sourceLabel })
+                t(lang, 'banmaoprice_price_usd', { priceUsd: priceUsdText }),
+                priceOkbText && priceOkbText !== '—' ? t(lang, 'banmaoprice_price_okb', { priceOkb: priceOkbText }) : null,
+                feeText ? t(lang, 'banmaoprice_fee_line', { feeUsd: feeText }) : null,
+                priceImpactText ? t(lang, 'banmaoprice_price_impact_line', { impact: priceImpactText }) : null,
+                routeText ? t(lang, 'banmaoprice_route_line', { route: routeText }) : null,
+                t(lang, 'banmaoprice_timestamp_line', { timestamp: timestampIso }),
+                t(lang, 'banmaoprice_source_line', { source: sourceLabel })
             ].filter(Boolean);
 
             await sendMessageRespectingThread(chatId, msg, lines.join('\n'), { parse_mode: 'Markdown' });
