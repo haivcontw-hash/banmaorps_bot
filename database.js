@@ -490,6 +490,28 @@ async function getCheckinsForDate(chatId, checkinDate) {
     return rows;
 }
 
+async function getCheckinMemberSummary(chatId, userId) {
+    if (!chatId || !userId) {
+        return null;
+    }
+
+    const row = await dbGet(
+        'SELECT streak, longestStreak, totalCheckins, totalPoints FROM checkin_members WHERE chatId = ? AND userId = ?',
+        [chatId, userId]
+    );
+
+    if (!row) {
+        return null;
+    }
+
+    return {
+        streak: Number(row.streak || 0),
+        longestStreak: Number(row.longestStreak || 0),
+        totalCheckins: Number(row.totalCheckins || 0),
+        totalPoints: Number(row.totalPoints || 0)
+    };
+}
+
 async function getTopCheckins(chatId, limit = 10, mode = 'streak') {
     const allowedModes = new Set(['streak', 'total', 'points', 'longest']);
     const finalMode = allowedModes.has(mode) ? mode : 'streak';
@@ -978,6 +1000,7 @@ module.exports = {
     completeCheckin,
     updateCheckinFeedback,
     getCheckinsForDate,
+    getCheckinMemberSummary,
     getTopCheckins,
     removeCheckinRecord,
     unlockMemberCheckin,
