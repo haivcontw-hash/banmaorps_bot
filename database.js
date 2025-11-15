@@ -30,9 +30,23 @@ function parsePostgresConfigFromUrl(connectionString) {
             ? false
             : { rejectUnauthorized: false };
 
+        const host = parsed.hostname || null;
+        const port = parsed.port ? Number(parsed.port) : 5432;
+        const user = parsed.username ? decodeURIComponent(parsed.username) : null;
+        const password = parsed.password ? decodeURIComponent(parsed.password) : null;
+        let database = parsed.pathname ? decodeURIComponent(parsed.pathname.replace(/^\//, '')) || null : null;
+        if (!database && user) {
+            database = user;
+        }
+
         return {
             connectionString: sanitised.replace(/^postgresql:/i, 'postgres:'),
-            ssl
+            ssl,
+            host,
+            port,
+            user,
+            password,
+            database
         };
     } catch (error) {
         console.error('[Supabase] Không thể phân tích cấu hình PostgreSQL:', error.message);
@@ -377,8 +391,30 @@ if (SUPABASE_CONNECTION_STRING) {
                 throw new Error('Chuỗi kết nối Supabase không hợp lệ');
             }
 
+            const baseConfig = {};
+
+            if (poolConfig.host) {
+                baseConfig.host = poolConfig.host;
+            }
+            if (poolConfig.port) {
+                baseConfig.port = poolConfig.port;
+            }
+            if (poolConfig.user) {
+                baseConfig.user = poolConfig.user;
+            }
+            if (poolConfig.password !== null && poolConfig.password !== undefined) {
+                baseConfig.password = poolConfig.password;
+            }
+            if (poolConfig.database) {
+                baseConfig.database = poolConfig.database;
+            }
+
+            if (!baseConfig.host && poolConfig.connectionString) {
+                baseConfig.connectionString = poolConfig.connectionString;
+            }
+
             supabasePool = new Pool({
-                connectionString: poolConfig.connectionString,
+                ...baseConfig,
                 ssl: poolConfig.ssl,
                 max: Number.isFinite(SUPABASE_POOL_MAX) ? SUPABASE_POOL_MAX : 5,
                 idleTimeoutMillis: 30_000
