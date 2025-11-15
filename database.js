@@ -35,13 +35,13 @@ const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
 
 const CHECKIN_DEFAULTS = {
     checkinTime: '08:00',
-    timezone: 'Asia/Ho_Chi_Minh',
+    timezone: 'UTC',
     autoMessageEnabled: 1,
     dailyPoints: 10,
     summaryWindow: 7
 };
 
-function getTodayDateString(timezone = 'Asia/Ho_Chi_Minh') {
+function getTodayDateString(timezone = 'UTC') {
     try {
         const formatter = new Intl.DateTimeFormat('en-CA', {
             timeZone: timezone,
@@ -633,7 +633,7 @@ async function init() {
         CREATE TABLE IF NOT EXISTS checkin_groups (
             chatId TEXT PRIMARY KEY,
             checkinTime TEXT NOT NULL DEFAULT '08:00',
-            timezone TEXT NOT NULL DEFAULT 'Asia/Ho_Chi_Minh',
+            timezone TEXT NOT NULL DEFAULT 'UTC',
             autoMessageEnabled INTEGER NOT NULL DEFAULT 1,
             dailyPoints INTEGER NOT NULL DEFAULT 10,
             summaryWindow INTEGER NOT NULL DEFAULT 7,
@@ -641,6 +641,12 @@ async function init() {
             createdAt INTEGER NOT NULL,
             updatedAt INTEGER NOT NULL
         );
+    `);
+
+    await dbRun(`
+        UPDATE checkin_groups
+        SET timezone = 'UTC'
+        WHERE timezone IS NULL OR timezone = 'Asia/Ho_Chi_Minh'
     `);
 
     await dbRun(`
