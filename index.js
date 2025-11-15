@@ -5308,19 +5308,14 @@ function startTelegramBot() {
                 }
 
                 try {
-                    const inline_keyboard = [[
-                        { text: t(callbackLang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${targetChatId}` },
-                        { text: t(callbackLang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${targetChatId}` }
-                    ]];
-
-                    await bot.sendMessage(query.from.id, t(callbackLang, 'checkin_admin_user_prompt_text', { chatId: targetChatId }), {
-                        reply_markup: { inline_keyboard },
+                    const groupLang = await resolveGroupLanguage(targetChatId);
+                    await bot.sendMessage(targetChatId, t(groupLang, 'checkin_admin_user_prompt_text'), {
                         disable_web_page_preview: true
                     });
 
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_user_prompt_alert') });
                 } catch (error) {
-                    console.error(`[Checkin] Unable to send member guide to admin ${query.from.id}: ${error.message}`);
+                    console.error(`[Checkin] Failed to broadcast member guide for ${targetChatId}: ${error.message}`);
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_command_error'), show_alert: true });
                 }
                 return;
@@ -5340,19 +5335,14 @@ function startTelegramBot() {
                 }
 
                 try {
-                    const inline_keyboard = [[
-                        { text: t(callbackLang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${targetChatId}` },
-                        { text: t(callbackLang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${targetChatId}` }
-                    ]];
-
-                    await bot.sendMessage(query.from.id, t(callbackLang, 'checkin_admin_user_leaderboard_text', { chatId: targetChatId }), {
-                        reply_markup: { inline_keyboard },
+                    const groupLang = await resolveGroupLanguage(targetChatId);
+                    await bot.sendMessage(targetChatId, t(groupLang, 'checkin_admin_user_leaderboard_text'), {
                         disable_web_page_preview: true
                     });
 
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_user_leaderboard_alert') });
                 } catch (error) {
-                    console.error(`[Checkin] Unable to send leaderboard guide to admin ${query.from.id}: ${error.message}`);
+                    console.error(`[Checkin] Failed to broadcast leaderboard guide for ${targetChatId}: ${error.message}`);
                     await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_command_error'), show_alert: true });
                 }
                 return;
