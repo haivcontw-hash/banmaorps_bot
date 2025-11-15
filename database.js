@@ -306,9 +306,15 @@ function createSupabaseRestClient(baseUrl, apiKey) {
 }
 
 let Pool = null;
+let createPgLitePool = null;
 try {
     ({ Pool } = require('pg'));
 } catch (error) {
+    try {
+        ({ createPgLitePool } = require('./supabase-pg-lite.js'));
+    } catch (fallbackError) {
+        createPgLitePool = null;
+    }
     // Module pg có thể chưa được cài đặt – sẽ cảnh báo khi cố kết nối.
 }
 
@@ -333,9 +339,7 @@ let supabaseRestClient = null;
 let supabaseSchemaEnsured = false;
 
 if (SUPABASE_CONNECTION_STRING) {
-    if (!Pool) {
-        console.warn('[Supabase] Module "pg" chưa được cài đặt. Vui lòng chạy npm install trước khi đồng bộ.');
-    } else {
+    if (Pool) {
         try {
             supabasePool = new Pool({
                 connectionString: SUPABASE_CONNECTION_STRING,
@@ -359,6 +363,22 @@ if (SUPABASE_CONNECTION_STRING) {
         } catch (error) {
             console.error('[Supabase] Lỗi khởi tạo Pool:', error.message);
         }
+    } else if (createPgLitePool) {
+        try {
+            supabasePool = createPgLitePool(SUPABASE_CONNECTION_STRING);
+            supabasePool
+                .query('select 1')
+                .then(() => {
+                    console.log('[Supabase] Đã kết nối tới PostgreSQL (trình điều khiển tích hợp).');
+                })
+                .catch((err) => {
+                    console.error('[Supabase] Không thể kiểm tra kết nối (trình điều khiển tích hợp):', err.message);
+                });
+        } catch (error) {
+            console.error('[Supabase] Lỗi khởi tạo trình điều khiển tích hợp:', error.message);
+        }
+    } else {
+        console.warn('[Supabase] Module "pg" chưa được cài đặt và không thể tải trình điều khiển tích hợp. Vui lòng chạy npm install trước khi đồng bộ.');
     }
 } else {
     console.log('[Supabase] Không tìm thấy chuỗi kết nối, bỏ qua đồng bộ Supabase.');
