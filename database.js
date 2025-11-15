@@ -1,6 +1,74 @@
 const sqlite3 = require('sqlite3').verbose();
-const { Pool } = require('pg');
 const { normalizeLanguageCode } = require('./i18n.js');
+
+function resolveSupabaseConnectionString() {
+    const candidates = [
+        'SUPABASE_CONNECTION_STRING',
+        'SUPABASE_CONNECTION_URI',
+        'SUPABASE_DATABASE_URL',
+        'SUPABASE_DB_URL',
+        'SUPABASE_URL',
+        'DATABASE_URL',
+        'POSTGRES_URL'
+    ];
+
+    for (const key of candidates) {
+        const raw = process.env[key];
+        if (typeof raw !== 'string') {
+            continue;
+        }
+
+        const trimmed = raw.trim();
+        if (!trimmed) {
+            continue;
+        }
+
+        const sanitised = sanitisePostgresConnectionString(trimmed);
+        if (sanitised) {
+            return sanitised;
+        }
+    }
+
+    return null;
+}
+
+function sanitisePostgresConnectionString(raw) {
+    try {
+        const parsed = new URL(raw);
+
+        if (!/^postgres(?:ql)?:$/i.test(parsed.protocol)) {
+            return null;
+        }
+
+        if (parsed.username) {
+            parsed.username = decodeURIComponent(parsed.username);
+        }
+
+        if (parsed.password) {
+            parsed.password = decodeURIComponent(parsed.password);
+        }
+
+        // URL sẽ tự động encode lại khi toString()
+        const normalisedProtocol = parsed.protocol.toLowerCase() === 'postgres:' ? 'postgresql:' : parsed.protocol;
+        parsed.protocol = normalisedProtocol;
+        return parsed.toString();
+    } catch (error) {
+        const match = raw.match(/^(postgres(?:ql)?:\/\/[^:]+:)([^@]+)@(.+)$/i);
+        if (match) {
+            return `${match[1]}${encodeURIComponent(match[2])}@${match[3]}`;
+        }
+
+        console.error('[Supabase] Chuỗi kết nối không hợp lệ:', error.message);
+        return null;
+    }
+}
+
+let Pool = null;
+try {
+    ({ Pool } = require('pg'));
+} catch (error) {
+    // Module pg có thể chưa được cài đặt – sẽ cảnh báo khi cố kết nối.
+}
 
 const db = new sqlite3.Database('banmao.db', (err) => {
     if (err) {
@@ -11,39 +79,38 @@ const db = new sqlite3.Database('banmao.db', (err) => {
 });
 const ethers = require('ethers');
 
-const SUPABASE_CONNECTION_STRING =
-    process.env.SUPABASE_CONNECTION_STRING ||
-    process.env.SUPABASE_DB_URL ||
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_URL ||
-    null;
+const SUPABASE_CONNECTION_STRING = resolveSupabaseConnectionString();
 const SUPABASE_POOL_MAX = Number(process.env.SUPABASE_POOL_MAX || 5);
 
 let supabasePool = null;
 
 if (SUPABASE_CONNECTION_STRING) {
-    try {
-        supabasePool = new Pool({
-            connectionString: SUPABASE_CONNECTION_STRING,
-            max: Number.isFinite(SUPABASE_POOL_MAX) ? SUPABASE_POOL_MAX : 5,
-            idleTimeoutMillis: 30_000,
-            ssl: { rejectUnauthorized: false }
-        });
-
-        supabasePool.on('error', (err) => {
-            console.error('[Supabase] Lỗi kết nối không mong muốn:', err);
-        });
-
-        supabasePool
-            .query('select 1')
-            .then(() => {
-                console.log('[Supabase] Đã kết nối tới PostgreSQL.');
-            })
-            .catch((err) => {
-                console.error('[Supabase] Không thể kiểm tra kết nối:', err.message);
+    if (!Pool) {
+        console.warn('[Supabase] Module "pg" chưa được cài đặt. Vui lòng chạy npm install trước khi đồng bộ.');
+    } else {
+        try {
+            supabasePool = new Pool({
+                connectionString: SUPABASE_CONNECTION_STRING,
+                max: Number.isFinite(SUPABASE_POOL_MAX) ? SUPABASE_POOL_MAX : 5,
+                idleTimeoutMillis: 30_000,
+                ssl: { require: true, rejectUnauthorized: false }
             });
-    } catch (error) {
-        console.error('[Supabase] Lỗi khởi tạo Pool:', error.message);
+
+            supabasePool.on('error', (err) => {
+                console.error('[Supabase] Lỗi kết nối không mong muốn:', err);
+            });
+
+            supabasePool
+                .query('select 1')
+                .then(() => {
+                    console.log('[Supabase] Đã kết nối tới PostgreSQL.');
+                })
+                .catch((err) => {
+                    console.error('[Supabase] Không thể kiểm tra kết nối:', err.message);
+                });
+        } catch (error) {
+            console.error('[Supabase] Lỗi khởi tạo Pool:', error.message);
+        }
     }
 } else {
     console.log('[Supabase] Không tìm thấy chuỗi kết nối, bỏ qua đồng bộ Supabase.');
