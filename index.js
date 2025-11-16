@@ -6594,9 +6594,16 @@ async function handleRoomCreatedEvent(roomId, creator, stake) {
         const snapshot = {};
         if (creatorAddress) snapshot.creator = creatorAddress;
         if (stakeWei !== undefined) snapshot.stakeWei = stakeWei;
+        const stakeAmount = stakeWei !== undefined ? Number(ethers.formatEther(stakeWei)) : null;
         updateRoomCache(roomId, snapshot);
 
         await getRoomState(roomId, { refresh: true });
+
+        await broadcastGroupGameUpdate('lobby', {
+            roomId: roomIdStr,
+            creatorAddress,
+            stakeAmount
+        });
     } catch (err) {
         console.warn(`[RoomCreated] Không thể cập nhật cache cho phòng ${roomIdStr}: ${err.message}`);
     }
@@ -7283,8 +7290,10 @@ async function broadcastGroupGameUpdate(eventType, payload) {
         }
 
         if (messagePayload.withButton) {
+            const buttonText = messagePayload.buttonText || `🔥 ${t(lang, 'group_broadcast_cta')}`;
+            const buttonUrl = messagePayload.buttonUrl || WEB_URL;
             options.reply_markup = {
-                inline_keyboard: [[{ text: `🔥 ${t(lang, 'group_broadcast_cta')}`, url: WEB_URL }]]
+                inline_keyboard: [[{ text: buttonText, url: buttonUrl }]]
             };
         }
 
@@ -7338,7 +7347,9 @@ async function broadcastGroupGameUpdate(eventType, payload) {
 
                 const dmOptions = { parse_mode: "Markdown", disable_web_page_preview: true };
                 if (personalPayload.withButton) {
-                    dmOptions.reply_markup = { inline_keyboard: [[{ text: `🔥 ${t(memberLang, 'group_broadcast_cta')}`, url: WEB_URL }]] };
+                    const dmButtonText = personalPayload.buttonText || `🔥 ${t(memberLang, 'group_broadcast_cta')}`;
+                    const dmButtonUrl = personalPayload.buttonUrl || WEB_URL;
+                    dmOptions.reply_markup = { inline_keyboard: [[{ text: dmButtonText, url: dmButtonUrl }]] };
                 }
 
                 try {
@@ -7360,6 +7371,35 @@ async function broadcastGroupGameUpdate(eventType, payload) {
 
 function buildGroupBroadcastMessage(eventType, lang, payload) {
     if (!payload) return null;
+
+    if (eventType === 'lobby') {
+        const header = `🚪 *${t(lang, 'group_lobby_header')}*`;
+        const lines = [];
+        lines.push(`🆔 ${t(lang, 'group_broadcast_room', { roomId: payload.roomId ?? '—' })}`);
+
+        if (payload.stakeAmount !== undefined && payload.stakeAmount !== null) {
+            lines.push(`💰 ${t(lang, 'group_broadcast_stake', { amount: formatBanmao(payload.stakeAmount) })}`);
+        }
+
+        if (payload.creatorAddress) {
+            lines.push(`👤 ${t(lang, 'group_lobby_creator', { creator: shortAddress(payload.creatorAddress) })}`);
+        }
+
+        lines.push(`⚡ ${t(lang, 'group_lobby_auto')}`);
+        lines.push(`🔥 ${t(lang, 'group_broadcast_footer')}`);
+
+        const joinParam = payload.roomId !== undefined && payload.roomId !== null
+            ? encodeURIComponent(payload.roomId.toString())
+            : '';
+        const buttonUrl = `${WEB_URL}/?join=${joinParam}`;
+
+        return {
+            text: [header, '', ...lines].join('\n'),
+            withButton: true,
+            buttonText: `🎮 ${t(lang, 'group_lobby_button_join')}`,
+            buttonUrl
+        };
+    }
 
     const lines = [];
     const header = `🔥 *${t(lang, 'group_broadcast_header')}* 🔥`;
