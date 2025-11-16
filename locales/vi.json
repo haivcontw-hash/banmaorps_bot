@@ -156,6 +156,7 @@
   "help_group_admin_title": "Công cụ quản trị",
   "help_group_admin_desc": "Mở trung tâm quản trị để nhắc nhở, quản lý danh sách và cấu hình phần thưởng.",
   "help_group_command_hint": "Lệnh: {commands}",
+  "help_child_command_hint": "Các lệnh trong mục này",
   "help_command_start": "Mở lại thẻ chào mừng trong DApp và liên kết ví của bạn.",
   "help_command_register": "Liên kết ví để nhận thưởng từ các hoạt động.",
   "help_command_mywallet": "Hiển thị địa chỉ ví đang gắn với tài khoản.",

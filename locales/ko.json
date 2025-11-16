@@ -156,6 +156,7 @@
   "help_group_admin_title": "관리 도구",
   "help_group_admin_desc": "알림·출석·보상을 관리하는 허브를 엽니다.",
   "help_group_command_hint": "명령어: {commands}",
+  "help_child_command_hint": "이 섹션의 명령",
   "help_command_start": "DApp 환영 카드를 다시 열고 지갑을 연결합니다.",
   "help_command_register": "보상을 받기 위해 지갑 주소를 연결합니다.",
   "help_command_mywallet": "현재 계정에 연결된 지갑 주소를 확인합니다.",

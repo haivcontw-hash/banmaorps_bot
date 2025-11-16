@@ -156,6 +156,7 @@
   "help_group_admin_title": "Alat admin",
   "help_group_admin_desc": "Buka hub admin untuk mengelola pengingat, daftar, dan hadiah.",
   "help_group_command_hint": "Perintah: {commands}",
+  "help_child_command_hint": "Perintah dalam bagian ini",
   "help_command_start": "Buka lagi kartu sambutan di DApp dan tautkan dompetmu.",
   "help_command_register": "Hubungkan dompet agar bisa menerima hadiah.",
   "help_command_mywallet": "Tampilkan dompet yang saat ini terhubung.",

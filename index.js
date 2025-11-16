@@ -43,7 +43,8 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || null;
 const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || null;
 const OKX_API_PROJECT = process.env.OKX_API_PROJECT || null;
 const OKX_API_SIMULATED = String(process.env.OKX_API_SIMULATED || '').toLowerCase() === 'true';
-const COMMUNITY_WALLET_ADDRESS = normalizeAddress(process.env.COMMUNITY_WALLET_ADDRESS) || null;
+const DEFAULT_COMMUNITY_WALLET = '0x92809f2837f708163d375960063c8a3156fceacb';
+const COMMUNITY_WALLET_ADDRESS = normalizeAddress(process.env.COMMUNITY_WALLET_ADDRESS) || DEFAULT_COMMUNITY_WALLET;
 const DEFAULT_DEAD_WALLET_ADDRESS = '0x000000000000000000000000000000000000dEaD';
 const DEAD_WALLET_ADDRESS = normalizeAddress(process.env.DEAD_WALLET_ADDRESS) || DEFAULT_DEAD_WALLET_ADDRESS;
 const OKX_OKB_TOKEN_ADDRESSES = (() => {
@@ -689,7 +690,7 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
             }
             const title = t(lang, detail.titleKey);
             const isActive = groupKey === activeGroup;
-            const prefix = isActive ? '✅' : '•';
+            const prefix = isActive ? '🔽' : '•';
             row.push({ text: `${prefix} ${detail.icon} ${title}`, callback_data: `help_group|${view}|${groupKey}` });
         }
         if (row.length > 0) {
@@ -698,8 +699,9 @@ function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
     }
 
     const activeDetail = activeGroup ? HELP_GROUP_DETAILS[activeGroup] : null;
-    if (activeDetail) {
-        const commands = (activeDetail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]);
+    const commands = activeDetail ? (activeDetail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]) : [];
+    if (commands.length > 0) {
+        inline_keyboard.push([{ text: `⬇️ ${t(lang, 'help_child_command_hint')}`, callback_data: 'help_separator' }]);
         for (let i = 0; i < commands.length; i += 2) {
             const row = [];
             for (let j = i; j < Math.min(i + 2, commands.length); j += 1) {
@@ -6734,6 +6736,11 @@ function startTelegramBot() {
                     }
                     clearHelpMessageState(query.message.chat.id.toString(), query.message.message_id);
                 }
+                await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data === 'help_separator') {
                 await bot.answerCallbackQuery(queryId);
                 return;
             }

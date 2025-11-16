@@ -156,6 +156,7 @@
   "help_group_admin_title": "Admin tools",
   "help_group_admin_desc": "Open the admin menu to manage reminders, attendance, and rewards.",
   "help_group_command_hint": "Commands: {commands}",
+  "help_child_command_hint": "Commands in this section",
   "help_command_start": "Reopen the welcome card from the DApp and link your wallet.",
   "help_command_register": "Bind your wallet address to receive rewards.",
   "help_command_mywallet": "Show the wallet address currently linked to your account.",

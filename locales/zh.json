@@ -156,6 +156,7 @@
   "help_group_admin_title": "管理工具",
   "help_group_admin_desc": "打开管理中心以发送提醒、管理名单与奖励。",
   "help_group_command_hint": "指令：{commands}",
+  "help_child_command_hint": "本分组可用指令",
   "help_command_start": "重新打开 DApp 欢迎卡片并绑定你的钱包。",
   "help_command_register": "绑定钱包地址以领取奖励。",
   "help_command_mywallet": "显示当前绑定到账户的钱包地址。",
