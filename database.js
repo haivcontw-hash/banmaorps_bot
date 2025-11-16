@@ -98,6 +98,38 @@ function normalizeAutoMessageTimes(value, fallbackTime = '08:00') {
     return normalized.sort();
 }
 
+function normalizeSummaryMessageTimes(value) {
+    let rawList = [];
+
+    if (Array.isArray(value)) {
+        rawList = value;
+    } else if (typeof value === 'string' && value.trim()) {
+        try {
+            const parsed = JSON.parse(value);
+            if (Array.isArray(parsed)) {
+                rawList = parsed;
+            } else {
+                rawList = value.split(',');
+            }
+        } catch (error) {
+            rawList = value.split(',');
+        }
+    }
+
+    const seen = new Set();
+    const normalized = [];
+    for (const entry of rawList) {
+        const slot = sanitizeTimeSlot(entry);
+        if (!slot || seen.has(slot)) {
+            continue;
+        }
+        seen.add(slot);
+        normalized.push(slot);
+    }
+
+    return normalized.sort();
+}
+
 const CHECKIN_DEFAULTS = {
     checkinTime: '08:00',
     timezone: 'UTC',
@@ -108,6 +140,8 @@ const CHECKIN_DEFAULTS = {
     physicsWeight: 1,
     chemistryWeight: 1,
     autoMessageTimes: ['08:00'],
+    summaryMessageEnabled: 0,
+    summaryMessageTimes: [],
     leaderboardPeriodStart: null
 };
 
@@ -194,8 +228,8 @@ async function ensureCheckinGroup(chatId) {
     const defaultStart = getTodayDateString(CHECKIN_DEFAULTS.timezone);
 
     await dbRun(
-        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, autoMessageTimes, leaderboardPeriodStart, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, autoMessageTimes, summaryMessageEnabled, summaryMessageTimes, leaderboardPeriodStart, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             chatId,
             CHECKIN_DEFAULTS.checkinTime,
@@ -207,6 +241,8 @@ async function ensureCheckinGroup(chatId) {
             CHECKIN_DEFAULTS.physicsWeight,
             CHECKIN_DEFAULTS.chemistryWeight,
             JSON.stringify(CHECKIN_DEFAULTS.autoMessageTimes),
+            CHECKIN_DEFAULTS.summaryMessageEnabled,
+            JSON.stringify(CHECKIN_DEFAULTS.summaryMessageTimes),
             defaultStart,
             now,
             now
@@ -239,6 +275,8 @@ async function getCheckinGroup(chatId) {
         chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
         lastAutoMessageDate: row.lastAutoMessageDate || null,
         autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime),
+        summaryMessageEnabled: row.summaryMessageEnabled ?? CHECKIN_DEFAULTS.summaryMessageEnabled,
+        summaryMessageTimes: normalizeSummaryMessageTimes(row.summaryMessageTimes),
         leaderboardPeriodStart: resolveLeaderboardPeriodStart(row.leaderboardPeriodStart, row.timezone || CHECKIN_DEFAULTS.timezone)
     };
 }
@@ -261,6 +299,8 @@ async function listCheckinGroups() {
         chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
         lastAutoMessageDate: row.lastAutoMessageDate || null,
         autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime),
+        summaryMessageEnabled: row.summaryMessageEnabled ?? CHECKIN_DEFAULTS.summaryMessageEnabled,
+        summaryMessageTimes: normalizeSummaryMessageTimes(row.summaryMessageTimes),
         leaderboardPeriodStart: resolveLeaderboardPeriodStart(row.leaderboardPeriodStart, row.timezone || CHECKIN_DEFAULTS.timezone)
     }));
 }
@@ -269,11 +309,11 @@ async function updateCheckinGroup(chatId, patch = {}) {
     await ensureCheckinGroup(chatId);
     const fields = [];
     const values = [];
-    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight', 'autoMessageTimes', 'leaderboardPeriodStart'];
+    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight', 'autoMessageTimes', 'leaderboardPeriodStart', 'summaryMessageEnabled', 'summaryMessageTimes'];
     for (const key of allowed) {
         if (Object.prototype.hasOwnProperty.call(patch, key)) {
             let value = patch[key];
-            if (key === 'autoMessageTimes' && Array.isArray(value)) {
+            if ((key === 'autoMessageTimes' || key === 'summaryMessageTimes') && Array.isArray(value)) {
                 value = JSON.stringify(value);
             }
             fields.push(`${key} = ?`);
@@ -872,6 +912,43 @@ async function recordAutoMessageLog(chatId, checkinDate, slot) {
     );
 }
 
+async function hasSummaryMessageLog(chatId, summaryDate, slot) {
+    const normalizedDate = normalizeDateString(summaryDate);
+    const normalizedSlot = sanitizeTimeSlot(slot);
+    if (!normalizedDate || !normalizedSlot) {
+        return false;
+    }
+
+    const row = await dbGet(
+        'SELECT 1 FROM checkin_summary_logs WHERE chatId = ? AND summaryDate = ? AND slot = ?',
+        [chatId, normalizedDate, normalizedSlot]
+    );
+
+    return Boolean(row);
+}
+
+async function recordSummaryMessageLog(chatId, summaryDate, slot) {
+    const normalizedDate = normalizeDateString(summaryDate);
+    const normalizedSlot = sanitizeTimeSlot(slot);
+    if (!normalizedDate || !normalizedSlot) {
+        return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        'INSERT OR IGNORE INTO checkin_summary_logs (chatId, summaryDate, slot, sentAt) VALUES (?, ?, ?, ?)',
+        [chatId, normalizedDate, normalizedSlot, now]
+    );
+}
+
+async function resetSummaryMessageLogs(chatId) {
+    if (!chatId) {
+        return;
+    }
+
+    await dbRun('DELETE FROM checkin_summary_logs WHERE chatId = ?', [chatId]);
+}
+
 async function getLockedMembers(chatId, checkinDate) {
     const normalized = normalizeDateString(checkinDate);
     if (!normalized) {
@@ -961,6 +1038,8 @@ async function init() {
             physicsWeight REAL NOT NULL DEFAULT 1,
             chemistryWeight REAL NOT NULL DEFAULT 1,
             autoMessageTimes TEXT,
+            summaryMessageEnabled INTEGER NOT NULL DEFAULT 0,
+            summaryMessageTimes TEXT,
             leaderboardPeriodStart TEXT,
             lastAutoMessageDate TEXT,
             createdAt INTEGER NOT NULL,
@@ -981,10 +1060,34 @@ async function init() {
             throw err;
         }
     }
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN summaryMessageEnabled INTEGER NOT NULL DEFAULT 0`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN summaryMessageTimes TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
     const defaultPeriodStart = getTodayDateString(CHECKIN_DEFAULTS.timezone);
     await dbRun(
         `UPDATE checkin_groups SET leaderboardPeriodStart = COALESCE(leaderboardPeriodStart, ?)`,
         [defaultPeriodStart]
+    );
+    await dbRun(
+        `UPDATE checkin_groups SET summaryMessageEnabled = COALESCE(summaryMessageEnabled, 0)`
+    );
+    await dbRun(
+        `UPDATE checkin_groups SET summaryMessageTimes = CASE
+            WHEN summaryMessageTimes IS NULL OR TRIM(summaryMessageTimes) = '' THEN ?
+            ELSE summaryMessageTimes
+        END`,
+        [JSON.stringify(CHECKIN_DEFAULTS.summaryMessageTimes)]
     );
     const weightDefaults = { mathWeight: 2, physicsWeight: 1, chemistryWeight: 1 };
     for (const column of Object.keys(weightDefaults)) {
@@ -1056,6 +1159,15 @@ async function init() {
             slot TEXT NOT NULL,
             sentAt INTEGER NOT NULL,
             PRIMARY KEY (chatId, checkinDate, slot)
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS checkin_summary_logs (
+            chatId TEXT NOT NULL,
+            summaryDate TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            sentAt INTEGER NOT NULL,
+            PRIMARY KEY (chatId, summaryDate, slot)
         );
     `);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
@@ -1351,6 +1463,9 @@ module.exports = {
     markMemberLocked,
     hasAutoMessageLog,
     recordAutoMessageLog,
+    hasSummaryMessageLog,
+    recordSummaryMessageLog,
+    resetSummaryMessageLogs,
     getLockedMembers,
     addWalletToUser,
     removeWalletFromUser,

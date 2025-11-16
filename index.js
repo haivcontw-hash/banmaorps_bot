@@ -1167,7 +1167,9 @@ async function getGroupCheckinSettings(chatId) {
             dailyPoints: 10,
             summaryWindow: 7,
             lastAutoMessageDate: null,
-            autoMessageTimes: [CHECKIN_DEFAULT_TIME]
+            autoMessageTimes: [CHECKIN_DEFAULT_TIME],
+            summaryMessageEnabled: 0,
+            summaryMessageTimes: []
         };
     }
 }
@@ -2925,6 +2927,9 @@ async function promptAdminSummarySchedule(chatId, adminId, { fallbackLang } = {}
         callback_data: `checkin_admin_summary_schedule_preset|${chatId}|${preset.slots.join(',')}`
     }]));
     inline_keyboard.push([
+        { text: t(lang, 'checkin_admin_button_summary_schedule_reset'), callback_data: `checkin_admin_summary_schedule_reset|${chatId}` }
+    ]);
+    inline_keyboard.push([
         { text: t(lang, 'checkin_admin_button_summary_schedule_custom'), callback_data: `checkin_admin_summary_schedule_custom|${chatId}` },
         { text: t(lang, 'checkin_admin_button_summary_schedule_disable'), callback_data: `checkin_admin_summary_schedule_disable|${chatId}` }
     ]);
@@ -2951,6 +2956,7 @@ async function setAdminSummaryScheduleSlots(chatId, adminId, slots, { fallbackLa
         summaryMessageTimes: sanitized,
         summaryMessageEnabled: 1
     });
+    await db.resetSummaryMessageLogs(chatId);
 
     await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_schedule_updated', {
         count: sanitized.length,
@@ -2965,7 +2971,24 @@ async function disableAdminSummarySchedule(chatId, adminId, { fallbackLang } = {
         summaryMessageTimes: [],
         summaryMessageEnabled: 0
     });
+    await db.resetSummaryMessageLogs(chatId);
     await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_schedule_disabled_alert'));
+    await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'settings' });
+}
+
+async function resetAdminSummarySchedule(chatId, adminId, { fallbackLang } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const slots = getScheduleSlots(settings);
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    await db.updateCheckinGroup(chatId, {
+        summaryMessageTimes: slots,
+        summaryMessageEnabled: 1
+    });
+    await db.resetSummaryMessageLogs(chatId);
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_schedule_reset_success', {
+        count: slots.length,
+        times: slots.join(', ')
+    }));
     await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'settings' });
 }
 
@@ -7886,6 +7909,30 @@ function startTelegramBot() {
                 }
                 await disableAdminSummarySchedule(targetChatId, query.from.id, { fallbackLang: callbackLang });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_schedule_disabled_alert') });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_summary_schedule_reset|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                await resetAdminSummarySchedule(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_schedule_reset_alert') });
                 return;
             }
 
