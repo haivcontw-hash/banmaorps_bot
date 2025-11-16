@@ -136,6 +136,7 @@ const CHECKIN_DEFAULTS = {
     autoMessageEnabled: 1,
     dailyPoints: 10,
     summaryWindow: 7,
+    summaryPeriodStart: null,
     mathWeight: 2,
     physicsWeight: 1,
     chemistryWeight: 1,
@@ -218,6 +219,11 @@ function resolveLeaderboardPeriodStart(value, timezone = CHECKIN_DEFAULTS.timezo
     return getTodayDateString(timezone || CHECKIN_DEFAULTS.timezone);
 }
 
+function resolveSummaryPeriodStart(value) {
+    const normalized = normalizeDateString(value);
+    return normalized || null;
+}
+
 async function ensureCheckinGroup(chatId) {
     const now = Math.floor(Date.now() / 1000);
     const existing = await dbGet('SELECT chatId FROM checkin_groups WHERE chatId = ?', [chatId]);
@@ -228,8 +234,8 @@ async function ensureCheckinGroup(chatId) {
     const defaultStart = getTodayDateString(CHECKIN_DEFAULTS.timezone);
 
     await dbRun(
-        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, autoMessageTimes, summaryMessageEnabled, summaryMessageTimes, leaderboardPeriodStart, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, autoMessageTimes, summaryMessageEnabled, summaryMessageTimes, leaderboardPeriodStart, summaryPeriodStart, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             chatId,
             CHECKIN_DEFAULTS.checkinTime,
@@ -244,6 +250,7 @@ async function ensureCheckinGroup(chatId) {
             CHECKIN_DEFAULTS.summaryMessageEnabled,
             JSON.stringify(CHECKIN_DEFAULTS.summaryMessageTimes),
             defaultStart,
+            CHECKIN_DEFAULTS.summaryPeriodStart,
             now,
             now
         ]
@@ -277,7 +284,8 @@ async function getCheckinGroup(chatId) {
         autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime),
         summaryMessageEnabled: row.summaryMessageEnabled ?? CHECKIN_DEFAULTS.summaryMessageEnabled,
         summaryMessageTimes: normalizeSummaryMessageTimes(row.summaryMessageTimes),
-        leaderboardPeriodStart: resolveLeaderboardPeriodStart(row.leaderboardPeriodStart, row.timezone || CHECKIN_DEFAULTS.timezone)
+        leaderboardPeriodStart: resolveLeaderboardPeriodStart(row.leaderboardPeriodStart, row.timezone || CHECKIN_DEFAULTS.timezone),
+        summaryPeriodStart: resolveSummaryPeriodStart(row.summaryPeriodStart)
     };
 }
 
@@ -301,7 +309,8 @@ async function listCheckinGroups() {
         autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime),
         summaryMessageEnabled: row.summaryMessageEnabled ?? CHECKIN_DEFAULTS.summaryMessageEnabled,
         summaryMessageTimes: normalizeSummaryMessageTimes(row.summaryMessageTimes),
-        leaderboardPeriodStart: resolveLeaderboardPeriodStart(row.leaderboardPeriodStart, row.timezone || CHECKIN_DEFAULTS.timezone)
+        leaderboardPeriodStart: resolveLeaderboardPeriodStart(row.leaderboardPeriodStart, row.timezone || CHECKIN_DEFAULTS.timezone),
+        summaryPeriodStart: resolveSummaryPeriodStart(row.summaryPeriodStart)
     }));
 }
 
@@ -309,7 +318,7 @@ async function updateCheckinGroup(chatId, patch = {}) {
     await ensureCheckinGroup(chatId);
     const fields = [];
     const values = [];
-    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight', 'autoMessageTimes', 'leaderboardPeriodStart', 'summaryMessageEnabled', 'summaryMessageTimes'];
+    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight', 'autoMessageTimes', 'leaderboardPeriodStart', 'summaryMessageEnabled', 'summaryMessageTimes', 'summaryPeriodStart'];
     for (const key of allowed) {
         if (Object.prototype.hasOwnProperty.call(patch, key)) {
             let value = patch[key];
@@ -348,6 +357,16 @@ async function setLeaderboardPeriodStart(chatId, dateStr, timezone = CHECKIN_DEF
     const normalized = normalizeDateString(dateStr);
     const resolved = normalized || getTodayDateString(timezone || CHECKIN_DEFAULTS.timezone);
     return updateCheckinGroup(chatId, { leaderboardPeriodStart: resolved });
+}
+
+async function setSummaryPeriodStart(chatId, dateStr, timezone = CHECKIN_DEFAULTS.timezone) {
+    if (!dateStr && dateStr !== '0') {
+        return updateCheckinGroup(chatId, { summaryPeriodStart: null });
+    }
+
+    const normalized = normalizeDateString(dateStr);
+    const resolved = normalized || getTodayDateString(timezone || CHECKIN_DEFAULTS.timezone);
+    return updateCheckinGroup(chatId, { summaryPeriodStart: resolved });
 }
 
 async function getCheckinAttempt(chatId, userId, checkinDate) {
@@ -1041,6 +1060,7 @@ async function init() {
             summaryMessageEnabled INTEGER NOT NULL DEFAULT 0,
             summaryMessageTimes TEXT,
             leaderboardPeriodStart TEXT,
+            summaryPeriodStart TEXT,
             lastAutoMessageDate TEXT,
             createdAt INTEGER NOT NULL,
             updatedAt INTEGER NOT NULL
@@ -1055,6 +1075,13 @@ async function init() {
     }
     try {
         await dbRun(`ALTER TABLE checkin_groups ADD COLUMN leaderboardPeriodStart TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN summaryPeriodStart TEXT`);
     } catch (err) {
         if (!/duplicate column name/i.test(err.message)) {
             throw err;
@@ -1486,6 +1513,7 @@ module.exports = {
     getGroupSubscription,
     getGroupSubscriptions,
     setLeaderboardPeriodStart,
+    setSummaryPeriodStart,
     getGroupMemberLanguage,
     getGroupMemberLanguages,
     setGroupMemberLanguage,

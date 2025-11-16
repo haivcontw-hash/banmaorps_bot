@@ -288,10 +288,14 @@ function getScheduleSlots(settings = null) {
 
 function getSummaryScheduleSlots(settings = null) {
     const raw = Array.isArray(settings?.summaryMessageTimes) ? settings.summaryMessageTimes : [];
-    if (!raw || raw.length === 0) {
-        return [];
+    const sanitized = sanitizeScheduleSlots(raw);
+    if (sanitized.length > 0) {
+        return sanitized;
     }
-    return sanitizeScheduleSlots(raw);
+    if (Number(settings?.summaryMessageEnabled) === 1) {
+        return getScheduleSlots(settings);
+    }
+    return [];
 }
 
 const pendingCheckinChallenges = new Map();
@@ -948,6 +952,49 @@ function normalizeDateInput(value) {
     return trimmed;
 }
 
+function pickLaterDateString(valueA, valueB) {
+    if (!valueA) {
+        return valueB || null;
+    }
+    if (!valueB) {
+        return valueA;
+    }
+    return valueA >= valueB ? valueA : valueB;
+}
+
+function calculateInclusiveDayDiff(start, end) {
+    if (!start || !end) {
+        return 0;
+    }
+
+    const startDate = new Date(`${start}T00:00:00Z`);
+    const endDate = new Date(`${end}T00:00:00Z`);
+    const diffMs = endDate.getTime() - startDate.getTime();
+    const diffDays = Math.floor(diffMs / 86400000);
+    return diffDays >= 0 ? diffDays + 1 : 0;
+}
+
+function getSummaryPeriodStart(settings) {
+    const normalized = normalizeDateInput(settings?.summaryPeriodStart);
+    return normalized || null;
+}
+
+function getSummaryWindowBounds(settings) {
+    const timezone = settings?.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const configuredDays = Math.max(Number(settings?.summaryWindow) || 1, 1);
+    const endDate = formatDateForTimezone(timezone);
+    const rollingStart = subtractDaysFromDate(endDate, configuredDays - 1) || endDate;
+    const periodStart = getSummaryPeriodStart(settings);
+    const startDate = pickLaterDateString(rollingStart, periodStart) || rollingStart;
+    return {
+        startDate,
+        endDate,
+        periodStart,
+        configuredDays,
+        rangeDays: calculateInclusiveDayDiff(startDate, endDate)
+    };
+}
+
 const SCIENCE_LANGUAGE_SET = new Set([
     ...Object.keys(SCIENCE_TEMPLATES.physics || {}),
     ...Object.keys(SCIENCE_TEMPLATES.chemistry || {})
@@ -1282,10 +1329,11 @@ async function sendCheckinAnnouncement(chatId, { sourceMessage = null, triggered
 }
 
 async function buildSummaryAnnouncementText(chatId, settings, lang, limit = SUMMARY_BROADCAST_MAX_ROWS) {
-    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
-    const endDate = formatDateForTimezone(timezone);
-    const windowDays = Math.max(1, Number(settings.summaryWindow) || 7);
-    const startDate = subtractDaysFromDate(endDate, windowDays - 1) || endDate;
+    const { startDate, endDate, rangeDays } = getSummaryWindowBounds(settings);
+    if (!startDate || !endDate || startDate > endDate) {
+        return null;
+    }
+
     const records = await db.getCheckinsInRange(chatId, startDate, endDate);
     if (!records || records.length === 0) {
         return null;
@@ -1318,7 +1366,7 @@ async function buildSummaryAnnouncementText(chatId, settings, lang, limit = SUMM
 
     const profileCache = new Map();
     const lines = [
-        `<b>${t(lang, 'checkin_summary_broadcast_header', { days: windowDays, start: startDate, end: endDate, members: summaryMap.size })}</b>`
+        `<b>${t(lang, 'checkin_summary_broadcast_header', { days: Math.max(rangeDays, 1), start: startDate, end: endDate, members: summaryMap.size })}</b>`
     ];
 
     for (let index = 0; index < sortedEntries.length; index += 1) {
@@ -1977,6 +2025,7 @@ const ADMIN_MENU_SECTION_CONFIG = {
         actions: [
             { labelKey: 'checkin_admin_button_today_list', callback: (chatKey) => `checkin_admin_list|${chatKey}` },
             { labelKey: 'checkin_admin_button_summary_window', callback: (chatKey) => `checkin_admin_summary_window|${chatKey}` },
+            { labelKey: 'checkin_admin_button_summary_reset', callback: (chatKey) => `checkin_admin_summary_reset|${chatKey}` },
             { labelKey: 'checkin_admin_button_remove', callback: (chatKey) => `checkin_admin_remove|${chatKey}` },
             { labelKey: 'checkin_admin_button_unlock', callback: (chatKey) => `checkin_admin_unlock|${chatKey}` }
         ]
@@ -2532,18 +2581,71 @@ async function sendTodayCheckinList(chatId, adminId, { fallbackLang } = {}) {
     scheduleMessageDeletion(adminId, message.message_id, 60000);
 }
 
-async function sendSummaryWindowCheckinList(chatId, adminId, { fallbackLang } = {}) {
+async function promptAdminSummaryReset(chatId, adminId, { fallbackLang } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const { startDate, endDate, rangeDays } = getSummaryWindowBounds(settings);
+    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const periodStart = getSummaryPeriodStart(settings);
+    const lines = [
+        `<b>${escapeHtml(t(lang, 'checkin_admin_summary_reset_title'))}</b>`,
+        escapeHtml(t(lang, 'checkin_admin_summary_reset_hint', {
+            days: Math.max(rangeDays, 1),
+            start: startDate || '—',
+            end: endDate || '—',
+            timezone
+        }))
+    ];
+    if (periodStart) {
+        lines.push('', escapeHtml(t(lang, 'checkin_admin_summary_reset_period_note', { reset: periodStart })));
+    }
+
+    const inline_keyboard = [
+        [
+            { text: t(lang, 'checkin_admin_button_summary_reset_confirm'), callback_data: `checkin_admin_summary_reset_confirm|${chatId}` },
+            { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` }
+        ],
+        [{ text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }]
+    ];
+
+    await bot.sendMessage(adminId, lines.join('\n'), {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function executeAdminSummaryReset(chatId, adminId, { fallbackLang } = {}) {
     const settings = await getGroupCheckinSettings(chatId);
     const lang = await resolveNotificationLanguage(adminId, fallbackLang);
     const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
-    const endDate = formatDateForTimezone(timezone);
-    const windowDays = Math.max(1, Number(settings.summaryWindow) || 7);
-    const startDate = subtractDaysFromDate(endDate, windowDays - 1) || endDate;
+    const today = formatDateForTimezone(timezone);
+    await db.setSummaryPeriodStart(chatId, today, timezone);
+    await db.resetSummaryMessageLogs(chatId);
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_reset_success', { start: today }));
+    await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'members' });
+}
+
+async function sendSummaryWindowCheckinList(chatId, adminId, { fallbackLang } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const { startDate, endDate, rangeDays } = getSummaryWindowBounds(settings);
+    if (!startDate || !endDate || startDate > endDate) {
+        await bot.sendMessage(adminId, t(lang, 'checkin_admin_summary_window_empty', { days: settings.summaryWindow || 7 }), {
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` },
+                    { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }
+                ]]
+            }
+        });
+        return;
+    }
+
     const records = await db.getCheckinsInRange(chatId, startDate, endDate);
     const profileCache = new Map();
 
     if (!records || records.length === 0) {
-        const message = await bot.sendMessage(adminId, t(lang, 'checkin_admin_summary_window_empty', { days: windowDays }), {
+        const message = await bot.sendMessage(adminId, t(lang, 'checkin_admin_summary_window_empty', { days: Math.max(rangeDays, 1) }), {
             reply_markup: {
                 inline_keyboard: [[
                     { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` },
@@ -2578,7 +2680,7 @@ async function sendSummaryWindowCheckinList(chatId, adminId, { fallbackLang } = 
 
     const lines = [
         t(lang, 'checkin_admin_summary_window_header', {
-            days: windowDays,
+            days: Math.max(rangeDays, 1),
             start: startDate,
             end: endDate,
             members: summaryMap.size
@@ -2611,6 +2713,50 @@ async function sendSummaryWindowCheckinList(chatId, adminId, { fallbackLang } = 
         }
     });
     scheduleMessageDeletion(adminId, message.message_id, 60000);
+}
+
+async function promptAdminSummaryReset(chatId, adminId, { fallbackLang } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const { startDate, endDate, rangeDays } = getSummaryWindowBounds(settings);
+    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const periodStart = getSummaryPeriodStart(settings);
+    const lines = [
+        `<b>${escapeHtml(t(lang, 'checkin_admin_summary_reset_title'))}</b>`,
+        escapeHtml(t(lang, 'checkin_admin_summary_reset_hint', {
+            days: Math.max(rangeDays, 1),
+            start: startDate || '—',
+            end: endDate || '—',
+            timezone
+        }))
+    ];
+    if (periodStart) {
+        lines.push('', escapeHtml(t(lang, 'checkin_admin_summary_reset_period_note', { reset: periodStart })));
+    }
+
+    const inline_keyboard = [
+        [
+            { text: t(lang, 'checkin_admin_button_summary_reset_confirm'), callback_data: `checkin_admin_summary_reset_confirm|${chatId}` },
+            { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` }
+        ],
+        [{ text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }]
+    ];
+
+    await bot.sendMessage(adminId, lines.join('\n'), {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function executeAdminSummaryReset(chatId, adminId, { fallbackLang } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const today = formatDateForTimezone(timezone);
+    await db.setSummaryPeriodStart(chatId, today, timezone);
+    await db.resetSummaryMessageLogs(chatId);
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_reset_success', { start: today }));
+    await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'members' });
 }
 
 async function promptAdminForRemoval(chatId, adminId, { fallbackLang } = {}) {
@@ -2910,24 +3056,31 @@ async function promptAdminSummarySchedule(chatId, adminId, { fallbackLang } = {}
     const settings = await getGroupCheckinSettings(chatId);
     const lang = await resolveNotificationLanguage(adminId, fallbackLang);
     const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
-    const slots = getSummaryScheduleSlots(settings);
-    const enabled = Number(settings.summaryMessageEnabled) === 1 && slots.length > 0;
+    const enabled = Number(settings.summaryMessageEnabled) === 1;
+    const slots = enabled ? getSummaryScheduleSlots(settings) : [];
     const timesList = slots.map((slot, index) => `${index + 1}. ${slot}`).join('\n');
-    const statusLine = enabled
+    const statusLine = enabled && slots.length > 0
         ? t(lang, 'checkin_admin_summary_schedule_current', { count: slots.length, times: timesList })
         : t(lang, 'checkin_admin_summary_schedule_none');
+    const usingAutoFallback = enabled && (!Array.isArray(settings.summaryMessageTimes) || settings.summaryMessageTimes.length === 0);
     const lines = [
         t(lang, 'checkin_admin_summary_schedule_title'),
         t(lang, 'checkin_admin_summary_schedule_hint', { timezone }),
         '',
         statusLine
     ];
+    if (usingAutoFallback && slots.length > 0) {
+        lines.push('', t(lang, 'checkin_admin_summary_schedule_auto_note', { count: slots.length }));
+    }
     const inline_keyboard = SUMMARY_SCHEDULE_PRESETS.map((preset) => ([{
         text: t(lang, preset.labelKey),
         callback_data: `checkin_admin_summary_schedule_preset|${chatId}|${preset.slots.join(',')}`
     }]));
     inline_keyboard.push([
         { text: t(lang, 'checkin_admin_button_summary_schedule_reset'), callback_data: `checkin_admin_summary_schedule_reset|${chatId}` }
+    ]);
+    inline_keyboard.push([
+        { text: t(lang, 'checkin_admin_button_summary_schedule_sync'), callback_data: `checkin_admin_summary_schedule_sync|${chatId}` }
     ]);
     inline_keyboard.push([
         { text: t(lang, 'checkin_admin_button_summary_schedule_custom'), callback_data: `checkin_admin_summary_schedule_custom|${chatId}` },
@@ -2986,6 +3139,22 @@ async function resetAdminSummarySchedule(chatId, adminId, { fallbackLang } = {})
     });
     await db.resetSummaryMessageLogs(chatId);
     await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_schedule_reset_success', {
+        count: slots.length,
+        times: slots.join(', ')
+    }));
+    await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'settings' });
+}
+
+async function syncAdminSummaryScheduleWithAuto(chatId, adminId, { fallbackLang } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const slots = getScheduleSlots(settings);
+    await db.updateCheckinGroup(chatId, {
+        summaryMessageTimes: [],
+        summaryMessageEnabled: 1
+    });
+    await db.resetSummaryMessageLogs(chatId);
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_schedule_sync_success', {
         count: slots.length,
         times: slots.join(', ')
     }));
@@ -7341,6 +7510,47 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_summary_reset_confirm|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission_action'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_reset_success_alert') });
+                await executeAdminSummaryReset(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_summary_reset|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission_action'), show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_reset_prompt_alert') });
+                await promptAdminSummaryReset(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_broadcast|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -7933,6 +8143,30 @@ function startTelegramBot() {
                 }
                 await resetAdminSummarySchedule(targetChatId, query.from.id, { fallbackLang: callbackLang });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_schedule_reset_alert') });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_summary_schedule_sync|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                await syncAdminSummaryScheduleWithAuto(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_schedule_sync_alert') });
                 return;
             }
 
