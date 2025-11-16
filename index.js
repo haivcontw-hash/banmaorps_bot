@@ -43,6 +43,9 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || null;
 const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || null;
 const OKX_API_PROJECT = process.env.OKX_API_PROJECT || null;
 const OKX_API_SIMULATED = String(process.env.OKX_API_SIMULATED || '').toLowerCase() === 'true';
+const COMMUNITY_WALLET_ADDRESS = normalizeAddress(process.env.COMMUNITY_WALLET_ADDRESS) || null;
+const DEFAULT_DEAD_WALLET_ADDRESS = '0x000000000000000000000000000000000000dEaD';
+const DEAD_WALLET_ADDRESS = normalizeAddress(process.env.DEAD_WALLET_ADDRESS) || DEFAULT_DEAD_WALLET_ADDRESS;
 const OKX_OKB_TOKEN_ADDRESSES = (() => {
     const raw = process.env.OKX_OKB_TOKEN_ADDRESSES
         || '0xe538905cf8410324e03a5a23c1c177a474d59b2b';
@@ -409,6 +412,7 @@ const HELP_COMMAND_DETAILS = {
     register: { command: '/register', icon: '📝', descKey: 'help_command_register' },
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
     stats: { command: '/stats', icon: '📊', descKey: 'help_command_stats' },
+    donate: { command: '/donate', icon: '🎁', descKey: 'help_command_donate' },
     banmaoprice: { command: '/banmaoprice', icon: '💰', descKey: 'help_command_banmaoprice' },
     okxchains: { command: '/okxchains', icon: '🧭', descKey: 'help_command_okxchains' },
     okx402status: { command: '/okx402status', icon: '🔐', descKey: 'help_command_okx402status' },
@@ -446,6 +450,12 @@ const HELP_GROUP_DETAILS = {
         descKey: 'help_group_insights_desc',
         commands: ['stats', 'banmaoprice', 'okxchains', 'okx402status']
     },
+    support: {
+        icon: '🎁',
+        titleKey: 'help_group_support_title',
+        descKey: 'help_group_support_desc',
+        commands: ['donate']
+    },
     checkin: {
         icon: '✅',
         titleKey: 'help_group_checkin_title',
@@ -463,7 +473,7 @@ const HELP_GROUP_DETAILS = {
 const HELP_USER_SECTIONS = [
     {
         titleKey: 'help_section_general_title',
-        groups: ['onboarding', 'account', 'language', 'insights']
+        groups: ['onboarding', 'account', 'language', 'insights', 'support']
     },
     {
         titleKey: 'help_section_checkin_title',
@@ -592,6 +602,49 @@ function buildHelpText(lang, view = 'user') {
         lines.push('', `<i>${escapeHtml(t(lang, 'help_admin_features'))}</i>`);
     }
 
+    return lines.filter(Boolean).join('\n');
+}
+
+function buildDonateMessage(lang) {
+    const lines = [];
+    lines.push(`❤️ <b>${escapeHtml(t(lang, 'donate_title'))}</b>`);
+    lines.push(`<i>${escapeHtml(t(lang, 'donate_description'))}</i>`);
+
+    const sections = [
+        {
+            labelKey: 'donate_community_wallet_label',
+            descKey: 'donate_community_wallet_desc',
+            warningKey: 'donate_community_wallet_warning',
+            address: COMMUNITY_WALLET_ADDRESS
+        },
+        {
+            labelKey: 'donate_dead_wallet_label',
+            descKey: 'donate_dead_wallet_desc',
+            warningKey: 'donate_dead_wallet_warning',
+            address: DEAD_WALLET_ADDRESS
+        }
+    ];
+
+    for (const section of sections) {
+        lines.push('');
+        const label = t(lang, section.labelKey);
+        lines.push(`<b>${escapeHtml(label)}</b>`);
+
+        if (section.address) {
+            lines.push(`<code>${escapeHtml(section.address)}</code>`);
+        } else {
+            lines.push(`<i>${escapeHtml(t(lang, 'donate_wallet_missing', { label }))}</i>`);
+        }
+
+        if (section.descKey) {
+            lines.push(`<i>${escapeHtml(t(lang, section.descKey))}</i>`);
+        }
+        if (section.warningKey) {
+            lines.push(`<i>${escapeHtml(t(lang, section.warningKey))}</i>`);
+        }
+    }
+
+    lines.push('', `<i>${escapeHtml(t(lang, 'donate_footer'))}</i>`);
     return lines.filter(Boolean).join('\n');
 }
 
@@ -5662,6 +5715,12 @@ function startTelegramBot() {
         sendReply(msg, message, { parse_mode: 'Markdown' });
     }
 
+    async function handleDonateCommand(msg) {
+        const lang = await getLang(msg);
+        const text = buildDonateMessage(lang);
+        await sendReply(msg, text, { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
     async function handleOkxChainsCommand(msg) {
         const lang = await getLang(msg);
         try {
@@ -5984,6 +6043,11 @@ function startTelegramBot() {
     // COMMAND: /stats - Cần async
     bot.onText(/\/stats/, async (msg) => {
         await handleStatsCommand(msg);
+    });
+
+    // COMMAND: /donate - Cần async
+    bot.onText(/^\/donate(?:@[\w_]+)?$/, async (msg) => {
+        await handleDonateCommand(msg);
     });
 
     bot.onText(/^\/checkin(?:@[\w_]+)?$/, async (msg) => {
@@ -6327,6 +6391,11 @@ function startTelegramBot() {
         stats: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleStatsCommand(synthetic);
+            return { message: t(lang, 'help_action_executed') };
+        },
+        donate: async (query, lang) => {
+            const synthetic = buildSyntheticCommandMessage(query);
+            await handleDonateCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
         banmaoprice: async (query, lang) => {
