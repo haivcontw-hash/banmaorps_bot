@@ -159,6 +159,14 @@ const LEADERBOARD_MODE_CONFIG = [
     { key: 'total', labelKey: 'checkin_admin_leaderboard_mode_total' },
     { key: 'longest', labelKey: 'checkin_admin_leaderboard_mode_longest' }
 ];
+const SUMMARY_DEFAULT_TIME = '21:00';
+const SUMMARY_SCHEDULE_PRESETS = [
+    { labelKey: 'checkin_admin_button_summary_schedule_once', slots: ['21:00'] },
+    { labelKey: 'checkin_admin_button_summary_schedule_twice', slots: ['12:00', '21:00'] },
+    { labelKey: 'checkin_admin_button_summary_schedule_thrice', slots: ['09:00', '15:00', '21:30'] }
+];
+const SUMMARY_BROADCAST_MAX_ROWS = 5;
+const CHECKIN_ADMIN_DM_MAX_RECIPIENTS = 50;
 
 function sanitizeWeightValue(value, fallback) {
     const numeric = Number(value);
@@ -275,6 +283,14 @@ function getScheduleSlots(settings = null) {
     const base = raw.length > 0 ? raw : [fallback];
     const sanitized = sanitizeScheduleSlots(base);
     return sanitized.length > 0 ? sanitized : [CHECKIN_DEFAULT_TIME];
+}
+
+function getSummaryScheduleSlots(settings = null) {
+    const raw = Array.isArray(settings?.summaryMessageTimes) ? settings.summaryMessageTimes : [];
+    if (!raw || raw.length === 0) {
+        return [];
+    }
+    return sanitizeScheduleSlots(raw);
 }
 
 const pendingCheckinChallenges = new Map();
@@ -839,6 +855,18 @@ function buildUserMention(user) {
     };
 }
 
+function buildAdminProfileLink(userId, displayName) {
+    const safeName = escapeHtml(displayName || userId?.toString() || 'user');
+    const safeId = encodeURIComponent(userId?.toString() || '');
+    return `<a href="tg://user?id=${safeId}">${safeName}</a>`;
+}
+
+function buildAdminUserIdLink(userId) {
+    const safeIdText = escapeHtml(userId?.toString() || '0');
+    const safeId = encodeURIComponent(userId?.toString() || '');
+    return `<a href="tg://user?id=${safeId}"><code>${safeIdText}</code></a>`;
+}
+
 function formatDateForTimezone(timezone = CHECKIN_DEFAULT_TIMEZONE, date = new Date()) {
     try {
         const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -1246,6 +1274,88 @@ async function sendCheckinAnnouncement(chatId, { sourceMessage = null, triggered
         console.log(`[Checkin] Sent check-in announcement to ${chatId} (${triggeredBy}).`);
     } catch (error) {
         console.error(`[Checkin] Failed to send announcement to ${chatId}: ${error.message}`);
+    }
+}
+
+async function buildSummaryAnnouncementText(chatId, settings, lang, limit = SUMMARY_BROADCAST_MAX_ROWS) {
+    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const endDate = formatDateForTimezone(timezone);
+    const windowDays = Math.max(1, Number(settings.summaryWindow) || 7);
+    const startDate = subtractDaysFromDate(endDate, windowDays - 1) || endDate;
+    const records = await db.getCheckinsInRange(chatId, startDate, endDate);
+    if (!records || records.length === 0) {
+        return null;
+    }
+
+    const summaryMap = new Map();
+    for (const record of records) {
+        const userKey = record.userId.toString();
+        const stats = summaryMap.get(userKey) || { days: 0, points: 0 };
+        stats.days += 1;
+        stats.points += Number(record.pointsAwarded || 0);
+        summaryMap.set(userKey, stats);
+    }
+
+    if (summaryMap.size === 0) {
+        return null;
+    }
+
+    const sortedEntries = Array.from(summaryMap.entries())
+        .sort((a, b) => {
+            if (b[1].days !== a[1].days) {
+                return b[1].days - a[1].days;
+            }
+            if (b[1].points !== a[1].points) {
+                return b[1].points - a[1].points;
+            }
+            return Number(a[0]) - Number(b[0]);
+        })
+        .slice(0, limit);
+
+    const profileCache = new Map();
+    const lines = [
+        `<b>${t(lang, 'checkin_summary_broadcast_header', { days: windowDays, start: startDate, end: endDate, members: summaryMap.size })}</b>`
+    ];
+
+    for (let index = 0; index < sortedEntries.length; index += 1) {
+        const [userId, stats] = sortedEntries[index];
+        const profile = await resolveMemberProfile(chatId, userId, lang, profileCache);
+        const safeName = `<b>${profile.link || escapeHtml(profile.displayName)}</b>`;
+        const safeId = buildAdminUserIdLink(userId);
+        lines.push(t(lang, 'checkin_summary_broadcast_line', {
+            rank: index + 1,
+            name: safeName,
+            id: safeId,
+            days: stats.days,
+            points: stats.points
+        }));
+    }
+
+    lines.push('', escapeHtml(t(lang, 'checkin_summary_broadcast_footer')));
+    return lines.join('\n').trim();
+}
+
+async function sendSummaryAnnouncement(chatId, { sourceMessage = null, triggeredBy = 'auto' } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const lang = await resolveGroupLanguage(chatId);
+    const summaryText = await buildSummaryAnnouncementText(chatId, settings, lang);
+    if (!summaryText) {
+        return false;
+    }
+
+    const options = { parse_mode: 'HTML' };
+
+    try {
+        if (sourceMessage) {
+            await sendMessageRespectingThread(chatId, sourceMessage, summaryText, options);
+        } else {
+            await bot.sendMessage(chatId, summaryText, options);
+        }
+        console.log(`[Checkin] Sent summary announcement to ${chatId} (${triggeredBy}).`);
+        return true;
+    } catch (error) {
+        console.error(`[Checkin] Failed to send summary announcement to ${chatId}: ${error.message}`);
+        return false;
     }
 }
 
@@ -1678,6 +1788,27 @@ async function runCheckinSchedulerTick() {
             await sendCheckinAnnouncement(group.chatId, { triggeredBy: 'auto' });
             await db.recordAutoMessageLog(group.chatId, today, slot);
         }
+
+        if (Number(group.summaryMessageEnabled) === 1) {
+            const summarySlots = getSummaryScheduleSlots(group);
+            if (summarySlots.length > 0) {
+                for (const slot of summarySlots) {
+                    if (currentTime !== slot) {
+                        continue;
+                    }
+
+                    const alreadySentSummary = await db.hasSummaryMessageLog(group.chatId, today, slot);
+                    if (alreadySentSummary) {
+                        continue;
+                    }
+
+                    const sent = await sendSummaryAnnouncement(group.chatId, { triggeredBy: 'auto' });
+                    if (sent) {
+                        await db.recordSummaryMessageLog(group.chatId, today, slot);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1860,7 +1991,8 @@ const ADMIN_MENU_SECTION_CONFIG = {
         hintKey: 'checkin_admin_section_messaging_hint',
         actions: [
             { labelKey: 'checkin_admin_button_broadcast', callback: (chatKey) => `checkin_admin_broadcast|${chatKey}` },
-            { labelKey: 'checkin_admin_button_secret_message', callback: (chatKey) => `checkin_admin_dm|${chatKey}` }
+            { labelKey: 'checkin_admin_button_secret_message', callback: (chatKey) => `checkin_admin_dm|${chatKey}` },
+            { labelKey: 'checkin_admin_button_summary_broadcast', callback: (chatKey) => `checkin_admin_summary_broadcast|${chatKey}` }
         ]
     },
     settings: {
@@ -1870,7 +2002,8 @@ const ADMIN_MENU_SECTION_CONFIG = {
             { labelKey: 'checkin_admin_button_points', callback: (chatKey) => `checkin_admin_points|${chatKey}` },
             { labelKey: 'checkin_admin_button_summary', callback: (chatKey) => `checkin_admin_summary|${chatKey}` },
             { labelKey: 'checkin_admin_button_question_mix', callback: (chatKey) => `checkin_admin_weights|${chatKey}` },
-            { labelKey: 'checkin_admin_button_schedule', callback: (chatKey) => `checkin_admin_schedule|${chatKey}` }
+            { labelKey: 'checkin_admin_button_schedule', callback: (chatKey) => `checkin_admin_schedule|${chatKey}` },
+            { labelKey: 'checkin_admin_button_summary_schedule', callback: (chatKey) => `checkin_admin_summary_schedule|${chatKey}` }
         ]
     }
 };
@@ -1967,7 +2100,12 @@ async function resolveMemberProfile(chatId, userId, lang, cache = null) {
         // ignore member lookup failures
     }
 
-    const profile = { displayName, username, fullName };
+    const profile = {
+        displayName,
+        username,
+        fullName,
+        link: buildAdminProfileLink(userId, displayName)
+    };
     if (cache) {
         cache.set(cacheKey, profile);
     }
@@ -2010,6 +2148,7 @@ async function sendAdminMenu(adminId, chatId, { fallbackLang, view } = {}) {
     const weightPercents = formatQuestionWeightPercentages(getQuestionWeights(settings));
     const scheduleSlots = getScheduleSlots(settings);
     const scheduleText = scheduleSlots.join(', ');
+    const summarySlots = getSummaryScheduleSlots(settings);
     const textLines = [
         t(lang, 'checkin_admin_menu_header'),
         t(lang, 'checkin_admin_menu_line_time', { time: settings.checkinTime || CHECKIN_DEFAULT_TIME }),
@@ -2018,6 +2157,15 @@ async function sendAdminMenu(adminId, chatId, { fallbackLang, view } = {}) {
             times: scheduleText,
             timezone: settings.timezone || CHECKIN_DEFAULT_TIMEZONE
         }),
+        summarySlots.length > 0
+            ? t(lang, 'checkin_admin_menu_line_summary_schedule', {
+                count: summarySlots.length,
+                times: summarySlots.join(', '),
+                timezone: settings.timezone || CHECKIN_DEFAULT_TIMEZONE
+            })
+            : t(lang, 'checkin_admin_menu_line_summary_schedule_disabled', {
+                timezone: settings.timezone || CHECKIN_DEFAULT_TIMEZONE
+            }),
         t(lang, 'checkin_admin_menu_line_points', { points: settings.dailyPoints || 0 }),
         t(lang, 'checkin_admin_menu_line_summary', { days: settings.summaryWindow || 7 }),
         t(lang, 'checkin_admin_menu_line_question_mix', weightPercents),
@@ -2143,7 +2291,8 @@ async function presentAdminLeaderboardManageList(adminId, chatId, { fallbackLang
         const entry = rows[i];
         const rank = i + 1;
         const profile = await resolveMemberProfile(chatId, entry.userId, lang, profileCache);
-        lines.push('', `${rank}. <b>${escapeHtml(profile.displayName)}</b>`);
+        const profileLink = profile.link || escapeHtml(profile.displayName);
+        lines.push('', `${rank}. <b>${profileLink}</b>`);
         lines.push(`${ADMIN_DETAIL_BULLET}${escapeHtml(t(lang, 'checkin_admin_leaderboard_member_stats_points', { points: entry.totalPoints || 0 }))}`);
         lines.push(`${ADMIN_DETAIL_BULLET}${escapeHtml(t(lang, 'checkin_admin_leaderboard_member_stats_days', { count: entry.totalCheckins || 0 }))}`);
         lines.push(`${ADMIN_DETAIL_BULLET}${escapeHtml(t(lang, 'checkin_admin_leaderboard_member_stats_streak', { streak: entry.streak || 0 }))}`);
@@ -2206,9 +2355,11 @@ async function presentAdminLeaderboardMemberDetail(adminId, chatId, targetUserId
     }
 
     const profile = await resolveMemberProfile(chatId, targetUserId, lang);
+    const profileLink = profile.link || escapeHtml(profile.displayName);
+    const idLink = buildAdminUserIdLink(targetUserId);
     const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
     const lines = [
-        `<b>${escapeHtml(t(lang, 'checkin_admin_leaderboard_member_title', { name: profile.displayName, id: targetUserId }))}</b>`,
+        `<b>${t(lang, 'checkin_admin_leaderboard_member_title', { name: profileLink, id: idLink })}</b>`,
         escapeHtml(t(lang, 'checkin_admin_leaderboard_period', { start: periodStart })),
         `${ADMIN_DETAIL_BULLET}${escapeHtml(t(lang, 'checkin_admin_leaderboard_member_stats_points', { points: stats.totalPoints || 0 }))}`,
         `${ADMIN_DETAIL_BULLET}${escapeHtml(t(lang, 'checkin_admin_leaderboard_member_stats_days', { count: stats.totalCheckins || 0 }))}`,
@@ -2317,8 +2468,8 @@ async function sendTodayCheckinList(chatId, adminId, { fallbackLang } = {}) {
     for (const record of records) {
         const profile = await resolveMemberProfile(chatId, record.userId, lang, profileCache);
         const memberSummary = await db.getCheckinMemberSummary(chatId, record.userId);
-        const safeId = `<code>${escapeHtml(record.userId.toString())}</code>`;
-        const safeName = `<b>${escapeHtml(profile.displayName)}</b>`;
+        const safeId = buildAdminUserIdLink(record.userId);
+        const safeName = `<b>${profile.link || escapeHtml(profile.displayName)}</b>`;
         const entryLines = [
             t(lang, 'checkin_admin_today_member_line', {
                 name: safeName,
@@ -2434,8 +2585,8 @@ async function sendSummaryWindowCheckinList(chatId, adminId, { fallbackLang } = 
     for (let index = 0; index < sortedEntries.length; index += 1) {
         const [userId, stats] = sortedEntries[index];
         const profile = await resolveMemberProfile(chatId, userId, lang, profileCache);
-        const safeName = `<b>${escapeHtml(profile.displayName)}</b>`;
-        const safeId = `<code>${escapeHtml(userId)}</code>`;
+        const safeName = `<b>${profile.link || escapeHtml(profile.displayName)}</b>`;
+        const safeId = buildAdminUserIdLink(userId);
         lines.push(t(lang, 'checkin_admin_summary_window_line', {
             rank: index + 1,
             name: safeName,
@@ -2483,8 +2634,8 @@ async function promptAdminForRemoval(chatId, adminId, { fallbackLang } = {}) {
         const profile = await resolveMemberProfile(chatId, record.userId, lang, profileCache);
         const walletPreview = formatWalletPreview(record.walletAddress)
             || t(lang, 'checkin_admin_wallet_unknown');
-        const safeId = `<code>${escapeHtml(record.userId.toString())}</code>`;
-        const safeName = `<b>${escapeHtml(profile.displayName)}</b>`;
+        const safeId = buildAdminUserIdLink(record.userId);
+        const safeName = `<b>${profile.link || escapeHtml(profile.displayName)}</b>`;
         const walletDisplay = record.walletAddress
             ? t(lang, 'checkin_admin_today_wallet', { wallet: `<code>${escapeHtml(record.walletAddress)}</code>` })
             : t(lang, 'checkin_admin_today_wallet', { wallet: `<i>${escapeHtml(t(lang, 'checkin_admin_wallet_unknown'))}</i>` });
@@ -2564,8 +2715,18 @@ async function promptAdminUnlock(chatId, adminId, { fallbackLang } = {}) {
     }
 
     const inline_keyboard = [];
-    for (const entry of locked.slice(0, 20)) {
+    const lines = [escapeHtml(t(lang, 'checkin_admin_unlock_prompt')), ''];
+    const limitedEntries = locked.slice(0, 20);
+    for (let index = 0; index < limitedEntries.length; index += 1) {
+        const entry = limitedEntries[index];
         const profile = await resolveMemberProfile(chatId, entry.userId, lang, profileCache);
+        const safeName = `<b>${profile.link || escapeHtml(profile.displayName)}</b>`;
+        const safeId = buildAdminUserIdLink(entry.userId);
+        lines.push(t(lang, 'checkin_admin_unlock_list_line', {
+            index: index + 1,
+            name: safeName,
+            id: safeId
+        }));
         inline_keyboard.push([{
             text: t(lang, 'checkin_admin_unlock_option', { name: profile.displayName, id: entry.userId }),
             callback_data: `checkin_admin_unlock_confirm|${chatId}|${entry.userId}`
@@ -2577,7 +2738,8 @@ async function promptAdminUnlock(chatId, adminId, { fallbackLang } = {}) {
         { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }
     ]);
 
-    await bot.sendMessage(adminId, t(lang, 'checkin_admin_unlock_prompt'), {
+    await bot.sendMessage(adminId, lines.join('\n').trim(), {
+        parse_mode: 'HTML',
         reply_markup: { inline_keyboard }
     });
 }
@@ -2602,6 +2764,16 @@ async function promptAdminSecretMessage(chatId, adminId, { fallbackLang } = {}) 
     }
 
     const inline_keyboard = [];
+    const uniqueRecipients = Array.from(new Set(records.map((record) => record.userId.toString())));
+    const broadcastCount = Math.min(uniqueRecipients.length, CHECKIN_ADMIN_DM_MAX_RECIPIENTS);
+    if (broadcastCount > 0) {
+        inline_keyboard.push([
+            {
+                text: t(lang, 'checkin_admin_dm_option_all', { count: broadcastCount }),
+                callback_data: `checkin_admin_dm_all|${chatId}`
+            }
+        ]);
+    }
     for (const record of records.slice(0, 20)) {
         const profile = await resolveMemberProfile(chatId, record.userId, lang, profileCache);
         inline_keyboard.push([{
@@ -2615,7 +2787,13 @@ async function promptAdminSecretMessage(chatId, adminId, { fallbackLang } = {}) 
         { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }
     ]);
 
-    await bot.sendMessage(adminId, t(lang, 'checkin_admin_dm_prompt'), {
+    const messageLines = [t(lang, 'checkin_admin_dm_prompt')];
+    if (uniqueRecipients.length > CHECKIN_ADMIN_DM_MAX_RECIPIENTS) {
+        messageLines.push('', t(lang, 'checkin_admin_dm_all_limit_note', { count: CHECKIN_ADMIN_DM_MAX_RECIPIENTS }));
+    }
+
+    await bot.sendMessage(adminId, messageLines.join('\n'), {
+        parse_mode: 'HTML',
         reply_markup: { inline_keyboard }
     });
 }
@@ -2724,6 +2902,71 @@ async function resetAdminScheduleSlots(chatId, adminId, { fallbackLang } = {}) {
     await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'settings' });
 }
 
+async function promptAdminSummarySchedule(chatId, adminId, { fallbackLang } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const slots = getSummaryScheduleSlots(settings);
+    const enabled = Number(settings.summaryMessageEnabled) === 1 && slots.length > 0;
+    const timesList = slots.map((slot, index) => `${index + 1}. ${slot}`).join('\n');
+    const statusLine = enabled
+        ? t(lang, 'checkin_admin_summary_schedule_current', { count: slots.length, times: timesList })
+        : t(lang, 'checkin_admin_summary_schedule_none');
+    const lines = [
+        t(lang, 'checkin_admin_summary_schedule_title'),
+        t(lang, 'checkin_admin_summary_schedule_hint', { timezone }),
+        '',
+        statusLine
+    ];
+    const inline_keyboard = SUMMARY_SCHEDULE_PRESETS.map((preset) => ([{
+        text: t(lang, preset.labelKey),
+        callback_data: `checkin_admin_summary_schedule_preset|${chatId}|${preset.slots.join(',')}`
+    }]));
+    inline_keyboard.push([
+        { text: t(lang, 'checkin_admin_button_summary_schedule_custom'), callback_data: `checkin_admin_summary_schedule_custom|${chatId}` },
+        { text: t(lang, 'checkin_admin_button_summary_schedule_disable'), callback_data: `checkin_admin_summary_schedule_disable|${chatId}` }
+    ]);
+    inline_keyboard.push([
+        { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` },
+        { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }
+    ]);
+
+    await bot.sendMessage(adminId, lines.join('\n'), {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard }
+    });
+}
+
+async function setAdminSummaryScheduleSlots(chatId, adminId, slots, { fallbackLang } = {}) {
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const sanitized = sanitizeScheduleSlots(slots);
+    if (sanitized.length === 0) {
+        await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_schedule_invalid'));
+        return;
+    }
+
+    await db.updateCheckinGroup(chatId, {
+        summaryMessageTimes: sanitized,
+        summaryMessageEnabled: 1
+    });
+
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_schedule_updated', {
+        count: sanitized.length,
+        times: sanitized.join(', ')
+    }));
+    await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'settings' });
+}
+
+async function disableAdminSummarySchedule(chatId, adminId, { fallbackLang } = {}) {
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    await db.updateCheckinGroup(chatId, {
+        summaryMessageTimes: [],
+        summaryMessageEnabled: 0
+    });
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_schedule_disabled_alert'));
+    await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'settings' });
+}
+
 async function executeAdminRemoval(chatId, adminId, targetUserId, { fallbackLang } = {}) {
     const settings = await getGroupCheckinSettings(chatId);
     const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
@@ -2744,8 +2987,8 @@ async function executeAdminRemoval(chatId, adminId, targetUserId, { fallbackLang
     const walletLabel = record.walletAddress
         ? `<code>${escapeHtml(record.walletAddress)}</code>`
         : `<i>${escapeHtml(t(adminLang, 'checkin_admin_wallet_unknown'))}</i>`;
-    const userLabel = `<b>${escapeHtml(profile.displayName)}</b>`;
-    const idLabel = `<code>${escapeHtml(targetUserId.toString())}</code>`;
+    const userLabel = `<b>${profile.link || escapeHtml(profile.displayName)}</b>`;
+    const idLabel = buildAdminUserIdLink(targetUserId);
 
     await sendEphemeralMessage(
         adminId,
@@ -2773,10 +3016,12 @@ async function executeAdminUnlock(chatId, adminId, targetUserId, { fallbackLang 
     await db.clearDailyAttempts(chatId, targetUserId, today);
     const adminLang = await resolveNotificationLanguage(adminId, fallbackLang);
     const profile = await resolveMemberProfile(chatId, targetUserId, adminLang);
+    const userLabel = `<b>${profile.link || escapeHtml(profile.displayName)}</b>`;
+    const idLabel = buildAdminUserIdLink(targetUserId);
     await sendEphemeralMessage(adminId, t(adminLang, 'checkin_admin_unlock_success', {
-        user: profile.displayName,
-        id: targetUserId
-    }));
+        user: userLabel,
+        id: idLabel
+    }), { parse_mode: 'HTML' });
     try {
         const userLang = await resolveNotificationLanguage(targetUserId);
         await bot.sendMessage(targetUserId, t(userLang, 'checkin_dm_unlocked'));
@@ -7083,6 +7328,28 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_summary_broadcast|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                const sent = await sendSummaryAnnouncement(targetChatId, { sourceMessage: query.message, triggeredBy: 'manual' });
+                await bot.answerCallbackQuery(queryId, {
+                    text: sent
+                        ? t(callbackLang, 'checkin_admin_summary_broadcast_success_alert')
+                        : t(callbackLang, 'checkin_admin_summary_broadcast_empty'),
+                    show_alert: !sent
+                });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_remove_confirm|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -7167,6 +7434,52 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_dm_all|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                const settings = await getGroupCheckinSettings(targetChatId);
+                const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
+                const records = await db.getCheckinsForDate(targetChatId, today);
+                const uniqueRecipients = Array.from(new Set((records || []).map((record) => record.userId.toString())));
+                const filtered = uniqueRecipients
+                    .filter((recipient) => recipient && recipient !== query.from.id.toString())
+                    .slice(0, CHECKIN_ADMIN_DM_MAX_RECIPIENTS);
+                if (filtered.length === 0) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_dm_empty'), show_alert: true });
+                    return;
+                }
+                const promptMessage = await bot.sendMessage(query.from.id, t(callbackLang, 'checkin_admin_dm_all_prompt', { count: filtered.length }), {
+                    parse_mode: 'HTML',
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                { text: t(callbackLang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${targetChatId}` },
+                                { text: t(callbackLang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${targetChatId}` }
+                            ],
+                            [{ text: t(callbackLang, 'checkin_admin_button_cancel'), callback_data: `checkin_admin_cancel_input|${targetChatId}` }]
+                        ]
+                    }
+                });
+                pendingSecretMessages.set(query.from.id.toString(), {
+                    chatId: targetChatId,
+                    targetUserId: 'all',
+                    recipients: filtered,
+                    promptMessageId: promptMessage.message_id,
+                    mode: 'all'
+                });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_dm_all_progress_alert') });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_dm_target|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -7187,7 +7500,10 @@ function startTelegramBot() {
                         // ignore
                     }
                 }
-                const promptMessage = await bot.sendMessage(query.from.id, t(callbackLang, 'checkin_admin_dm_enter_message', { user: targetUserId }), {
+                const profile = await resolveMemberProfile(targetChatId, targetUserId, callbackLang);
+                const userLabel = `<b>${profile.link || escapeHtml(profile.displayName)}</b>`;
+                const promptMessage = await bot.sendMessage(query.from.id, t(callbackLang, 'checkin_admin_dm_enter_message', { user: userLabel }), {
+                    parse_mode: 'HTML',
                     reply_markup: {
                         inline_keyboard: [
                             [
@@ -7201,7 +7517,8 @@ function startTelegramBot() {
                 pendingSecretMessages.set(query.from.id.toString(), {
                     chatId: targetChatId,
                     targetUserId,
-                    promptMessageId: promptMessage.message_id
+                    promptMessageId: promptMessage.message_id,
+                    mode: 'single'
                 });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_dm_enter_prompt_alert') });
                 return;
@@ -7412,6 +7729,32 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_summary_schedule_preset|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const presetValue = parts[2] || '';
+                const presetSlots = presetValue.split(',').map((slot) => slot.trim()).filter(Boolean);
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                await setAdminSummaryScheduleSlots(targetChatId, query.from.id, presetSlots, { fallbackLang: callbackLang });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_schedule_updated_alert') });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_schedule_custom|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -7451,6 +7794,46 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_summary_schedule_custom|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                const promptMessage = await bot.sendMessage(query.from.id, t(callbackLang, 'checkin_admin_summary_schedule_prompt'), {
+                    parse_mode: 'HTML',
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                { text: t(callbackLang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${targetChatId}` },
+                                { text: t(callbackLang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${targetChatId}` }
+                            ],
+                            [{ text: t(callbackLang, 'checkin_admin_button_cancel'), callback_data: `checkin_admin_cancel_input|${targetChatId}` }]
+                        ]
+                    }
+                });
+                checkinAdminStates.set(query.from.id.toString(), {
+                    type: 'summary_schedule_custom',
+                    chatId: targetChatId,
+                    promptMessageId: promptMessage.message_id
+                });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_schedule_prompt_alert') });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_schedule_clear|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -7475,6 +7858,30 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_summary_schedule_disable|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                await disableAdminSummarySchedule(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_schedule_disabled_alert') });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_schedule|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -7489,6 +7896,23 @@ function startTelegramBot() {
                 }
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_schedule_choose_prompt') });
                 await promptAdminSchedule(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_summary_schedule|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                await promptAdminSummarySchedule(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_schedule_choose_prompt') });
                 return;
             }
 
@@ -7809,9 +8233,32 @@ function startTelegramBot() {
                             // ignore
                         }
                     }
-                    const targetLang = await resolveNotificationLanguage(secretState.targetUserId);
-                    await bot.sendMessage(secretState.targetUserId, t(targetLang, 'checkin_dm_secret_forward', { message: clipped }));
-                    await sendEphemeralMessage(userId, t(lang, 'checkin_dm_secret_confirm'));
+                    const mode = secretState.mode || 'single';
+                    if (mode === 'all') {
+                        const uniqueRecipients = Array.from(new Set(Array.isArray(secretState.recipients) ? secretState.recipients : []));
+                        let successCount = 0;
+                        let failureCount = 0;
+                        for (const recipientId of uniqueRecipients) {
+                            if (!recipientId || recipientId === userId) {
+                                continue;
+                            }
+                            try {
+                                const targetLang = await resolveNotificationLanguage(recipientId);
+                                await bot.sendMessage(recipientId, t(targetLang, 'checkin_dm_secret_forward', { message: clipped }));
+                                successCount += 1;
+                            } catch (error) {
+                                failureCount += 1;
+                            }
+                        }
+                        await sendEphemeralMessage(userId, t(lang, 'checkin_admin_dm_all_result', {
+                            success: successCount,
+                            failed: failureCount
+                        }));
+                    } else {
+                        const targetLang = await resolveNotificationLanguage(secretState.targetUserId);
+                        await bot.sendMessage(secretState.targetUserId, t(targetLang, 'checkin_dm_secret_forward', { message: clipped }));
+                        await sendEphemeralMessage(userId, t(lang, 'checkin_dm_secret_confirm'));
+                    }
                 } catch (error) {
                     console.error(`[Checkin] Không thể chuyển tiếp tin nhắn bí mật: ${error.message}`);
                     await sendEphemeralMessage(userId, t(lang, 'checkin_dm_secret_error'));
@@ -7901,6 +8348,24 @@ function startTelegramBot() {
                         }
                     }
                     await setAdminScheduleSlots(adminState.chatId, msg.from.id, parsed, { fallbackLang: lang });
+                    checkinAdminStates.delete(userId);
+                    return;
+                }
+
+                if (adminState.type === 'summary_schedule_custom') {
+                    const parsed = parseScheduleTextInput(rawText);
+                    if (!parsed) {
+                        await sendEphemeralMessage(userId, t(lang, 'checkin_admin_summary_schedule_invalid'));
+                        return;
+                    }
+                    if (adminState.promptMessageId) {
+                        try {
+                            await bot.deleteMessage(msg.chat.id, adminState.promptMessageId);
+                        } catch (error) {
+                            // ignore
+                        }
+                    }
+                    await setAdminSummaryScheduleSlots(adminState.chatId, msg.from.id, parsed, { fallbackLang: lang });
                     checkinAdminStates.delete(userId);
                     return;
                 }
