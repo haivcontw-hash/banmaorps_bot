@@ -1469,6 +1469,7 @@ async function updateGroupSubscriptionTopic(chatId, messageThreadId) {
 
 module.exports = {
     init,
+    ensureCheckinGroup,
     getCheckinGroup,
     listCheckinGroups,
     updateCheckinGroup,

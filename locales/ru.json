@@ -155,6 +155,8 @@
   "help_group_checkin_desc": "Запускайте проверку или смотрите таблицу лидеров.",
   "help_group_admin_title": "Админ-инструменты",
   "help_group_admin_desc": "Откройте админ-хаб для напоминаний, списков и наград.",
+  "help_group_admin_feed_title": "Лента комнат",
+  "help_group_admin_feed_desc": "Настройте автопубликации, минимальную ставку и тему для групповых уведомлений.",
   "help_group_command_hint": "Команды: {commands}",
   "help_child_command_hint": "Команды этого раздела",
   "help_command_start": "Снова открыть приветственную карточку в DApp и привязать кошелёк.",

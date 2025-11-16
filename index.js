@@ -443,7 +443,10 @@ const HELP_COMMAND_DETAILS = {
     help: { command: '/help', icon: '❓', descKey: 'help_command_help' },
     checkin: { command: '/checkin', icon: '✅', descKey: 'help_command_checkin' },
     topcheckin: { command: '/topcheckin', icon: '🏆', descKey: 'help_command_topcheckin' },
-    admin: { command: '/admin', icon: '🛠️', descKey: 'help_command_admin' }
+    admin: { command: '/admin', icon: '🛠️', descKey: 'help_command_admin' },
+    checkinadmin: { command: '/checkinadmin', icon: '🛡️', descKey: 'help_command_checkin_admin' },
+    banmaofeed: { command: '/banmaofeed', icon: '📡', descKey: 'help_command_banmaofeed' },
+    feedtopic: { command: '/feedtopic', icon: '🧵', descKey: 'help_command_feedtopic' }
 };
 
 const HELP_GROUP_DETAILS = {
@@ -487,7 +490,13 @@ const HELP_GROUP_DETAILS = {
         icon: '🛠️',
         titleKey: 'help_group_admin_title',
         descKey: 'help_group_admin_desc',
-        commands: ['admin']
+        commands: ['admin', 'checkinadmin']
+    },
+    admin_feed: {
+        icon: '📡',
+        titleKey: 'help_group_admin_feed_title',
+        descKey: 'help_group_admin_feed_desc',
+        commands: ['banmaofeed', 'feedtopic']
     }
 };
 
@@ -505,7 +514,7 @@ const HELP_USER_SECTIONS = [
 const HELP_ADMIN_SECTIONS = [
     {
         titleKey: 'help_section_admin_title',
-        groups: ['admin_tools']
+        groups: ['admin_tools', 'admin_feed']
     }
 ];
 
@@ -2055,8 +2064,7 @@ const ADMIN_MENU_SECTION_CONFIG = {
             { labelKey: 'checkin_admin_button_points', callback: (chatKey) => `checkin_admin_points|${chatKey}` },
             { labelKey: 'checkin_admin_button_summary', callback: (chatKey) => `checkin_admin_summary|${chatKey}` },
             { labelKey: 'checkin_admin_button_question_mix', callback: (chatKey) => `checkin_admin_weights|${chatKey}` },
-            { labelKey: 'checkin_admin_button_schedule', callback: (chatKey) => `checkin_admin_schedule|${chatKey}` },
-            { labelKey: 'checkin_admin_button_summary_schedule', callback: (chatKey) => `checkin_admin_summary_schedule|${chatKey}` }
+            { labelKey: 'checkin_admin_button_schedule', callback: (chatKey) => `checkin_admin_schedule|${chatKey}` }
         ]
     }
 };
@@ -6580,6 +6588,12 @@ function startTelegramBot() {
         }
 
         try {
+            await db.ensureCheckinGroup(chatId.toString());
+        } catch (error) {
+            console.error(`[AdminHub] Failed to register group ${chatId}: ${error.message}`);
+        }
+
+        try {
             await openAdminHub(userId, { fallbackLang });
             await sendAdminMenu(userId, chatId, { fallbackLang });
             await bot.sendMessage(chatId, t(replyLang, 'checkin_admin_command_dm_notice'), {
@@ -6907,7 +6921,21 @@ function startTelegramBot() {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleAdminCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
-        }
+        },
+        checkinadmin: async (query, lang) => {
+            const synthetic = buildSyntheticCommandMessage(query);
+            synthetic.text = '/checkinadmin';
+            await handleAdminCommand(synthetic);
+            return { message: t(lang, 'help_action_executed') };
+        },
+        banmaofeed: async (query, lang) => ({
+            message: t(lang, 'group_feed_group_only'),
+            showAlert: true
+        }),
+        feedtopic: async (query, lang) => ({
+            message: t(lang, 'feedtopic_group_only'),
+            showAlert: true
+        })
     };
 
     bot.on('callback_query', async (query) => {
