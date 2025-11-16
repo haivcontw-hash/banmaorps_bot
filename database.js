@@ -33,6 +33,71 @@ const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
     });
 });
 
+function sanitizeTimeSlot(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    const match = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) {
+        return null;
+    }
+
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (!Number.isInteger(hour) || !Number.isInteger(minute)) {
+        return null;
+    }
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        return null;
+    }
+
+    return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+}
+
+function normalizeAutoMessageTimes(value, fallbackTime = '08:00') {
+    let rawList = [];
+
+    if (Array.isArray(value)) {
+        rawList = value;
+    } else if (typeof value === 'string' && value.trim()) {
+        try {
+            const parsed = JSON.parse(value);
+            if (Array.isArray(parsed)) {
+                rawList = parsed;
+            } else {
+                rawList = value.split(',');
+            }
+        } catch (error) {
+            rawList = value.split(',');
+        }
+    }
+
+    const seen = new Set();
+    const normalized = [];
+    for (const entry of rawList) {
+        const slot = sanitizeTimeSlot(entry);
+        if (!slot || seen.has(slot)) {
+            continue;
+        }
+        seen.add(slot);
+        normalized.push(slot);
+    }
+
+    if (normalized.length === 0) {
+        const fallbackSlot = sanitizeTimeSlot(fallbackTime) || '08:00';
+        return fallbackSlot ? [fallbackSlot] : [];
+    }
+
+    return normalized.sort();
+}
+
 const CHECKIN_DEFAULTS = {
     checkinTime: '08:00',
     timezone: 'UTC',
@@ -41,7 +106,8 @@ const CHECKIN_DEFAULTS = {
     summaryWindow: 7,
     mathWeight: 2,
     physicsWeight: 1,
-    chemistryWeight: 1
+    chemistryWeight: 1,
+    autoMessageTimes: ['08:00']
 };
 
 function getTodayDateString(timezone = 'UTC') {
@@ -116,8 +182,8 @@ async function ensureCheckinGroup(chatId) {
     }
 
     await dbRun(
-        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, autoMessageTimes, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             chatId,
             CHECKIN_DEFAULTS.checkinTime,
@@ -128,6 +194,7 @@ async function ensureCheckinGroup(chatId) {
             CHECKIN_DEFAULTS.mathWeight,
             CHECKIN_DEFAULTS.physicsWeight,
             CHECKIN_DEFAULTS.chemistryWeight,
+            JSON.stringify(CHECKIN_DEFAULTS.autoMessageTimes),
             now,
             now
         ]
@@ -156,7 +223,8 @@ async function getCheckinGroup(chatId) {
         mathWeight: row.mathWeight ?? CHECKIN_DEFAULTS.mathWeight,
         physicsWeight: row.physicsWeight ?? CHECKIN_DEFAULTS.physicsWeight,
         chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
-        lastAutoMessageDate: row.lastAutoMessageDate || null
+        lastAutoMessageDate: row.lastAutoMessageDate || null,
+        autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime)
     };
 }
 
@@ -176,7 +244,8 @@ async function listCheckinGroups() {
         mathWeight: row.mathWeight ?? CHECKIN_DEFAULTS.mathWeight,
         physicsWeight: row.physicsWeight ?? CHECKIN_DEFAULTS.physicsWeight,
         chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
-        lastAutoMessageDate: row.lastAutoMessageDate || null
+        lastAutoMessageDate: row.lastAutoMessageDate || null,
+        autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime)
     }));
 }
 
@@ -184,11 +253,15 @@ async function updateCheckinGroup(chatId, patch = {}) {
     await ensureCheckinGroup(chatId);
     const fields = [];
     const values = [];
-    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight'];
+    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight', 'autoMessageTimes'];
     for (const key of allowed) {
         if (Object.prototype.hasOwnProperty.call(patch, key)) {
+            let value = patch[key];
+            if (key === 'autoMessageTimes' && Array.isArray(value)) {
+                value = JSON.stringify(value);
+            }
             fields.push(`${key} = ?`);
-            values.push(patch[key]);
+            values.push(value);
         }
     }
 
@@ -502,6 +575,21 @@ async function getCheckinsForDate(chatId, checkinDate) {
     return rows;
 }
 
+async function getCheckinsInRange(chatId, startDate, endDate) {
+    const normalizedStart = normalizeDateString(startDate);
+    const normalizedEnd = normalizeDateString(endDate);
+    if (!normalizedStart || !normalizedEnd) {
+        return [];
+    }
+
+    const rows = await dbAll(
+        'SELECT * FROM checkin_records WHERE chatId = ? AND checkinDate BETWEEN ? AND ? ORDER BY checkinDate ASC, updatedAt ASC',
+        [chatId, normalizedStart, normalizedEnd]
+    );
+
+    return rows || [];
+}
+
 async function getCheckinMemberSummary(chatId, userId) {
     if (!chatId || !userId) {
         return null;
@@ -583,6 +671,35 @@ async function markMemberLocked(chatId, userId, checkinDate) {
     await dbRun(
         'UPDATE checkin_members SET lockedUntilDate = ?, updatedAt = ? WHERE chatId = ? AND userId = ?',
         [normalized, now, chatId, userId]
+    );
+}
+
+async function hasAutoMessageLog(chatId, checkinDate, slot) {
+    const normalizedDate = normalizeDateString(checkinDate);
+    const normalizedSlot = sanitizeTimeSlot(slot);
+    if (!normalizedDate || !normalizedSlot) {
+        return false;
+    }
+
+    const row = await dbGet(
+        'SELECT 1 FROM checkin_auto_logs WHERE chatId = ? AND checkinDate = ? AND slot = ?',
+        [chatId, normalizedDate, normalizedSlot]
+    );
+
+    return Boolean(row);
+}
+
+async function recordAutoMessageLog(chatId, checkinDate, slot) {
+    const normalizedDate = normalizeDateString(checkinDate);
+    const normalizedSlot = sanitizeTimeSlot(slot);
+    if (!normalizedDate || !normalizedSlot) {
+        return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        'INSERT OR IGNORE INTO checkin_auto_logs (chatId, checkinDate, slot, sentAt) VALUES (?, ?, ?, ?)',
+        [chatId, normalizedDate, normalizedSlot, now]
     );
 }
 
@@ -674,11 +791,19 @@ async function init() {
             mathWeight REAL NOT NULL DEFAULT 2,
             physicsWeight REAL NOT NULL DEFAULT 1,
             chemistryWeight REAL NOT NULL DEFAULT 1,
+            autoMessageTimes TEXT,
             lastAutoMessageDate TEXT,
             createdAt INTEGER NOT NULL,
             updatedAt INTEGER NOT NULL
         );
     `);
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN autoMessageTimes TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
     const weightDefaults = { mathWeight: 2, physicsWeight: 1, chemistryWeight: 1 };
     for (const column of Object.keys(weightDefaults)) {
         try {
@@ -742,6 +867,15 @@ async function init() {
     await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_records_chat_date ON checkin_records (chatId, checkinDate);`);
     await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_records_user ON checkin_records (chatId, userId, checkinDate);`);
     await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_attempts_locked ON checkin_attempts (chatId, checkinDate, locked);`);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS checkin_auto_logs (
+            chatId TEXT NOT NULL,
+            checkinDate TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            sentAt INTEGER NOT NULL,
+            PRIMARY KEY (chatId, checkinDate, slot)
+        );
+    `);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -1025,11 +1159,14 @@ module.exports = {
     completeCheckin,
     updateCheckinFeedback,
     getCheckinsForDate,
+    getCheckinsInRange,
     getCheckinMemberSummary,
     getTopCheckins,
     removeCheckinRecord,
     unlockMemberCheckin,
     markMemberLocked,
+    hasAutoMessageLog,
+    recordAutoMessageLog,
     getLockedMembers,
     addWalletToUser,
     removeWalletFromUser,

@@ -142,6 +142,14 @@ const QUESTION_WEIGHT_PRESETS = [
     { math: 50, physics: 25, chemistry: 25 }
 ];
 
+const CHECKIN_SCHEDULE_MAX_SLOTS = 6;
+const CHECKIN_ADMIN_SUMMARY_MAX_ROWS = 30;
+const CHECKIN_SCHEDULE_PRESETS = [
+    { labelKey: 'checkin_admin_button_schedule_once', slots: ['08:00'] },
+    { labelKey: 'checkin_admin_button_schedule_twice', slots: ['08:00', '20:00'] },
+    { labelKey: 'checkin_admin_button_schedule_thrice', slots: ['07:00', '12:00', '21:00'] }
+];
+
 function sanitizeWeightValue(value, fallback) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric) || numeric < 0) {
@@ -192,12 +200,80 @@ function formatQuestionWeightPercentages(weights) {
     };
 }
 
+function normalizeTimeSlot(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    const match = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) {
+        return null;
+    }
+
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (!Number.isInteger(hour) || !Number.isInteger(minute)) {
+        return null;
+    }
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        return null;
+    }
+
+    return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+}
+
+function sanitizeScheduleSlots(values = []) {
+    const seen = new Set();
+    const sanitized = [];
+    for (const value of values) {
+        const slot = normalizeTimeSlot(value);
+        if (!slot || seen.has(slot)) {
+            continue;
+        }
+        seen.add(slot);
+        sanitized.push(slot);
+        if (sanitized.length >= CHECKIN_SCHEDULE_MAX_SLOTS) {
+            break;
+        }
+    }
+    return sanitized.sort();
+}
+
+function parseScheduleTextInput(text) {
+    if (typeof text !== 'string') {
+        return null;
+    }
+
+    const tokens = text.split(/[,;\s]+/).map((token) => token.trim()).filter(Boolean);
+    if (tokens.length === 0) {
+        return null;
+    }
+
+    const sanitized = sanitizeScheduleSlots(tokens);
+    return sanitized.length > 0 ? sanitized : null;
+}
+
+function getScheduleSlots(settings = null) {
+    const raw = Array.isArray(settings?.autoMessageTimes) ? settings.autoMessageTimes : [];
+    const fallback = settings?.checkinTime || CHECKIN_DEFAULT_TIME;
+    const base = raw.length > 0 ? raw : [fallback];
+    const sanitized = sanitizeScheduleSlots(base);
+    return sanitized.length > 0 ? sanitized : [CHECKIN_DEFAULT_TIME];
+}
+
 const pendingCheckinChallenges = new Map();
 const pendingEmotionPrompts = new Map();
 const pendingGoalInputs = new Map();
 const pendingSecretMessages = new Map();
 const checkinAdminStates = new Map();
 const checkinAdminMenus = new Map();
+const helpMenuStates = new Map();
 const adminHubSessions = new Map();
 const registerWizardStates = new Map();
 let checkinSchedulerTimer = null;
@@ -338,21 +414,60 @@ const HELP_COMMAND_DETAILS = {
     admin: { command: '/admin', icon: '🛠️', descKey: 'help_command_admin' }
 };
 
+const HELP_GROUP_DETAILS = {
+    onboarding: {
+        icon: '🚀',
+        titleKey: 'help_group_onboarding_title',
+        descKey: 'help_group_onboarding_desc',
+        commands: ['start', 'help']
+    },
+    account: {
+        icon: '🆔',
+        titleKey: 'help_group_account_title',
+        descKey: 'help_group_account_desc',
+        commands: ['register', 'mywallet', 'unregister']
+    },
+    language: {
+        icon: '🌐',
+        titleKey: 'help_group_language_title',
+        descKey: 'help_group_language_desc',
+        commands: ['language', 'feedlang']
+    },
+    insights: {
+        icon: '📈',
+        titleKey: 'help_group_insights_title',
+        descKey: 'help_group_insights_desc',
+        commands: ['stats', 'banmaoprice', 'okxchains', 'okx402status']
+    },
+    checkin: {
+        icon: '✅',
+        titleKey: 'help_group_checkin_title',
+        descKey: 'help_group_checkin_desc',
+        commands: ['checkin', 'topcheckin']
+    },
+    admin_tools: {
+        icon: '🛠️',
+        titleKey: 'help_group_admin_title',
+        descKey: 'help_group_admin_desc',
+        commands: ['admin']
+    }
+};
+
 const HELP_USER_SECTIONS = [
     {
         titleKey: 'help_section_general_title',
-        commands: ['start', 'register', 'mywallet', 'stats', 'banmaoprice', 'okxchains', 'okx402status', 'unregister', 'language', 'feedlang', 'help']
+        groups: ['onboarding', 'account', 'language', 'insights']
     },
     {
         titleKey: 'help_section_checkin_title',
-        commands: ['checkin', 'topcheckin']
+        groups: ['checkin']
     }
 ];
 
 const HELP_ADMIN_SECTIONS = [
     {
         titleKey: 'help_section_admin_title',
-        commands: ['admin']
+        groups: ['admin_tools']
     }
 ];
 
@@ -394,19 +509,28 @@ function wrapText(input, width) {
     return lines;
 }
 
-function buildHelpRows(lang, commandKeys) {
+function buildHelpRows(lang, groupKeys) {
     const entries = [];
     let commandWidth = 0;
     const maxDescWidth = 54;
 
-    for (const key of commandKeys) {
-        const detail = HELP_COMMAND_DETAILS[key];
+    for (const key of groupKeys) {
+        const detail = HELP_GROUP_DETAILS[key];
         if (!detail) {
             continue;
         }
-        const commandLabel = `${detail.icon} ${detail.command}`;
+        const title = t(lang, detail.titleKey);
+        const commandLabel = `${detail.icon} ${title}`;
         commandWidth = Math.max(commandWidth, commandLabel.length);
-        const description = t(lang, detail.descKey);
+        const descriptionParts = [t(lang, detail.descKey)];
+        const commandList = (detail.commands || [])
+            .map((cmdKey) => HELP_COMMAND_DETAILS[cmdKey]?.command)
+            .filter(Boolean)
+            .join(', ');
+        if (commandList) {
+            descriptionParts.push(t(lang, 'help_group_command_hint', { commands: commandList }));
+        }
+        const description = descriptionParts.filter(Boolean).join(' ');
         const wrappedDescription = wrapText(description, maxDescWidth);
         entries.push({ commandLabel, descriptionLines: wrappedDescription });
     }
@@ -449,7 +573,7 @@ function buildHelpText(lang, view = 'user') {
     lines.push(`<i>${escapeHtml(t(lang, hintKey))}</i>`);
 
     for (const section of sections) {
-        const table = buildHelpRows(lang, section.commands);
+        const table = buildHelpRows(lang, section.groups || []);
         if (!table) {
             continue;
         }
@@ -464,23 +588,55 @@ function buildHelpText(lang, view = 'user') {
     return lines.filter(Boolean).join('\n');
 }
 
-function buildHelpKeyboard(lang, view = 'user') {
+function resolveHelpGroups(view = 'user') {
     const sections = view === 'admin' ? HELP_ADMIN_SECTIONS : HELP_USER_SECTIONS;
-    const commandKeys = sections.flatMap((section) => section.commands);
+    return sections.flatMap((section) => (section.groups || []).filter((key) => Boolean(HELP_GROUP_DETAILS[key])));
+}
+
+function getDefaultHelpGroup(view = 'user') {
+    const groups = resolveHelpGroups(view);
+    return groups.length > 0 ? groups[0] : null;
+}
+
+function buildHelpKeyboard(lang, view = 'user', selectedGroup = null) {
+    const sections = view === 'admin' ? HELP_ADMIN_SECTIONS : HELP_USER_SECTIONS;
+    const validGroups = resolveHelpGroups(view);
+    const activeGroup = validGroups.includes(selectedGroup) ? selectedGroup : (validGroups[0] || null);
     const inline_keyboard = [];
 
-    for (let i = 0; i < commandKeys.length; i += 2) {
+    for (const section of sections) {
         const row = [];
-        for (let j = i; j < Math.min(i + 2, commandKeys.length); j += 1) {
-            const key = commandKeys[j];
-            const detail = HELP_COMMAND_DETAILS[key];
+        for (const groupKey of section.groups || []) {
+            const detail = HELP_GROUP_DETAILS[groupKey];
             if (!detail) {
                 continue;
             }
-            row.push({ text: `${detail.icon} ${detail.command}`, callback_data: `help_cmd|${key}` });
+            const title = t(lang, detail.titleKey);
+            const isActive = groupKey === activeGroup;
+            const prefix = isActive ? '✅' : '•';
+            row.push({ text: `${prefix} ${detail.icon} ${title}`, callback_data: `help_group|${view}|${groupKey}` });
         }
         if (row.length > 0) {
             inline_keyboard.push(row);
+        }
+    }
+
+    const activeDetail = activeGroup ? HELP_GROUP_DETAILS[activeGroup] : null;
+    if (activeDetail) {
+        const commands = (activeDetail.commands || []).filter((key) => HELP_COMMAND_DETAILS[key]);
+        for (let i = 0; i < commands.length; i += 2) {
+            const row = [];
+            for (let j = i; j < Math.min(i + 2, commands.length); j += 1) {
+                const key = commands[j];
+                const detail = HELP_COMMAND_DETAILS[key];
+                if (!detail) {
+                    continue;
+                }
+                row.push({ text: `${detail.icon} ${detail.command}`, callback_data: `help_cmd|${key}` });
+            }
+            if (row.length > 0) {
+                inline_keyboard.push(row);
+            }
         }
     }
 
@@ -510,6 +666,34 @@ function buildSyntheticCommandMessage(query) {
     }
 
     return synthetic;
+}
+
+function getHelpMessageStateKey(chatId, messageId) {
+    if (!chatId || !messageId) {
+        return null;
+    }
+    return `${chatId}:${messageId}`;
+}
+
+function saveHelpMessageState(chatId, messageId, state) {
+    const key = getHelpMessageStateKey(chatId, messageId);
+    if (!key) {
+        return;
+    }
+    helpMenuStates.set(key, state);
+}
+
+function getHelpMessageState(chatId, messageId) {
+    const key = getHelpMessageStateKey(chatId, messageId);
+    return key ? helpMenuStates.get(key) : null;
+}
+
+function clearHelpMessageState(chatId, messageId) {
+    const key = getHelpMessageStateKey(chatId, messageId);
+    if (!key) {
+        return;
+    }
+    helpMenuStates.delete(key);
 }
 
 function extractThreadId(source) {
@@ -630,6 +814,28 @@ function formatTimeForTimezone(timezone = CHECKIN_DEFAULT_TIMEZONE, date = new D
         const minutes = String(date.getUTCMinutes()).padStart(2, '0');
         return `${hours}:${minutes}`;
     }
+}
+
+function subtractDaysFromDate(dateStr, days) {
+    if (typeof dateStr !== 'string') {
+        return null;
+    }
+
+    const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) {
+        return null;
+    }
+
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const delta = Math.max(0, Number(days) || 0);
+    const date = new Date(Date.UTC(year, month, day));
+    date.setUTCDate(date.getUTCDate() - delta);
+    const nextYear = date.getUTCFullYear();
+    const nextMonth = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const nextDay = String(date.getUTCDate()).padStart(2, '0');
+    return `${nextYear}-${nextMonth}-${nextDay}`;
 }
 
 const SCIENCE_LANGUAGE_SET = new Set([
@@ -850,7 +1056,8 @@ async function getGroupCheckinSettings(chatId) {
             autoMessageEnabled: 1,
             dailyPoints: 10,
             summaryWindow: 7,
-            lastAutoMessageDate: null
+            lastAutoMessageDate: null,
+            autoMessageTimes: [CHECKIN_DEFAULT_TIME]
         };
     }
 }
@@ -1360,13 +1567,22 @@ async function runCheckinSchedulerTick() {
         }
 
         const timezone = group.timezone || CHECKIN_DEFAULT_TIMEZONE;
-        const scheduledTime = group.checkinTime || CHECKIN_DEFAULT_TIME;
         const currentTime = formatTimeForTimezone(timezone, now);
         const today = formatDateForTimezone(timezone, now);
+        const slots = getScheduleSlots(group);
 
-        if (currentTime === scheduledTime && group.lastAutoMessageDate !== today) {
+        for (const slot of slots) {
+            if (currentTime !== slot) {
+                continue;
+            }
+
+            const alreadySent = await db.hasAutoMessageLog(group.chatId, today, slot);
+            if (alreadySent) {
+                continue;
+            }
+
             await sendCheckinAnnouncement(group.chatId, { triggeredBy: 'auto' });
-            group.lastAutoMessageDate = today;
+            await db.recordAutoMessageLog(group.chatId, today, slot);
         }
     }
 }
@@ -1531,9 +1747,9 @@ const ADMIN_MENU_SECTION_CONFIG = {
         hintKey: 'checkin_admin_section_members_hint',
         actions: [
             { labelKey: 'checkin_admin_button_today_list', callback: (chatKey) => `checkin_admin_list|${chatKey}` },
+            { labelKey: 'checkin_admin_button_summary_window', callback: (chatKey) => `checkin_admin_summary_window|${chatKey}` },
             { labelKey: 'checkin_admin_button_remove', callback: (chatKey) => `checkin_admin_remove|${chatKey}` },
-            { labelKey: 'checkin_admin_button_unlock', callback: (chatKey) => `checkin_admin_unlock|${chatKey}` },
-            { labelKey: 'checkin_admin_button_reset', callback: (chatKey) => `checkin_admin_reset|${chatKey}` }
+            { labelKey: 'checkin_admin_button_unlock', callback: (chatKey) => `checkin_admin_unlock|${chatKey}` }
         ]
     },
     messaging: {
@@ -1550,7 +1766,8 @@ const ADMIN_MENU_SECTION_CONFIG = {
         actions: [
             { labelKey: 'checkin_admin_button_points', callback: (chatKey) => `checkin_admin_points|${chatKey}` },
             { labelKey: 'checkin_admin_button_summary', callback: (chatKey) => `checkin_admin_summary|${chatKey}` },
-            { labelKey: 'checkin_admin_button_question_mix', callback: (chatKey) => `checkin_admin_weights|${chatKey}` }
+            { labelKey: 'checkin_admin_button_question_mix', callback: (chatKey) => `checkin_admin_weights|${chatKey}` },
+            { labelKey: 'checkin_admin_button_schedule', callback: (chatKey) => `checkin_admin_schedule|${chatKey}` }
         ]
     }
 };
@@ -1688,9 +1905,16 @@ async function sendAdminMenu(adminId, chatId, { fallbackLang, view } = {}) {
     const currentSession = checkinAdminMenus.get(adminId);
     const resolvedView = resolveAdminMenuView(view || currentSession?.view);
     const weightPercents = formatQuestionWeightPercentages(getQuestionWeights(settings));
+    const scheduleSlots = getScheduleSlots(settings);
+    const scheduleText = scheduleSlots.join(', ');
     const textLines = [
         t(lang, 'checkin_admin_menu_header'),
         t(lang, 'checkin_admin_menu_line_time', { time: settings.checkinTime || CHECKIN_DEFAULT_TIME }),
+        t(lang, 'checkin_admin_menu_line_schedule', {
+            count: scheduleSlots.length,
+            times: scheduleText,
+            timezone: settings.timezone || CHECKIN_DEFAULT_TIMEZONE
+        }),
         t(lang, 'checkin_admin_menu_line_points', { points: settings.dailyPoints || 0 }),
         t(lang, 'checkin_admin_menu_line_summary', { days: settings.summaryWindow || 7 }),
         t(lang, 'checkin_admin_menu_line_question_mix', weightPercents),
@@ -1808,6 +2032,87 @@ async function sendTodayCheckinList(chatId, adminId, { fallbackLang } = {}) {
         }
 
         lines.push(entryLines.join('\n'));
+        lines.push('');
+    }
+
+    const message = await bot.sendMessage(adminId, lines.join('\n').trim(), {
+        parse_mode: 'HTML',
+        reply_markup: {
+            inline_keyboard: [[
+                { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` },
+                { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }
+            ]]
+        }
+    });
+    scheduleMessageDeletion(adminId, message.message_id, 60000);
+}
+
+async function sendSummaryWindowCheckinList(chatId, adminId, { fallbackLang } = {}) {
+    const settings = await getGroupCheckinSettings(chatId);
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const endDate = formatDateForTimezone(timezone);
+    const windowDays = Math.max(1, Number(settings.summaryWindow) || 7);
+    const startDate = subtractDaysFromDate(endDate, windowDays - 1) || endDate;
+    const records = await db.getCheckinsInRange(chatId, startDate, endDate);
+    const profileCache = new Map();
+
+    if (!records || records.length === 0) {
+        const message = await bot.sendMessage(adminId, t(lang, 'checkin_admin_summary_window_empty', { days: windowDays }), {
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` },
+                    { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }
+                ]]
+            }
+        });
+        scheduleMessageDeletion(adminId, message.message_id, 15000);
+        return;
+    }
+
+    const summaryMap = new Map();
+    for (const record of records) {
+        const userKey = record.userId.toString();
+        const stats = summaryMap.get(userKey) || { days: 0, points: 0 };
+        stats.days += 1;
+        stats.points += Number(record.pointsAwarded || 0);
+        summaryMap.set(userKey, stats);
+    }
+
+    const sortedEntries = Array.from(summaryMap.entries())
+        .sort((a, b) => {
+            if (b[1].days !== a[1].days) {
+                return b[1].days - a[1].days;
+            }
+            if (b[1].points !== a[1].points) {
+                return b[1].points - a[1].points;
+            }
+            return Number(a[0]) - Number(b[0]);
+        })
+        .slice(0, CHECKIN_ADMIN_SUMMARY_MAX_ROWS);
+
+    const lines = [
+        t(lang, 'checkin_admin_summary_window_header', {
+            days: windowDays,
+            start: startDate,
+            end: endDate,
+            members: summaryMap.size
+        }),
+        ''
+    ];
+
+    for (let index = 0; index < sortedEntries.length; index += 1) {
+        const [userId, stats] = sortedEntries[index];
+        const profile = await resolveMemberProfile(chatId, userId, lang, profileCache);
+        const safeName = `<b>${escapeHtml(profile.displayName)}</b>`;
+        const safeId = `<code>${escapeHtml(userId)}</code>`;
+        lines.push(t(lang, 'checkin_admin_summary_window_line', {
+            rank: index + 1,
+            name: safeName,
+            id: safeId,
+            days: stats.days
+        }));
+        lines.push(`${ADMIN_DETAIL_BULLET}${escapeHtml(t(lang, 'checkin_admin_summary_window_points', { points: stats.points }))}`);
         lines.push('');
     }
 
@@ -2023,42 +2328,70 @@ async function promptAdminSummaryWindow(chatId, adminId, { fallbackLang } = {}) 
     });
 }
 
-async function promptAdminResetQuestion(chatId, adminId, { fallbackLang } = {}) {
+async function promptAdminSchedule(chatId, adminId, { fallbackLang } = {}) {
     const settings = await getGroupCheckinSettings(chatId);
-    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
-    const locked = await db.getLockedMembers(chatId, today);
     const lang = await resolveNotificationLanguage(adminId, fallbackLang);
-    const profileCache = new Map();
-    if (!locked || locked.length === 0) {
-        const message = await bot.sendMessage(adminId, t(lang, 'checkin_admin_reset_empty'), {
-            reply_markup: {
-                inline_keyboard: [[
-                    { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` },
-                    { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }
-                ]]
-            }
-        });
-        scheduleMessageDeletion(adminId, message.message_id, 15000);
-        return;
-    }
+    const slots = getScheduleSlots(settings);
+    const timezone = settings.timezone || CHECKIN_DEFAULT_TIMEZONE;
+    const lines = [
+        t(lang, 'checkin_admin_schedule_title'),
+        '',
+        t(lang, 'checkin_admin_schedule_timezone', { timezone }),
+        slots.length > 0
+            ? `${t(lang, 'checkin_admin_schedule_current', { count: slots.length })}\n${slots.map((slot, idx) => `${idx + 1}. ${slot}`).join('\n')}`
+            : t(lang, 'checkin_admin_schedule_none'),
+        '',
+        t(lang, 'checkin_admin_schedule_hint')
+    ];
 
-    const inline_keyboard = [];
-    for (const entry of locked.slice(0, 20)) {
-        const profile = await resolveMemberProfile(chatId, entry.userId, lang, profileCache);
-        inline_keyboard.push([{
-            text: t(lang, 'checkin_admin_reset_option', { name: profile.displayName, id: entry.userId }),
-            callback_data: `checkin_admin_reset_confirm|${chatId}|${entry.userId}`
-        }]);
-    }
+    const inline_keyboard = CHECKIN_SCHEDULE_PRESETS.map((preset) => ([{
+        text: t(lang, preset.labelKey),
+        callback_data: `checkin_admin_schedule_preset|${chatId}|${preset.slots.join(',')}`
+    }]));
+
+    inline_keyboard.push([
+        { text: t(lang, 'checkin_admin_button_schedule_custom'), callback_data: `checkin_admin_schedule_custom|${chatId}` },
+        { text: t(lang, 'checkin_admin_button_schedule_clear'), callback_data: `checkin_admin_schedule_clear|${chatId}` }
+    ]);
 
     inline_keyboard.push([
         { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatId}` },
         { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatId}` }
     ]);
 
-    await bot.sendMessage(adminId, t(lang, 'checkin_admin_reset_prompt'), {
-        reply_markup: { inline_keyboard }
+    await bot.sendMessage(adminId, lines.join('\n'), { reply_markup: { inline_keyboard } });
+}
+
+async function setAdminScheduleSlots(chatId, adminId, slots, { fallbackLang } = {}) {
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const sanitized = sanitizeScheduleSlots(slots);
+    if (sanitized.length === 0) {
+        await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_schedule_invalid'));
+        return;
+    }
+
+    await db.updateCheckinGroup(chatId, {
+        autoMessageTimes: sanitized,
+        checkinTime: sanitized[0]
     });
+
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_schedule_updated', {
+        count: sanitized.length,
+        times: sanitized.join(', ')
+    }));
+    await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'settings' });
+}
+
+async function resetAdminScheduleSlots(chatId, adminId, { fallbackLang } = {}) {
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const settings = await getGroupCheckinSettings(chatId);
+    const fallbackSlot = normalizeTimeSlot(settings.checkinTime) || CHECKIN_DEFAULT_TIME;
+    await db.updateCheckinGroup(chatId, {
+        autoMessageTimes: [fallbackSlot],
+        checkinTime: fallbackSlot
+    });
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_schedule_cleared', { time: fallbackSlot }));
+    await sendAdminMenu(adminId, chatId, { fallbackLang: lang, view: 'settings' });
 }
 
 async function executeAdminRemoval(chatId, adminId, targetUserId, { fallbackLang } = {}) {
@@ -2119,37 +2452,6 @@ async function executeAdminUnlock(chatId, adminId, targetUserId, { fallbackLang 
         await bot.sendMessage(targetUserId, t(userLang, 'checkin_dm_unlocked'));
     } catch (error) {
         // ignore DM failures
-    }
-
-    await sendAdminMenu(adminId, chatId, { fallbackLang: adminLang });
-}
-
-async function executeAdminReset(chatId, adminId, targetUserId, { fallbackLang } = {}) {
-    const settings = await getGroupCheckinSettings(chatId);
-    const today = formatDateForTimezone(settings.timezone || CHECKIN_DEFAULT_TIMEZONE);
-    await db.unlockMemberCheckin(chatId, targetUserId);
-    await db.clearDailyAttempts(chatId, targetUserId, today);
-    const adminLang = await resolveNotificationLanguage(adminId, fallbackLang);
-    const profile = await resolveMemberProfile(chatId, targetUserId, adminLang);
-    await sendEphemeralMessage(adminId, t(adminLang, 'checkin_admin_reset_sending', {
-        user: profile.displayName,
-        id: targetUserId
-    }), {}, 10000);
-    try {
-        const fakeUser = { id: Number(targetUserId), first_name: '' };
-        const result = await initiateCheckinChallenge(chatId, fakeUser);
-        if (result.status === 'sent') {
-            await sendEphemeralMessage(adminId, t(adminLang, 'checkin_admin_reset_success'));
-        } else if (result.status === 'failed') {
-            await sendEphemeralMessage(adminId, t(adminLang, 'checkin_admin_reset_dm_failed'));
-        } else if (result.status === 'locked') {
-            await sendEphemeralMessage(adminId, t(adminLang, 'checkin_admin_reset_still_locked'));
-        } else if (result.status === 'checked') {
-            await sendEphemeralMessage(adminId, t(adminLang, 'checkin_admin_reset_already_checked'));
-        }
-    } catch (error) {
-        console.error(`[Checkin] Unable to resend question for ${targetUserId}: ${error.message}`);
-        await sendEphemeralMessage(adminId, t(adminLang, 'checkin_admin_reset_dm_failed'));
     }
 
     await sendAdminMenu(adminId, chatId, { fallbackLang: adminLang });
@@ -5711,9 +6013,13 @@ function startTelegramBot() {
     // LỆNH: /help - Cần async
     bot.onText(/\/help/, async (msg) => {
         const lang = await getLang(msg);
+        const defaultGroup = getDefaultHelpGroup('user');
         const helpText = buildHelpText(lang, 'user');
-        const replyMarkup = buildHelpKeyboard(lang, 'user');
-        await sendReply(msg, helpText, { parse_mode: 'HTML', reply_markup: replyMarkup });
+        const replyMarkup = buildHelpKeyboard(lang, 'user', defaultGroup);
+        const sent = await sendReply(msg, helpText, { parse_mode: 'HTML', reply_markup: replyMarkup });
+        if (sent?.chat?.id && sent?.message_id) {
+            saveHelpMessageState(sent.chat.id.toString(), sent.message_id, { view: 'user', group: defaultGroup });
+        }
     });
 
     // Xử lý tất cả CALLBACK QUERY (Nút bấm) - Cần async
@@ -5835,6 +6141,7 @@ function startTelegramBot() {
                     } catch (error) {
                         // ignore deletion errors
                     }
+                    clearHelpMessageState(query.message.chat.id.toString(), query.message.message_id);
                 }
                 await bot.answerCallbackQuery(queryId);
                 return;
@@ -5844,7 +6151,8 @@ function startTelegramBot() {
                 const [, requestedView] = query.data.split('|');
                 const view = requestedView === 'admin' ? 'admin' : 'user';
                 const helpText = buildHelpText(callbackLang, view);
-                const replyMarkup = buildHelpKeyboard(callbackLang, view);
+                const defaultGroup = getDefaultHelpGroup(view);
+                const replyMarkup = buildHelpKeyboard(callbackLang, view, defaultGroup);
 
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {
@@ -5854,6 +6162,30 @@ function startTelegramBot() {
                             parse_mode: 'HTML',
                             reply_markup: replyMarkup
                         });
+                        saveHelpMessageState(query.message.chat.id.toString(), query.message.message_id, { view, group: defaultGroup });
+                    } catch (error) {
+                        // ignore edit errors
+                    }
+                }
+
+                await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data.startsWith('help_group|')) {
+                const [, requestedView, requestedGroup] = query.data.split('|');
+                const view = requestedView === 'admin' ? 'admin' : 'user';
+                const groups = resolveHelpGroups(view);
+                const selectedGroup = groups.includes(requestedGroup) ? requestedGroup : (groups[0] || null);
+                const replyMarkup = buildHelpKeyboard(callbackLang, view, selectedGroup);
+
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.editMessageReplyMarkup(replyMarkup, {
+                            chat_id: query.message.chat.id,
+                            message_id: query.message.message_id
+                        });
+                        saveHelpMessageState(query.message.chat.id.toString(), query.message.message_id, { view, group: selectedGroup });
                     } catch (error) {
                         // ignore edit errors
                     }
@@ -6249,6 +6581,23 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_summary_window|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission_action'), show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_summary_window_progress_alert') });
+                await sendSummaryWindowCheckinList(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_broadcast|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -6569,6 +6918,112 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_schedule_preset|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const presetValue = parts[2] || '';
+                const presetSlots = presetValue.split(',').map((slot) => slot.trim()).filter(Boolean);
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_schedule_updated_alert') });
+                await setAdminScheduleSlots(targetChatId, query.from.id, presetSlots, { fallbackLang: callbackLang });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_schedule_custom|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                const promptMessage = await bot.sendMessage(query.from.id, t(callbackLang, 'checkin_admin_schedule_prompt'), {
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                { text: t(callbackLang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${targetChatId}` },
+                                { text: t(callbackLang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${targetChatId}` }
+                            ],
+                            [{ text: t(callbackLang, 'checkin_admin_button_cancel'), callback_data: `checkin_admin_cancel_input|${targetChatId}` }]
+                        ]
+                    }
+                });
+                checkinAdminStates.set(query.from.id.toString(), {
+                    type: 'schedule_custom',
+                    chatId: targetChatId,
+                    promptMessageId: promptMessage.message_id
+                });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_schedule_prompt_alert') });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_schedule_clear|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_schedule_cleared_alert') });
+                await resetAdminScheduleSlots(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_schedule|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_schedule_choose_prompt') });
+                await promptAdminSchedule(targetChatId, query.from.id, { fallbackLang: callbackLang });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_weights_set|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -6651,48 +7106,6 @@ function startTelegramBot() {
                 }
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_weights_choose_prompt') });
                 await showQuestionWeightMenu(query.from.id, targetChatId, { fallbackLang: callbackLang });
-                return;
-            }
-
-            if (query.data.startsWith('checkin_admin_reset_confirm|')) {
-                const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId || '').toString();
-                if (!targetChatId) {
-                    await bot.answerCallbackQuery(queryId);
-                    return;
-                }
-                const targetUserId = parts[2];
-                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
-                if (!isAdminUser) {
-                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
-                    return;
-                }
-                if (query.message?.chat?.id && query.message?.message_id) {
-                    try {
-                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
-                    } catch (error) {
-                        // ignore
-                    }
-                }
-                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_reset_progress_alert') });
-                await executeAdminReset(targetChatId, query.from.id, targetUserId, { fallbackLang: callbackLang });
-                return;
-            }
-
-            if (query.data.startsWith('checkin_admin_reset|')) {
-                const parts = query.data.split('|');
-                const targetChatId = (parts[1] || chatId || '').toString();
-                if (!targetChatId) {
-                    await bot.answerCallbackQuery(queryId);
-                    return;
-                }
-                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
-                if (!isAdminUser) {
-                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
-                    return;
-                }
-                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_reset_choose_prompt') });
-                await promptAdminResetQuestion(targetChatId, query.from.id, { fallbackLang: callbackLang });
                 return;
             }
 
@@ -7002,6 +7415,24 @@ function startTelegramBot() {
                         }
                     }
                     await setAdminQuestionWeights(adminState.chatId, msg.from.id, parsed, { fallbackLang: lang });
+                    checkinAdminStates.delete(userId);
+                    return;
+                }
+
+                if (adminState.type === 'schedule_custom') {
+                    const parsed = parseScheduleTextInput(rawText);
+                    if (!parsed) {
+                        await sendEphemeralMessage(userId, t(lang, 'checkin_admin_schedule_invalid'));
+                        return;
+                    }
+                    if (adminState.promptMessageId) {
+                        try {
+                            await bot.deleteMessage(msg.chat.id, adminState.promptMessageId);
+                        } catch (error) {
+                            // ignore
+                        }
+                    }
+                    await setAdminScheduleSlots(adminState.chatId, msg.from.id, parsed, { fallbackLang: lang });
                     checkinAdminStates.delete(userId);
                     return;
                 }
