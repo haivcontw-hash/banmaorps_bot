@@ -556,53 +556,295 @@ function formatTimeForTimezone(timezone = CHECKIN_DEFAULT_TIMEZONE, date = new D
     }
 }
 
-const SCIENCE_CHALLENGES = [
-    {
-        question: 'Physics: Which law links force, mass, and acceleration?',
-        options: [
-            'Newton\'s second law',
-            'Hooke\'s law',
-            'Ohm\'s law',
-            'Law of conservation of energy'
-        ],
-        correctIndex: 0
-    },
-    {
-        question: 'Chemistry: What is the chemical symbol for sodium?',
-        options: ['Na', 'So', 'Sn', 'S'],
-        correctIndex: 0
-    },
-    {
-        question: 'Physics: Light bends when it passes through water because of what phenomenon?',
-        options: ['Diffraction', 'Reflection', 'Refraction', 'Polarization'],
-        correctIndex: 2
-    },
-    {
-        question: 'Chemistry: Which gas is released when acids react with metals?',
-        options: ['Oxygen', 'Hydrogen', 'Nitrogen', 'Chlorine'],
-        correctIndex: 1
-    },
-    {
-        question: 'Physics: What particle carries a negative electric charge?',
-        options: ['Proton', 'Electron', 'Neutron', 'Positron'],
-        correctIndex: 1
-    },
-    {
-        question: 'Chemistry: What is the pH of a neutral solution at 25°C?',
-        options: ['1', '7', '9', '14'],
-        correctIndex: 1
-    },
-    {
-        question: 'Physics: Which wave needs a medium to travel?',
-        options: ['Radio wave', 'Light wave', 'Sound wave', 'Gamma ray'],
-        correctIndex: 2
-    },
-    {
-        question: 'Chemistry: What is the main gas found in Earth\'s atmosphere?',
-        options: ['Carbon dioxide', 'Nitrogen', 'Oxygen', 'Hydrogen'],
-        correctIndex: 1
+const SCIENCE_CHALLENGES = {
+    en: [
+        {
+            question: 'Physics: Which law links force, mass, and acceleration?',
+            options: [
+                'Newton\'s second law',
+                'Hooke\'s law',
+                'Ohm\'s law',
+                'Law of conservation of energy'
+            ],
+            correctIndex: 0
+        },
+        {
+            question: 'Chemistry: What is the chemical symbol for sodium?',
+            options: ['Na', 'So', 'Sn', 'S'],
+            correctIndex: 0
+        },
+        {
+            question: 'Physics: Light bends when it passes through water because of what phenomenon?',
+            options: ['Diffraction', 'Reflection', 'Refraction', 'Polarization'],
+            correctIndex: 2
+        },
+        {
+            question: 'Chemistry: Which gas is released when acids react with metals?',
+            options: ['Oxygen', 'Hydrogen', 'Nitrogen', 'Chlorine'],
+            correctIndex: 1
+        },
+        {
+            question: 'Physics: What particle carries a negative electric charge?',
+            options: ['Proton', 'Electron', 'Neutron', 'Positron'],
+            correctIndex: 1
+        },
+        {
+            question: 'Chemistry: What is the pH of a neutral solution at 25°C?',
+            options: ['1', '7', '9', '14'],
+            correctIndex: 1
+        },
+        {
+            question: 'Physics: Which wave needs a medium to travel?',
+            options: ['Radio wave', 'Light wave', 'Sound wave', 'Gamma ray'],
+            correctIndex: 2
+        },
+        {
+            question: 'Chemistry: What is the main gas found in Earth\'s atmosphere?',
+            options: ['Carbon dioxide', 'Nitrogen', 'Oxygen', 'Hydrogen'],
+            correctIndex: 1
+        }
+    ],
+    vi: [
+        {
+            question: 'Vật lý: Định luật nào liên hệ giữa lực, khối lượng và gia tốc?',
+            options: [
+                'Định luật II Newton',
+                'Định luật Hooke',
+                'Định luật Ohm',
+                'Định luật bảo toàn năng lượng'
+            ],
+            correctIndex: 0
+        },
+        {
+            question: 'Hóa học: Ký hiệu hóa học của natri là gì?',
+            options: ['Na', 'So', 'Sn', 'S'],
+            correctIndex: 0
+        },
+        {
+            question: 'Vật lý: Ánh sáng bị bẻ cong khi đi qua nước do hiện tượng nào?',
+            options: ['Nhiễu xạ', 'Phản xạ', 'Khúc xạ', 'Phân cực'],
+            correctIndex: 2
+        },
+        {
+            question: 'Hóa học: Khí nào được giải phóng khi axit phản ứng với kim loại?',
+            options: ['Oxy', 'Hydro', 'Nitơ', 'Clo'],
+            correctIndex: 1
+        },
+        {
+            question: 'Vật lý: Hạt nào mang điện tích âm?',
+            options: ['Proton', 'Electron', 'Neutron', 'Positron'],
+            correctIndex: 1
+        },
+        {
+            question: 'Hóa học: Dung dịch trung tính ở 25°C có pH bằng bao nhiêu?',
+            options: ['1', '7', '9', '14'],
+            correctIndex: 1
+        },
+        {
+            question: 'Vật lý: Loại sóng nào cần môi trường truyền?',
+            options: ['Sóng radio', 'Sóng ánh sáng', 'Sóng âm', 'Tia gamma'],
+            correctIndex: 2
+        },
+        {
+            question: 'Hóa học: Khí chính trong khí quyển Trái Đất là gì?',
+            options: ['Carbon dioxide', 'Nitơ', 'Oxy', 'Hydro'],
+            correctIndex: 1
+        }
+    ],
+    zh: [
+        {
+            question: '物理：哪一条定律把力、质量和加速度联系起来？',
+            options: ['牛顿第二定律', '胡克定律', '欧姆定律', '能量守恒定律'],
+            correctIndex: 0
+        },
+        {
+            question: '化学：钠的化学符号是什么？',
+            options: ['Na', 'So', 'Sn', 'S'],
+            correctIndex: 0
+        },
+        {
+            question: '物理：光进入水中发生弯折是由于哪种现象？',
+            options: ['衍射', '反射', '折射', '偏振'],
+            correctIndex: 2
+        },
+        {
+            question: '化学：酸与金属反应时会释放哪种气体？',
+            options: ['氧气', '氢气', '氮气', '氯气'],
+            correctIndex: 1
+        },
+        {
+            question: '物理：哪种粒子带负电荷？',
+            options: ['质子', '电子', '中子', '正电子'],
+            correctIndex: 1
+        },
+        {
+            question: '化学：25°C时中性溶液的pH是多少？',
+            options: ['1', '7', '9', '14'],
+            correctIndex: 1
+        },
+        {
+            question: '物理：哪一种波需要介质才能传播？',
+            options: ['无线电波', '光波', '声波', '伽马射线'],
+            correctIndex: 2
+        },
+        {
+            question: '化学：地球大气中含量最多的气体是什么？',
+            options: ['二氧化碳', '氮气', '氧气', '氢气'],
+            correctIndex: 1
+        }
+    ],
+    ru: [
+        {
+            question: 'Физика: какой закон связывает силу, массу и ускорение?',
+            options: [
+                'Второй закон Ньютона',
+                'Закон Гука',
+                'Закон Ома',
+                'Закон сохранения энергии'
+            ],
+            correctIndex: 0
+        },
+        {
+            question: 'Химия: какой химический символ у натрия?',
+            options: ['Na', 'So', 'Sn', 'S'],
+            correctIndex: 0
+        },
+        {
+            question: 'Физика: из-за какого явления свет изгибается, проходя через воду?',
+            options: ['Дифракция', 'Отражение', 'Преломление', 'Поляризация'],
+            correctIndex: 2
+        },
+        {
+            question: 'Химия: какой газ выделяется при реакции кислот с металлами?',
+            options: ['Кислород', 'Водород', 'Азот', 'Хлор'],
+            correctIndex: 1
+        },
+        {
+            question: 'Физика: какая частица несет отрицательный электрический заряд?',
+            options: ['Протон', 'Электрон', 'Нейтрон', 'Позитрон'],
+            correctIndex: 1
+        },
+        {
+            question: 'Химия: чему равен pH нейтрального раствора при 25°C?',
+            options: ['1', '7', '9', '14'],
+            correctIndex: 1
+        },
+        {
+            question: 'Физика: какая волна нуждается в среде для распространения?',
+            options: ['Радиоволна', 'Световая волна', 'Звуковая волна', 'Гамма-излучение'],
+            correctIndex: 2
+        },
+        {
+            question: 'Химия: какой газ преобладает в атмосфере Земли?',
+            options: ['Углекислый газ', 'Азот', 'Кислород', 'Водород'],
+            correctIndex: 1
+        }
+    ],
+    ko: [
+        {
+            question: '물리: 힘·질량·가속도를 연결하는 법칙은 무엇인가요?',
+            options: ['뉴턴의 제2법칙', '훅의 법칙', '옴의 법칙', '에너지 보존 법칙'],
+            correctIndex: 0
+        },
+        {
+            question: '화학: 나트륨의 화학 기호는 무엇인가요?',
+            options: ['Na', 'So', 'Sn', 'S'],
+            correctIndex: 0
+        },
+        {
+            question: '물리: 빛이 물을 통과할 때 굽어지는 현상은 무엇인가요?',
+            options: ['회절', '반사', '굴절', '편광'],
+            correctIndex: 2
+        },
+        {
+            question: '화학: 산이 금속과 반응하면 어떤 기체가 발생하나요?',
+            options: ['산소', '수소', '질소', '염소'],
+            correctIndex: 1
+        },
+        {
+            question: '물리: 어떤 입자가 음전하를 띠나요?',
+            options: ['양성자', '전자', '중성자', '양전자'],
+            correctIndex: 1
+        },
+        {
+            question: '화학: 25°C에서 중성 용액의 pH는 얼마인가요?',
+            options: ['1', '7', '9', '14'],
+            correctIndex: 1
+        },
+        {
+            question: '물리: 어떤 파동이 매질을 통해서만 전달되나요?',
+            options: ['라디오파', '빛', '음파', '감마선'],
+            correctIndex: 2
+        },
+        {
+            question: '화학: 지구 대기의 주성분은 어떤 기체인가요?',
+            options: ['이산화탄소', '질소', '산소', '수소'],
+            correctIndex: 1
+        }
+    ],
+    id: [
+        {
+            question: 'Fisika: Hukum apa yang menghubungkan gaya, massa, dan percepatan?',
+            options: [
+                'Hukum kedua Newton',
+                'Hukum Hooke',
+                'Hukum Ohm',
+                'Hukum kekekalan energi'
+            ],
+            correctIndex: 0
+        },
+        {
+            question: 'Kimia: Apa simbol kimia untuk natrium?',
+            options: ['Na', 'So', 'Sn', 'S'],
+            correctIndex: 0
+        },
+        {
+            question: 'Fisika: Cahaya membelok saat melewati air karena fenomena apa?',
+            options: ['Difraksi', 'Refleksi', 'Refraksi', 'Polarisasi'],
+            correctIndex: 2
+        },
+        {
+            question: 'Kimia: Gas apa yang dilepaskan ketika asam bereaksi dengan logam?',
+            options: ['Oksigen', 'Hidrogen', 'Nitrogen', 'Klorin'],
+            correctIndex: 1
+        },
+        {
+            question: 'Fisika: Partikel apa yang membawa muatan listrik negatif?',
+            options: ['Proton', 'Elektron', 'Neutron', 'Positron'],
+            correctIndex: 1
+        },
+        {
+            question: 'Kimia: Berapa pH larutan netral pada suhu 25°C?',
+            options: ['1', '7', '9', '14'],
+            correctIndex: 1
+        },
+        {
+            question: 'Fisika: Gelombang mana yang membutuhkan medium untuk merambat?',
+            options: ['Gelombang radio', 'Gelombang cahaya', 'Gelombang bunyi', 'Sinar gamma'],
+            correctIndex: 2
+        },
+        {
+            question: 'Kimia: Gas utama yang terdapat di atmosfer Bumi adalah apa?',
+            options: ['Karbon dioksida', 'Nitrogen', 'Oksigen', 'Hidrogen'],
+            correctIndex: 1
+        }
+    ]
+};
+
+function resolveScienceLang(lang = 'en') {
+    if (!lang) {
+        return 'en';
     }
-];
+    const normalized = lang.toLowerCase();
+    if (SCIENCE_CHALLENGES[normalized]) {
+        return normalized;
+    }
+    const short = normalized.split('-')[0];
+    if (SCIENCE_CHALLENGES[short]) {
+        return short;
+    }
+    return 'en';
+}
 
 function shuffleArray(array) {
     const result = [...array];
@@ -674,12 +916,14 @@ function generateMathChallenge(lang = 'en') {
     };
 }
 
-function generateScienceChallenge() {
-    if (!SCIENCE_CHALLENGES.length) {
-        return generateMathChallenge();
+function generateScienceChallenge(lang = 'en') {
+    const resolved = resolveScienceLang(lang);
+    const pool = SCIENCE_CHALLENGES[resolved] || SCIENCE_CHALLENGES.en || [];
+    if (!pool.length) {
+        return generateMathChallenge(lang);
     }
 
-    const quiz = SCIENCE_CHALLENGES[Math.floor(Math.random() * SCIENCE_CHALLENGES.length)];
+    const quiz = pool[Math.floor(Math.random() * pool.length)];
     const shuffled = shuffleArray(quiz.options.map((text, index) => ({
         text,
         isCorrect: index === quiz.correctIndex
@@ -701,7 +945,7 @@ function generateScienceChallenge() {
 function generateCheckinChallenge(lang = 'en') {
     const useScience = Math.random() < CHECKIN_SCIENCE_PROBABILITY;
     if (useScience) {
-        return generateScienceChallenge();
+        return generateScienceChallenge(lang);
     }
     return generateMathChallenge(lang);
 }
