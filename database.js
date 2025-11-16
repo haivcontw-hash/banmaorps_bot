@@ -38,7 +38,10 @@ const CHECKIN_DEFAULTS = {
     timezone: 'UTC',
     autoMessageEnabled: 1,
     dailyPoints: 10,
-    summaryWindow: 7
+    summaryWindow: 7,
+    mathWeight: 2,
+    physicsWeight: 1,
+    chemistryWeight: 1
 };
 
 function getTodayDateString(timezone = 'UTC') {
@@ -113,8 +116,8 @@ async function ensureCheckinGroup(chatId) {
     }
 
     await dbRun(
-        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             chatId,
             CHECKIN_DEFAULTS.checkinTime,
@@ -122,6 +125,9 @@ async function ensureCheckinGroup(chatId) {
             CHECKIN_DEFAULTS.autoMessageEnabled,
             CHECKIN_DEFAULTS.dailyPoints,
             CHECKIN_DEFAULTS.summaryWindow,
+            CHECKIN_DEFAULTS.mathWeight,
+            CHECKIN_DEFAULTS.physicsWeight,
+            CHECKIN_DEFAULTS.chemistryWeight,
             now,
             now
         ]
@@ -147,6 +153,9 @@ async function getCheckinGroup(chatId) {
         autoMessageEnabled: row.autoMessageEnabled ?? CHECKIN_DEFAULTS.autoMessageEnabled,
         dailyPoints: row.dailyPoints ?? CHECKIN_DEFAULTS.dailyPoints,
         summaryWindow: row.summaryWindow ?? CHECKIN_DEFAULTS.summaryWindow,
+        mathWeight: row.mathWeight ?? CHECKIN_DEFAULTS.mathWeight,
+        physicsWeight: row.physicsWeight ?? CHECKIN_DEFAULTS.physicsWeight,
+        chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
         lastAutoMessageDate: row.lastAutoMessageDate || null
     };
 }
@@ -164,6 +173,9 @@ async function listCheckinGroups() {
         autoMessageEnabled: row.autoMessageEnabled ?? CHECKIN_DEFAULTS.autoMessageEnabled,
         dailyPoints: row.dailyPoints ?? CHECKIN_DEFAULTS.dailyPoints,
         summaryWindow: row.summaryWindow ?? CHECKIN_DEFAULTS.summaryWindow,
+        mathWeight: row.mathWeight ?? CHECKIN_DEFAULTS.mathWeight,
+        physicsWeight: row.physicsWeight ?? CHECKIN_DEFAULTS.physicsWeight,
+        chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
         lastAutoMessageDate: row.lastAutoMessageDate || null
     }));
 }
@@ -172,7 +184,7 @@ async function updateCheckinGroup(chatId, patch = {}) {
     await ensureCheckinGroup(chatId);
     const fields = [];
     const values = [];
-    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate'];
+    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight'];
     for (const key of allowed) {
         if (Object.prototype.hasOwnProperty.call(patch, key)) {
             fields.push(`${key} = ?`);
@@ -659,11 +671,24 @@ async function init() {
             autoMessageEnabled INTEGER NOT NULL DEFAULT 1,
             dailyPoints INTEGER NOT NULL DEFAULT 10,
             summaryWindow INTEGER NOT NULL DEFAULT 7,
+            mathWeight REAL NOT NULL DEFAULT 2,
+            physicsWeight REAL NOT NULL DEFAULT 1,
+            chemistryWeight REAL NOT NULL DEFAULT 1,
             lastAutoMessageDate TEXT,
             createdAt INTEGER NOT NULL,
             updatedAt INTEGER NOT NULL
         );
     `);
+    const weightDefaults = { mathWeight: 2, physicsWeight: 1, chemistryWeight: 1 };
+    for (const column of Object.keys(weightDefaults)) {
+        try {
+            await dbRun(`ALTER TABLE checkin_groups ADD COLUMN ${column} REAL DEFAULT ${weightDefaults[column]}`);
+        } catch (err) {
+            if (!/duplicate column name/i.test(err.message)) {
+                throw err;
+            }
+        }
+    }
 
     await dbRun(`
         UPDATE checkin_groups

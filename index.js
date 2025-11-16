@@ -12,6 +12,7 @@ const https = require('https');
 const crypto = require('crypto');
 const { t_, normalizeLanguageCode } = require('./i18n.js');
 const db = require('./database.js');
+const { SCIENCE_TEMPLATES, SCIENCE_ENTRIES } = require('./scienceQuestions.js');
 
 // --- CẤU HÌNH ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -118,6 +119,78 @@ const CHECKIN_GOAL_PRESETS = [
     'checkin_goal_preset_rest',
     'checkin_goal_preset_help'
 ];
+
+const QUESTION_TYPE_KEYS = ['math', 'physics', 'chemistry'];
+
+const DEFAULT_QUESTION_WEIGHTS = (() => {
+    if (Object.prototype.hasOwnProperty.call(process.env, 'CHECKIN_SCIENCE_PROBABILITY')) {
+        const mathShare = Math.max(1 - CHECKIN_SCIENCE_PROBABILITY, 0);
+        const scienceShare = Math.max(CHECKIN_SCIENCE_PROBABILITY, 0);
+        if (mathShare + scienceShare > 0) {
+            const halfScience = scienceShare / 2;
+            return { math: mathShare, physics: halfScience, chemistry: halfScience };
+        }
+    }
+    return { math: 2, physics: 1, chemistry: 1 };
+})();
+
+const QUESTION_WEIGHT_PRESETS = [
+    { math: 40, physics: 30, chemistry: 30 },
+    { math: 34, physics: 33, chemistry: 33 },
+    { math: 25, physics: 50, chemistry: 25 },
+    { math: 25, physics: 25, chemistry: 50 },
+    { math: 50, physics: 25, chemistry: 25 }
+];
+
+function sanitizeWeightValue(value, fallback) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+        return Math.max(fallback, 0);
+    }
+    return numeric;
+}
+
+function getQuestionWeights(settings = null) {
+    const fallback = DEFAULT_QUESTION_WEIGHTS;
+    const weights = {
+        math: sanitizeWeightValue(settings?.mathWeight, fallback.math),
+        physics: sanitizeWeightValue(settings?.physicsWeight, fallback.physics),
+        chemistry: sanitizeWeightValue(settings?.chemistryWeight, fallback.chemistry)
+    };
+    if (weights.math + weights.physics + weights.chemistry <= 0) {
+        return { ...DEFAULT_QUESTION_WEIGHTS };
+    }
+    return weights;
+}
+
+function pickQuestionType(settings = null) {
+    const weights = getQuestionWeights(settings);
+    const total = weights.math + weights.physics + weights.chemistry;
+    if (total <= 0) {
+        return 'math';
+    }
+    const roll = Math.random() * total;
+    if (roll < weights.math) {
+        return 'math';
+    }
+    if (roll < weights.math + weights.physics) {
+        return 'physics';
+    }
+    return 'chemistry';
+}
+
+function formatQuestionWeightPercentages(weights) {
+    const total = weights.math + weights.physics + weights.chemistry;
+    if (total <= 0) {
+        return { math: '0%', physics: '0%', chemistry: '0%' };
+    }
+    const toPercent = (value) => `${Math.round((value / total) * 1000) / 10}%`;
+    return {
+        math: toPercent(weights.math),
+        physics: toPercent(weights.physics),
+        chemistry: toPercent(weights.chemistry)
+    };
+}
 
 const pendingCheckinChallenges = new Map();
 const pendingEmotionPrompts = new Map();
@@ -559,594 +632,57 @@ function formatTimeForTimezone(timezone = CHECKIN_DEFAULT_TIMEZONE, date = new D
     }
 }
 
-const SCIENCE_CHALLENGES = {
-    en: [
-        {
-            question: 'Physics: Which law links force, mass, and acceleration?',
-            options: [
-                'Newton\'s second law',
-                'Hooke\'s law',
-                'Ohm\'s law',
-                'Law of conservation of energy'
-            ],
-            correctIndex: 0
-        },
-        {
-            question: 'Chemistry: What is the chemical symbol for sodium?',
-            options: ['Na', 'So', 'Sn', 'S'],
-            correctIndex: 0
-        },
-        {
-            question: 'Physics: Light bends when it passes through water because of what phenomenon?',
-            options: ['Diffraction', 'Reflection', 'Refraction', 'Polarization'],
-            correctIndex: 2
-        },
-        {
-            question: 'Chemistry: Which gas is released when acids react with metals?',
-            options: ['Oxygen', 'Hydrogen', 'Nitrogen', 'Chlorine'],
-            correctIndex: 1
-        },
-        {
-            question: 'Physics: What particle carries a negative electric charge?',
-            options: ['Proton', 'Electron', 'Neutron', 'Positron'],
-            correctIndex: 1
-        },
-        {
-            question: 'Chemistry: What is the pH of a neutral solution at 25°C?',
-            options: ['1', '7', '9', '14'],
-            correctIndex: 1
-        },
-        {
-            question: 'Physics: Which wave needs a medium to travel?',
-            options: ['Radio wave', 'Light wave', 'Sound wave', 'Gamma ray'],
-            correctIndex: 2
-        },
-        {
-            question: 'Chemistry: What is the main gas found in Earth\'s atmosphere?',
-            options: ['Carbon dioxide', 'Nitrogen', 'Oxygen', 'Hydrogen'],
-            correctIndex: 1
-        },
-        {
-            question: 'Physics: What is the formula for kinetic energy?',
-            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
-            correctIndex: 0
-        },
-        {
-            question: 'Chemistry: What is the chemical formula for sulfuric acid?',
-            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
-            correctIndex: 0
-        },
-        {
-            question: 'Physics: What is the SI unit of electric current?',
-            options: ['Ampere', 'Volt', 'Ohm', 'Tesla'],
-            correctIndex: 0
-        },
-        {
-            question: 'Chemistry: Avogadro\'s number is approximately equal to?',
-            options: ['6.02 × 10^23', '3.00 × 10^8', '1.38 × 10^-23', '9.81'],
-            correctIndex: 0
-        },
-        {
-            question: 'Physics: Which equation represents Ohm\'s law?',
-            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
-            correctIndex: 0
-        },
-        {
-            question: 'Chemistry: What type of bond involves sharing electron pairs between atoms?',
-            options: ['Covalent bond', 'Ionic bond', 'Metallic bond', 'Hydrogen bond'],
-            correctIndex: 0
-        },
-        {
-            question: 'Physics: Pressure is defined as?',
-            options: ['Force per unit area', 'Energy per unit time', 'Mass per unit volume', 'Charge per unit time'],
-            correctIndex: 0
-        },
-        {
-            question: 'Chemistry: What is the molar mass of water (H2O)?',
-            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
-            correctIndex: 0
-        },
-        {
-            question: 'Physics: Which phenomenon describes waves bending around obstacles?',
-            options: ['Diffraction', 'Interference', 'Reflection', 'Dispersion'],
-            correctIndex: 0
-        },
-        {
-            question: 'Chemistry: Which subatomic particle determines the atomic number of an element?',
-            options: ['Proton', 'Neutron', 'Electron', 'Positron'],
-            correctIndex: 0
-        }
-    ],
-    vi: [
-        {
-            question: 'Vật lý: Định luật nào liên hệ giữa lực, khối lượng và gia tốc?',
-            options: [
-                'Định luật II Newton',
-                'Định luật Hooke',
-                'Định luật Ohm',
-                'Định luật bảo toàn năng lượng'
-            ],
-            correctIndex: 0
-        },
-        {
-            question: 'Hóa học: Ký hiệu hóa học của natri là gì?',
-            options: ['Na', 'So', 'Sn', 'S'],
-            correctIndex: 0
-        },
-        {
-            question: 'Vật lý: Ánh sáng bị bẻ cong khi đi qua nước do hiện tượng nào?',
-            options: ['Nhiễu xạ', 'Phản xạ', 'Khúc xạ', 'Phân cực'],
-            correctIndex: 2
-        },
-        {
-            question: 'Hóa học: Khí nào được giải phóng khi axit phản ứng với kim loại?',
-            options: ['Oxy', 'Hydro', 'Nitơ', 'Clo'],
-            correctIndex: 1
-        },
-        {
-            question: 'Vật lý: Hạt nào mang điện tích âm?',
-            options: ['Proton', 'Electron', 'Neutron', 'Positron'],
-            correctIndex: 1
-        },
-        {
-            question: 'Hóa học: Dung dịch trung tính ở 25°C có pH bằng bao nhiêu?',
-            options: ['1', '7', '9', '14'],
-            correctIndex: 1
-        },
-        {
-            question: 'Vật lý: Loại sóng nào cần môi trường truyền?',
-            options: ['Sóng radio', 'Sóng ánh sáng', 'Sóng âm', 'Tia gamma'],
-            correctIndex: 2
-        },
-        {
-            question: 'Hóa học: Khí chính trong khí quyển Trái Đất là gì?',
-            options: ['Carbon dioxide', 'Nitơ', 'Oxy', 'Hydro'],
-            correctIndex: 1
-        },
-        {
-            question: 'Vật lý: Công thức của động năng là gì?',
-            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
-            correctIndex: 0
-        },
-        {
-            question: 'Hóa học: Công thức hóa học của axit sulfuric là gì?',
-            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
-            correctIndex: 0
-        },
-        {
-            question: 'Vật lý: Đơn vị SI của cường độ dòng điện là gì?',
-            options: ['Ampe', 'Vôn', 'Ôm', 'Tesla'],
-            correctIndex: 0
-        },
-        {
-            question: 'Hóa học: Số Avogadro xấp xỉ bằng?',
-            options: ['6,02 × 10^23', '3,00 × 10^8', '1,38 × 10^-23', '9,81'],
-            correctIndex: 0
-        },
-        {
-            question: 'Vật lý: Phương trình nào biểu diễn định luật Ohm?',
-            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
-            correctIndex: 0
-        },
-        {
-            question: 'Hóa học: Liên kết nào liên quan đến việc chia sẻ cặp electron giữa các nguyên tử?',
-            options: ['Liên kết cộng hóa trị', 'Liên kết ion', 'Liên kết kim loại', 'Liên kết hydro'],
-            correctIndex: 0
-        },
-        {
-            question: 'Vật lý: Áp suất được định nghĩa là?',
-            options: ['Lực trên một đơn vị diện tích', 'Năng lượng theo thời gian', 'Khối lượng trên một đơn vị thể tích', 'Điện tích theo thời gian'],
-            correctIndex: 0
-        },
-        {
-            question: 'Hóa học: Khối lượng mol của nước (H2O) là bao nhiêu?',
-            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
-            correctIndex: 0
-        },
-        {
-            question: 'Vật lý: Hiện tượng nào mô tả sóng uốn quanh vật cản?',
-            options: ['Nhiễu xạ', 'Giao thoa', 'Phản xạ', 'Tán sắc'],
-            correctIndex: 0
-        },
-        {
-            question: 'Hóa học: Hạt hạ nguyên tử nào xác định số hiệu nguyên tử của nguyên tố?',
-            options: ['Proton', 'Neutron', 'Electron', 'Positron'],
-            correctIndex: 0
-        }
-    ],
-    zh: [
-        {
-            question: '物理：哪一条定律把力、质量和加速度联系起来？',
-            options: ['牛顿第二定律', '胡克定律', '欧姆定律', '能量守恒定律'],
-            correctIndex: 0
-        },
-        {
-            question: '化学：钠的化学符号是什么？',
-            options: ['Na', 'So', 'Sn', 'S'],
-            correctIndex: 0
-        },
-        {
-            question: '物理：光进入水中发生弯折是由于哪种现象？',
-            options: ['衍射', '反射', '折射', '偏振'],
-            correctIndex: 2
-        },
-        {
-            question: '化学：酸与金属反应时会释放哪种气体？',
-            options: ['氧气', '氢气', '氮气', '氯气'],
-            correctIndex: 1
-        },
-        {
-            question: '物理：哪种粒子带负电荷？',
-            options: ['质子', '电子', '中子', '正电子'],
-            correctIndex: 1
-        },
-        {
-            question: '化学：25°C时中性溶液的pH是多少？',
-            options: ['1', '7', '9', '14'],
-            correctIndex: 1
-        },
-        {
-            question: '物理：哪一种波需要介质才能传播？',
-            options: ['无线电波', '光波', '声波', '伽马射线'],
-            correctIndex: 2
-        },
-        {
-            question: '化学：地球大气中含量最多的气体是什么？',
-            options: ['二氧化碳', '氮气', '氧气', '氢气'],
-            correctIndex: 1
-        },
-        {
-            question: '物理：动能的公式是什么？',
-            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
-            correctIndex: 0
-        },
-        {
-            question: '化学：硫酸的化学式是什么？',
-            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
-            correctIndex: 0
-        },
-        {
-            question: '物理：电流的国际单位是什么？',
-            options: ['安培', '伏特', '欧姆', '特斯拉'],
-            correctIndex: 0
-        },
-        {
-            question: '化学：阿伏伽德罗常数大约等于多少？',
-            options: ['6.02 × 10^23', '3.00 × 10^8', '1.38 × 10^-23', '9.81'],
-            correctIndex: 0
-        },
-        {
-            question: '物理：哪一个方程表示欧姆定律？',
-            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
-            correctIndex: 0
-        },
-        {
-            question: '化学：哪种键表示原子共享电子对？',
-            options: ['共价键', '离子键', '金属键', '氢键'],
-            correctIndex: 0
-        },
-        {
-            question: '物理：压力被定义为？',
-            options: ['单位面积上的力', '单位时间的能量', '单位体积的质量', '单位时间的电荷'],
-            correctIndex: 0
-        },
-        {
-            question: '化学：水（H2O）的摩尔质量是多少？',
-            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
-            correctIndex: 0
-        },
-        {
-            question: '物理：哪种现象描述波在障碍物周围弯曲？',
-            options: ['衍射', '干涉', '反射', '色散'],
-            correctIndex: 0
-        },
-        {
-            question: '化学：哪种亚原子粒子决定元素的原子序数？',
-            options: ['质子', '中子', '电子', '正电子'],
-            correctIndex: 0
-        }
-    ],
-    ru: [
-        {
-            question: 'Физика: какой закон связывает силу, массу и ускорение?',
-            options: [
-                'Второй закон Ньютона',
-                'Закон Гука',
-                'Закон Ома',
-                'Закон сохранения энергии'
-            ],
-            correctIndex: 0
-        },
-        {
-            question: 'Химия: какой химический символ у натрия?',
-            options: ['Na', 'So', 'Sn', 'S'],
-            correctIndex: 0
-        },
-        {
-            question: 'Физика: из-за какого явления свет изгибается, проходя через воду?',
-            options: ['Дифракция', 'Отражение', 'Преломление', 'Поляризация'],
-            correctIndex: 2
-        },
-        {
-            question: 'Химия: какой газ выделяется при реакции кислот с металлами?',
-            options: ['Кислород', 'Водород', 'Азот', 'Хлор'],
-            correctIndex: 1
-        },
-        {
-            question: 'Физика: какая частица несет отрицательный электрический заряд?',
-            options: ['Протон', 'Электрон', 'Нейтрон', 'Позитрон'],
-            correctIndex: 1
-        },
-        {
-            question: 'Химия: чему равен pH нейтрального раствора при 25°C?',
-            options: ['1', '7', '9', '14'],
-            correctIndex: 1
-        },
-        {
-            question: 'Физика: какая волна нуждается в среде для распространения?',
-            options: ['Радиоволна', 'Световая волна', 'Звуковая волна', 'Гамма-излучение'],
-            correctIndex: 2
-        },
-        {
-            question: 'Химия: какой газ преобладает в атмосфере Земли?',
-            options: ['Углекислый газ', 'Азот', 'Кислород', 'Водород'],
-            correctIndex: 1
-        },
-        {
-            question: 'Физика: какова формула кинетической энергии?',
-            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
-            correctIndex: 0
-        },
-        {
-            question: 'Химия: какова химическая формула серной кислоты?',
-            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
-            correctIndex: 0
-        },
-        {
-            question: 'Физика: какова единица СИ силы тока?',
-            options: ['Ампер', 'Вольт', 'Ом', 'Тесла'],
-            correctIndex: 0
-        },
-        {
-            question: 'Химия: чему примерно равно число Авогадро?',
-            options: ['6,02 × 10^23', '3,00 × 10^8', '1,38 × 10^-23', '9,81'],
-            correctIndex: 0
-        },
-        {
-            question: 'Физика: какое уравнение выражает закон Ома?',
-            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
-            correctIndex: 0
-        },
-        {
-            question: 'Химия: какая связь подразумевает совместное использование электронных пар между атомами?',
-            options: ['Ковалентная связь', 'Ионная связь', 'Металлическая связь', 'Водородная связь'],
-            correctIndex: 0
-        },
-        {
-            question: 'Физика: как определяется давление?',
-            options: ['Сила на единицу площади', 'Энергия за единицу времени', 'Масса на единицу объёма', 'Заряд за единицу времени'],
-            correctIndex: 0
-        },
-        {
-            question: 'Химия: какова молярная масса воды (H2O)?',
-            options: ['18 г/моль', '10 г/моль', '28 г/моль', '44 г/моль'],
-            correctIndex: 0
-        },
-        {
-            question: 'Физика: какое явление описывает огибание волной препятствий?',
-            options: ['Дифракция', 'Интерференция', 'Отражение', 'Дисперсия'],
-            correctIndex: 0
-        },
-        {
-            question: 'Химия: какая субатомная частица определяет атомный номер элемента?',
-            options: ['Протон', 'Нейтрон', 'Электрон', 'Позитрон'],
-            correctIndex: 0
-        }
-    ],
-    ko: [
-        {
-            question: '물리: 힘·질량·가속도를 연결하는 법칙은 무엇인가요?',
-            options: ['뉴턴의 제2법칙', '훅의 법칙', '옴의 법칙', '에너지 보존 법칙'],
-            correctIndex: 0
-        },
-        {
-            question: '화학: 나트륨의 화학 기호는 무엇인가요?',
-            options: ['Na', 'So', 'Sn', 'S'],
-            correctIndex: 0
-        },
-        {
-            question: '물리: 빛이 물을 통과할 때 굽어지는 현상은 무엇인가요?',
-            options: ['회절', '반사', '굴절', '편광'],
-            correctIndex: 2
-        },
-        {
-            question: '화학: 산이 금속과 반응하면 어떤 기체가 발생하나요?',
-            options: ['산소', '수소', '질소', '염소'],
-            correctIndex: 1
-        },
-        {
-            question: '물리: 어떤 입자가 음전하를 띠나요?',
-            options: ['양성자', '전자', '중성자', '양전자'],
-            correctIndex: 1
-        },
-        {
-            question: '화학: 25°C에서 중성 용액의 pH는 얼마인가요?',
-            options: ['1', '7', '9', '14'],
-            correctIndex: 1
-        },
-        {
-            question: '물리: 어떤 파동이 매질을 통해서만 전달되나요?',
-            options: ['라디오파', '빛', '음파', '감마선'],
-            correctIndex: 2
-        },
-        {
-            question: '화학: 지구 대기의 주성분은 어떤 기체인가요?',
-            options: ['이산화탄소', '질소', '산소', '수소'],
-            correctIndex: 1
-        },
-        {
-            question: '물리: 운동 에너지의 공식은 무엇인가요?',
-            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
-            correctIndex: 0
-        },
-        {
-            question: '화학: 황산의 화학식은 무엇인가요?',
-            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
-            correctIndex: 0
-        },
-        {
-            question: '물리: 전류의 SI 단위는 무엇인가요?',
-            options: ['암페어', '볼트', '옴', '테슬라'],
-            correctIndex: 0
-        },
-        {
-            question: '화학: 아보가드로 수는 대략 얼마인가요?',
-            options: ['6.02 × 10^23', '3.00 × 10^8', '1.38 × 10^-23', '9.81'],
-            correctIndex: 0
-        },
-        {
-            question: '물리: 어떤 식이 옴의 법칙을 나타내나요?',
-            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
-            correctIndex: 0
-        },
-        {
-            question: '화학: 어떤 결합이 원자 사이에서 전자쌍을 공유하나요?',
-            options: ['공유 결합', '이온 결합', '금속 결합', '수소 결합'],
-            correctIndex: 0
-        },
-        {
-            question: '물리: 압력은 어떻게 정의되나요?',
-            options: ['단위 면적당 힘', '단위 시간당 에너지', '단위 부피당 질량', '단위 시간당 전하'],
-            correctIndex: 0
-        },
-        {
-            question: '화학: 물(H2O)의 몰 질량은 얼마인가요?',
-            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
-            correctIndex: 0
-        },
-        {
-            question: '물리: 파동이 장애물을 돌아 굽는 현상은 무엇인가요?',
-            options: ['회절', '간섭', '반사', '분산'],
-            correctIndex: 0
-        },
-        {
-            question: '화학: 어떤 아원자 입자가 원자 번호를 결정하나요?',
-            options: ['양성자', '중성자', '전자', '양전자'],
-            correctIndex: 0
-        }
-    ],
-    id: [
-        {
-            question: 'Fisika: Hukum apa yang menghubungkan gaya, massa, dan percepatan?',
-            options: [
-                'Hukum kedua Newton',
-                'Hukum Hooke',
-                'Hukum Ohm',
-                'Hukum kekekalan energi'
-            ],
-            correctIndex: 0
-        },
-        {
-            question: 'Kimia: Apa simbol kimia untuk natrium?',
-            options: ['Na', 'So', 'Sn', 'S'],
-            correctIndex: 0
-        },
-        {
-            question: 'Fisika: Cahaya membelok saat melewati air karena fenomena apa?',
-            options: ['Difraksi', 'Refleksi', 'Refraksi', 'Polarisasi'],
-            correctIndex: 2
-        },
-        {
-            question: 'Kimia: Gas apa yang dilepaskan ketika asam bereaksi dengan logam?',
-            options: ['Oksigen', 'Hidrogen', 'Nitrogen', 'Klorin'],
-            correctIndex: 1
-        },
-        {
-            question: 'Fisika: Partikel apa yang membawa muatan listrik negatif?',
-            options: ['Proton', 'Elektron', 'Neutron', 'Positron'],
-            correctIndex: 1
-        },
-        {
-            question: 'Kimia: Berapa pH larutan netral pada suhu 25°C?',
-            options: ['1', '7', '9', '14'],
-            correctIndex: 1
-        },
-        {
-            question: 'Fisika: Gelombang mana yang membutuhkan medium untuk merambat?',
-            options: ['Gelombang radio', 'Gelombang cahaya', 'Gelombang bunyi', 'Sinar gamma'],
-            correctIndex: 2
-        },
-        {
-            question: 'Kimia: Gas utama yang terdapat di atmosfer Bumi adalah apa?',
-            options: ['Karbon dioksida', 'Nitrogen', 'Oksigen', 'Hidrogen'],
-            correctIndex: 1
-        },
-        {
-            question: 'Fisika: Apa rumus energi kinetik?',
-            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
-            correctIndex: 0
-        },
-        {
-            question: 'Kimia: Apa rumus kimia untuk asam sulfat?',
-            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
-            correctIndex: 0
-        },
-        {
-            question: 'Fisika: Apa satuan SI untuk arus listrik?',
-            options: ['Ampere', 'Volt', 'Ohm', 'Tesla'],
-            correctIndex: 0
-        },
-        {
-            question: 'Kimia: Bilangan Avogadro kira-kira sama dengan?',
-            options: ['6,02 × 10^23', '3,00 × 10^8', '1,38 × 10^-23', '9,81'],
-            correctIndex: 0
-        },
-        {
-            question: 'Fisika: Persamaan mana yang menyatakan hukum Ohm?',
-            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
-            correctIndex: 0
-        },
-        {
-            question: 'Kimia: Ikatan apa yang melibatkan berbagi pasangan elektron antar atom?',
-            options: ['Ikatan kovalen', 'Ikatan ion', 'Ikatan logam', 'Ikatan hidrogen'],
-            correctIndex: 0
-        },
-        {
-            question: 'Fisika: Tekanan didefinisikan sebagai?',
-            options: ['Gaya per satuan luas', 'Energi per satuan waktu', 'Massa per satuan volume', 'Muatan per satuan waktu'],
-            correctIndex: 0
-        },
-        {
-            question: 'Kimia: Berapa massa molar air (H2O)?',
-            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
-            correctIndex: 0
-        },
-        {
-            question: 'Fisika: Fenomena apa yang menjelaskan gelombang membelok mengelilingi rintangan?',
-            options: ['Difraksi', 'Interferensi', 'Refleksi', 'Dispersi'],
-            correctIndex: 0
-        },
-        {
-            question: 'Kimia: Partikel subatom apa yang menentukan nomor atom suatu unsur?',
-            options: ['Proton', 'Neutron', 'Elektron', 'Positron'],
-            correctIndex: 0
-        }
-    ]
-};
+const SCIENCE_LANGUAGE_SET = new Set([
+    ...Object.keys(SCIENCE_TEMPLATES.physics || {}),
+    ...Object.keys(SCIENCE_TEMPLATES.chemistry || {})
+]);
+
 
 function resolveScienceLang(lang = 'en') {
     if (!lang) {
         return 'en';
     }
     const normalized = lang.toLowerCase();
-    if (SCIENCE_CHALLENGES[normalized]) {
+    if (SCIENCE_LANGUAGE_SET.has(normalized)) {
         return normalized;
     }
     const short = normalized.split('-')[0];
-    if (SCIENCE_CHALLENGES[short]) {
+    if (SCIENCE_LANGUAGE_SET.has(short)) {
         return short;
     }
     return 'en';
+}
+
+function getScienceEntriesByType(category) {
+    const pool = SCIENCE_ENTRIES[category];
+    return Array.isArray(pool) ? pool : [];
+}
+
+function getScienceTemplate(category, lang) {
+    const templates = SCIENCE_TEMPLATES[category] || {};
+    return templates[lang] || templates.en || 'Which formula applies to {concept}?';
+}
+
+function renderScienceQuestion(category, entry, lang) {
+    const template = getScienceTemplate(category, lang);
+    const conceptText = entry?.concept?.[lang] || entry?.concept?.en || '';
+    return template.replace('{concept}', conceptText);
+}
+
+function buildScienceOptionTexts(entries, correctFormula) {
+    const options = new Set([correctFormula]);
+    let guard = 0;
+    while (options.size < 4 && guard < entries.length * 4) {
+        const candidate = entries[Math.floor(Math.random() * entries.length)]?.formula;
+        if (candidate) {
+            options.add(candidate);
+        }
+        guard += 1;
+    }
+    while (options.size < 4) {
+        options.add(`${(Math.random() * 10).toFixed(2)}`);
+    }
+    return shuffleArray(Array.from(options));
 }
 
 function shuffleArray(array) {
@@ -1219,36 +755,34 @@ function generateMathChallenge(lang = 'en') {
     };
 }
 
-function generateScienceChallenge(lang = 'en') {
-    const resolved = resolveScienceLang(lang);
-    const pool = SCIENCE_CHALLENGES[resolved] || SCIENCE_CHALLENGES.en || [];
-    if (!pool.length) {
+function generateScienceChallenge(category = 'physics', lang = 'en') {
+    const entries = getScienceEntriesByType(category);
+    if (!entries.length) {
         return generateMathChallenge(lang);
     }
-
-    const quiz = pool[Math.floor(Math.random() * pool.length)];
-    const shuffled = shuffleArray(quiz.options.map((text, index) => ({
+    const resolvedLang = resolveScienceLang(lang);
+    const entry = entries[Math.floor(Math.random() * entries.length)];
+    const questionText = renderScienceQuestion(category, entry, resolvedLang);
+    const optionTexts = buildScienceOptionTexts(entries, entry.formula);
+    const options = optionTexts.map((text, index) => ({
         text,
-        isCorrect: index === quiz.correctIndex
-    })));
-    const correctIndex = shuffled.findIndex((option) => option.isCorrect);
+        isCorrect: text === entry.formula,
+        index
+    }));
+    const correctIndex = options.findIndex((option) => option.isCorrect);
 
     return {
-        type: 'science',
-        question: quiz.question,
-        options: shuffled.map((option, index) => ({
-            text: option.text,
-            isCorrect: option.isCorrect,
-            index
-        })),
-        correctIndex
+        type: category,
+        question: questionText,
+        options,
+        correctIndex: correctIndex >= 0 ? correctIndex : 0
     };
 }
 
-function generateCheckinChallenge(lang = 'en') {
-    const useScience = Math.random() < CHECKIN_SCIENCE_PROBABILITY;
-    if (useScience) {
-        return generateScienceChallenge(lang);
+function generateCheckinChallenge(lang = 'en', questionType = null, settings = null) {
+    const resolvedType = questionType || pickQuestionType(settings);
+    if (resolvedType === 'physics' || resolvedType === 'chemistry') {
+        return generateScienceChallenge(resolvedType, lang);
     }
     return generateMathChallenge(lang);
 }
@@ -1448,7 +982,8 @@ async function initiateCheckinChallenge(chatId, user, { replyMessage = null } = 
         }
     }
 
-    const challenge = generateCheckinChallenge(userLang);
+    const questionType = pickQuestionType(settings);
+    const challenge = generateCheckinChallenge(userLang, questionType, settings);
     const token = createShortToken('chk');
     pendingCheckinChallenges.set(token, {
         chatId: chatId.toString(),
@@ -1457,7 +992,7 @@ async function initiateCheckinChallenge(chatId, user, { replyMessage = null } = 
         date: check.date,
         attempts: check.attempts || 0,
         correctIndex: challenge.correctIndex,
-        challengeType: challenge.type || 'math',
+        questionType: challenge.type || questionType || 'math',
         settings,
         sourceMessage: replyMessage ? { chatId: replyMessage.chat?.id, messageId: replyMessage.message_id } : null
     });
@@ -1607,8 +1142,10 @@ async function handleCheckinAnswerCallback(query, token, answerIndexRaw) {
         // ignore edit errors
     }
 
-    const newChallenge = generateCheckinChallenge(lang);
+    const nextType = challenge.questionType || pickQuestionType(challenge.settings);
+    const newChallenge = generateCheckinChallenge(lang, nextType, challenge.settings);
     challenge.correctIndex = newChallenge.correctIndex;
+    challenge.questionType = newChallenge.type || nextType || 'math';
     const inline_keyboard = newChallenge.options.map((option) => ([{
         text: option.text,
         callback_data: `checkin_answer|${token}|${option.index}`
@@ -2012,7 +1549,8 @@ const ADMIN_MENU_SECTION_CONFIG = {
         hintKey: 'checkin_admin_section_settings_hint',
         actions: [
             { labelKey: 'checkin_admin_button_points', callback: (chatKey) => `checkin_admin_points|${chatKey}` },
-            { labelKey: 'checkin_admin_button_summary', callback: (chatKey) => `checkin_admin_summary|${chatKey}` }
+            { labelKey: 'checkin_admin_button_summary', callback: (chatKey) => `checkin_admin_summary|${chatKey}` },
+            { labelKey: 'checkin_admin_button_question_mix', callback: (chatKey) => `checkin_admin_weights|${chatKey}` }
         ]
     }
 };
@@ -2149,11 +1687,13 @@ async function sendAdminMenu(adminId, chatId, { fallbackLang, view } = {}) {
     const lang = await resolveNotificationLanguage(adminId, fallbackLang);
     const currentSession = checkinAdminMenus.get(adminId);
     const resolvedView = resolveAdminMenuView(view || currentSession?.view);
+    const weightPercents = formatQuestionWeightPercentages(getQuestionWeights(settings));
     const textLines = [
         t(lang, 'checkin_admin_menu_header'),
         t(lang, 'checkin_admin_menu_line_time', { time: settings.checkinTime || CHECKIN_DEFAULT_TIME }),
         t(lang, 'checkin_admin_menu_line_points', { points: settings.dailyPoints || 0 }),
         t(lang, 'checkin_admin_menu_line_summary', { days: settings.summaryWindow || 7 }),
+        t(lang, 'checkin_admin_menu_line_question_mix', weightPercents),
         '',
         t(lang, 'checkin_admin_menu_user_section'),
         t(lang, 'checkin_admin_menu_admin_section'),
@@ -2639,6 +2179,94 @@ async function setAdminSummaryWindow(chatId, adminId, value, { fallbackLang } = 
     await db.updateCheckinGroup(chatId, { summaryWindow: Math.round(numeric) });
     await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_summary_updated', { value: Math.round(numeric) }));
     await sendAdminMenu(adminId, chatId, { fallbackLang: lang });
+}
+
+async function setAdminQuestionWeights(chatId, adminId, weights, { fallbackLang } = {}) {
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const sanitized = {
+        mathWeight: sanitizeWeightValue(weights.math, 0),
+        physicsWeight: sanitizeWeightValue(weights.physics, 0),
+        chemistryWeight: sanitizeWeightValue(weights.chemistry, 0)
+    };
+    if (sanitized.mathWeight + sanitized.physicsWeight + sanitized.chemistryWeight <= 0) {
+        await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_weights_invalid'));
+        return;
+    }
+
+    await db.updateCheckinGroup(chatId, sanitized);
+    await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_weights_updated'));
+    await showQuestionWeightMenu(adminId, chatId, { fallbackLang: lang });
+}
+
+function parseQuestionWeightsInput(rawText) {
+    if (typeof rawText !== 'string') {
+        return null;
+    }
+    const cleaned = rawText.replace(/%/g, '').toLowerCase();
+    const values = {};
+    for (const key of QUESTION_TYPE_KEYS) {
+        const regex = new RegExp(`${key}\s*=?\s*(-?\\d+(?:\\.\\d+)?)`);
+        const match = cleaned.match(regex);
+        if (match) {
+            values[key] = Number(match[1]);
+        }
+    }
+    if (Object.keys(values).length < QUESTION_TYPE_KEYS.length) {
+        const numericParts = cleaned.split(/[\s,;\/|]+/)
+            .map((part) => Number(part))
+            .filter((value) => Number.isFinite(value));
+        if (numericParts.length >= QUESTION_TYPE_KEYS.length) {
+            values.math = numericParts[0];
+            values.physics = numericParts[1];
+            values.chemistry = numericParts[2];
+        }
+    }
+    const weights = {};
+    for (const key of QUESTION_TYPE_KEYS) {
+        const value = values[key];
+        if (!Number.isFinite(value) || value < 0) {
+            return null;
+        }
+        weights[key] = value;
+    }
+    if (QUESTION_TYPE_KEYS.every((key) => weights[key] === 0)) {
+        return null;
+    }
+    return weights;
+}
+
+function buildQuestionWeightKeyboard(chatId, lang) {
+    const chatKey = chatId.toString();
+    const inline_keyboard = QUESTION_WEIGHT_PRESETS.map((preset) => ([{
+        text: t(lang, 'checkin_admin_weights_option', {
+            math: `${preset.math}%`,
+            physics: `${preset.physics}%`,
+            chemistry: `${preset.chemistry}%`
+        }),
+        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}`
+    }]));
+    inline_keyboard.push([{ text: t(lang, 'checkin_admin_button_custom'), callback_data: `checkin_admin_weights_custom|${chatKey}` }]);
+    inline_keyboard.push([
+        { text: t(lang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${chatKey}` },
+        { text: t(lang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${chatKey}` }
+    ]);
+    return { inline_keyboard };
+}
+
+async function showQuestionWeightMenu(adminId, chatId, { fallbackLang } = {}) {
+    const lang = await resolveNotificationLanguage(adminId, fallbackLang);
+    const settings = await getGroupCheckinSettings(chatId);
+    const weights = getQuestionWeights(settings);
+    const percents = formatQuestionWeightPercentages(weights);
+    const lines = [
+        t(lang, 'checkin_admin_weights_title'),
+        t(lang, 'checkin_admin_weights_current', percents),
+        '',
+        t(lang, 'checkin_admin_weights_hint')
+    ];
+    await bot.sendMessage(adminId, lines.join('\n'), {
+        reply_markup: buildQuestionWeightKeyboard(chatId, lang)
+    });
 }
 
 // ===== HÀM HELPER: Dịch Lựa chọn (Kéo/Búa/Bao) =====
@@ -6941,6 +6569,91 @@ function startTelegramBot() {
                 return;
             }
 
+            if (query.data.startsWith('checkin_admin_weights_set|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                const presetWeights = {
+                    math: Number(parts[2]),
+                    physics: Number(parts[3]),
+                    chemistry: Number(parts[4])
+                };
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_weights_updated_alert') });
+                await setAdminQuestionWeights(targetChatId, query.from.id, presetWeights, { fallbackLang: callbackLang });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_weights_custom|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                const promptMessage = await bot.sendMessage(query.from.id, t(callbackLang, 'checkin_admin_weights_prompt'), {
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                { text: t(callbackLang, 'checkin_admin_button_back'), callback_data: `checkin_admin_back|${targetChatId}` },
+                                { text: t(callbackLang, 'checkin_admin_button_close'), callback_data: `checkin_admin_close|${targetChatId}` }
+                            ],
+                            [{ text: t(callbackLang, 'checkin_admin_button_cancel'), callback_data: `checkin_admin_cancel_input|${targetChatId}` }]
+                        ]
+                    }
+                });
+                checkinAdminStates.set(query.from.id.toString(), {
+                    type: 'weights_custom',
+                    chatId: targetChatId,
+                    promptMessageId: promptMessage.message_id
+                });
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_weights_prompt_alert') });
+                return;
+            }
+
+            if (query.data.startsWith('checkin_admin_weights|')) {
+                const parts = query.data.split('|');
+                const targetChatId = (parts[1] || chatId || '').toString();
+                if (!targetChatId) {
+                    await bot.answerCallbackQuery(queryId);
+                    return;
+                }
+                const isAdminUser = await isGroupAdmin(targetChatId, query.from.id);
+                if (!isAdminUser) {
+                    await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_error_no_permission'), show_alert: true });
+                    return;
+                }
+                await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_weights_choose_prompt') });
+                await showQuestionWeightMenu(query.from.id, targetChatId, { fallbackLang: callbackLang });
+                return;
+            }
+
             if (query.data.startsWith('checkin_admin_reset_confirm|')) {
                 const parts = query.data.split('|');
                 const targetChatId = (parts[1] || chatId || '').toString();
@@ -7271,6 +6984,24 @@ function startTelegramBot() {
                         }
                     }
                     await setAdminSummaryWindow(adminState.chatId, msg.from.id, normalized, { fallbackLang: lang });
+                    checkinAdminStates.delete(userId);
+                    return;
+                }
+
+                if (adminState.type === 'weights_custom') {
+                    const parsed = parseQuestionWeightsInput(rawText);
+                    if (!parsed) {
+                        await sendEphemeralMessage(userId, t(lang, 'checkin_admin_weights_invalid'));
+                        return;
+                    }
+                    if (adminState.promptMessageId) {
+                        try {
+                            await bot.deleteMessage(msg.chat.id, adminState.promptMessageId);
+                        } catch (error) {
+                            // ignore
+                        }
+                    }
+                    await setAdminQuestionWeights(adminState.chatId, msg.from.id, parsed, { fallbackLang: lang });
                     checkinAdminStates.delete(userId);
                     return;
                 }

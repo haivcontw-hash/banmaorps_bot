@@ -380,5 +380,17 @@
   "admin_hub_close": "❌ Tutup pusat",
   "admin_hub_refreshed": "Daftar grup sudah diperbarui.",
   "admin_hub_closed": "Pusat admin ditutup.",
+  "checkin_admin_menu_line_question_mix": "• Proporsi soal: {math} matematika / {physics} fisika / {chemistry} kimia",
+  "checkin_admin_button_question_mix": "📊 Proporsi soal",
+  "checkin_admin_weights_title": "⚖️ Atur proporsi pertanyaan",
+  "checkin_admin_weights_current": "Proporsi saat ini: {math} mat. • {physics} fis. • {chemistry} kim.",
+  "checkin_admin_weights_hint": "Pilih preset di bawah atau ketik \"math=50 physics=30 chemistry=20\".",
+  "checkin_admin_weights_option": "{math} / {physics} / {chemistry}",
+  "checkin_admin_weights_choose_prompt": "Pilih preset atau kirim angka Anda sendiri.",
+  "checkin_admin_weights_prompt": "✍️ Masukkan bobot matematika, fisika, dan kimia (misal \"40 30 30\").",
+  "checkin_admin_weights_prompt_alert": "Balas pesan ini dengan proporsi baru.",
+  "checkin_admin_weights_updated": "✅ Proporsi pertanyaan diperbarui.",
+  "checkin_admin_weights_updated_alert": "Sedang memperbarui proporsi pertanyaan...",
+  "checkin_admin_weights_invalid": "⚠️ Masukkan tiga angka tidak negatif (minimal satu harus > 0).",
   "admin_hub_button_home": "🏠 Pusat admin"
 }
