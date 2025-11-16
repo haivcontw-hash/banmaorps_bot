@@ -102,7 +102,10 @@ const tokenDecimalsCache = new Map();
 const okxTokenDirectoryCache = new Map();
 
 const CHECKIN_MAX_ATTEMPTS = 3;
-const CHECKIN_SCIENCE_PROBABILITY = Math.min(Math.max(Number(process.env.CHECKIN_SCIENCE_PROBABILITY) || 0.35, 0), 1);
+const CHECKIN_SCIENCE_PROBABILITY = Math.min(
+    Math.max(Number(process.env.CHECKIN_SCIENCE_PROBABILITY ?? 0.5), 0),
+    1
+);
 const CHECKIN_SCHEDULER_INTERVAL = 45 * 1000;
 const CHECKIN_DEFAULT_TIME = '08:00';
 const CHECKIN_DEFAULT_TIMEZONE = 'UTC';
@@ -602,6 +605,56 @@ const SCIENCE_CHALLENGES = {
             question: 'Chemistry: What is the main gas found in Earth\'s atmosphere?',
             options: ['Carbon dioxide', 'Nitrogen', 'Oxygen', 'Hydrogen'],
             correctIndex: 1
+        },
+        {
+            question: 'Physics: What is the formula for kinetic energy?',
+            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
+            correctIndex: 0
+        },
+        {
+            question: 'Chemistry: What is the chemical formula for sulfuric acid?',
+            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
+            correctIndex: 0
+        },
+        {
+            question: 'Physics: What is the SI unit of electric current?',
+            options: ['Ampere', 'Volt', 'Ohm', 'Tesla'],
+            correctIndex: 0
+        },
+        {
+            question: 'Chemistry: Avogadro\'s number is approximately equal to?',
+            options: ['6.02 × 10^23', '3.00 × 10^8', '1.38 × 10^-23', '9.81'],
+            correctIndex: 0
+        },
+        {
+            question: 'Physics: Which equation represents Ohm\'s law?',
+            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
+            correctIndex: 0
+        },
+        {
+            question: 'Chemistry: What type of bond involves sharing electron pairs between atoms?',
+            options: ['Covalent bond', 'Ionic bond', 'Metallic bond', 'Hydrogen bond'],
+            correctIndex: 0
+        },
+        {
+            question: 'Physics: Pressure is defined as?',
+            options: ['Force per unit area', 'Energy per unit time', 'Mass per unit volume', 'Charge per unit time'],
+            correctIndex: 0
+        },
+        {
+            question: 'Chemistry: What is the molar mass of water (H2O)?',
+            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
+            correctIndex: 0
+        },
+        {
+            question: 'Physics: Which phenomenon describes waves bending around obstacles?',
+            options: ['Diffraction', 'Interference', 'Reflection', 'Dispersion'],
+            correctIndex: 0
+        },
+        {
+            question: 'Chemistry: Which subatomic particle determines the atomic number of an element?',
+            options: ['Proton', 'Neutron', 'Electron', 'Positron'],
+            correctIndex: 0
         }
     ],
     vi: [
@@ -649,6 +702,56 @@ const SCIENCE_CHALLENGES = {
             question: 'Hóa học: Khí chính trong khí quyển Trái Đất là gì?',
             options: ['Carbon dioxide', 'Nitơ', 'Oxy', 'Hydro'],
             correctIndex: 1
+        },
+        {
+            question: 'Vật lý: Công thức của động năng là gì?',
+            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
+            correctIndex: 0
+        },
+        {
+            question: 'Hóa học: Công thức hóa học của axit sulfuric là gì?',
+            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
+            correctIndex: 0
+        },
+        {
+            question: 'Vật lý: Đơn vị SI của cường độ dòng điện là gì?',
+            options: ['Ampe', 'Vôn', 'Ôm', 'Tesla'],
+            correctIndex: 0
+        },
+        {
+            question: 'Hóa học: Số Avogadro xấp xỉ bằng?',
+            options: ['6,02 × 10^23', '3,00 × 10^8', '1,38 × 10^-23', '9,81'],
+            correctIndex: 0
+        },
+        {
+            question: 'Vật lý: Phương trình nào biểu diễn định luật Ohm?',
+            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
+            correctIndex: 0
+        },
+        {
+            question: 'Hóa học: Liên kết nào liên quan đến việc chia sẻ cặp electron giữa các nguyên tử?',
+            options: ['Liên kết cộng hóa trị', 'Liên kết ion', 'Liên kết kim loại', 'Liên kết hydro'],
+            correctIndex: 0
+        },
+        {
+            question: 'Vật lý: Áp suất được định nghĩa là?',
+            options: ['Lực trên một đơn vị diện tích', 'Năng lượng theo thời gian', 'Khối lượng trên một đơn vị thể tích', 'Điện tích theo thời gian'],
+            correctIndex: 0
+        },
+        {
+            question: 'Hóa học: Khối lượng mol của nước (H2O) là bao nhiêu?',
+            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
+            correctIndex: 0
+        },
+        {
+            question: 'Vật lý: Hiện tượng nào mô tả sóng uốn quanh vật cản?',
+            options: ['Nhiễu xạ', 'Giao thoa', 'Phản xạ', 'Tán sắc'],
+            correctIndex: 0
+        },
+        {
+            question: 'Hóa học: Hạt hạ nguyên tử nào xác định số hiệu nguyên tử của nguyên tố?',
+            options: ['Proton', 'Neutron', 'Electron', 'Positron'],
+            correctIndex: 0
         }
     ],
     zh: [
@@ -691,6 +794,56 @@ const SCIENCE_CHALLENGES = {
             question: '化学：地球大气中含量最多的气体是什么？',
             options: ['二氧化碳', '氮气', '氧气', '氢气'],
             correctIndex: 1
+        },
+        {
+            question: '物理：动能的公式是什么？',
+            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
+            correctIndex: 0
+        },
+        {
+            question: '化学：硫酸的化学式是什么？',
+            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
+            correctIndex: 0
+        },
+        {
+            question: '物理：电流的国际单位是什么？',
+            options: ['安培', '伏特', '欧姆', '特斯拉'],
+            correctIndex: 0
+        },
+        {
+            question: '化学：阿伏伽德罗常数大约等于多少？',
+            options: ['6.02 × 10^23', '3.00 × 10^8', '1.38 × 10^-23', '9.81'],
+            correctIndex: 0
+        },
+        {
+            question: '物理：哪一个方程表示欧姆定律？',
+            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
+            correctIndex: 0
+        },
+        {
+            question: '化学：哪种键表示原子共享电子对？',
+            options: ['共价键', '离子键', '金属键', '氢键'],
+            correctIndex: 0
+        },
+        {
+            question: '物理：压力被定义为？',
+            options: ['单位面积上的力', '单位时间的能量', '单位体积的质量', '单位时间的电荷'],
+            correctIndex: 0
+        },
+        {
+            question: '化学：水（H2O）的摩尔质量是多少？',
+            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
+            correctIndex: 0
+        },
+        {
+            question: '物理：哪种现象描述波在障碍物周围弯曲？',
+            options: ['衍射', '干涉', '反射', '色散'],
+            correctIndex: 0
+        },
+        {
+            question: '化学：哪种亚原子粒子决定元素的原子序数？',
+            options: ['质子', '中子', '电子', '正电子'],
+            correctIndex: 0
         }
     ],
     ru: [
@@ -738,6 +891,56 @@ const SCIENCE_CHALLENGES = {
             question: 'Химия: какой газ преобладает в атмосфере Земли?',
             options: ['Углекислый газ', 'Азот', 'Кислород', 'Водород'],
             correctIndex: 1
+        },
+        {
+            question: 'Физика: какова формула кинетической энергии?',
+            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
+            correctIndex: 0
+        },
+        {
+            question: 'Химия: какова химическая формула серной кислоты?',
+            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
+            correctIndex: 0
+        },
+        {
+            question: 'Физика: какова единица СИ силы тока?',
+            options: ['Ампер', 'Вольт', 'Ом', 'Тесла'],
+            correctIndex: 0
+        },
+        {
+            question: 'Химия: чему примерно равно число Авогадро?',
+            options: ['6,02 × 10^23', '3,00 × 10^8', '1,38 × 10^-23', '9,81'],
+            correctIndex: 0
+        },
+        {
+            question: 'Физика: какое уравнение выражает закон Ома?',
+            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
+            correctIndex: 0
+        },
+        {
+            question: 'Химия: какая связь подразумевает совместное использование электронных пар между атомами?',
+            options: ['Ковалентная связь', 'Ионная связь', 'Металлическая связь', 'Водородная связь'],
+            correctIndex: 0
+        },
+        {
+            question: 'Физика: как определяется давление?',
+            options: ['Сила на единицу площади', 'Энергия за единицу времени', 'Масса на единицу объёма', 'Заряд за единицу времени'],
+            correctIndex: 0
+        },
+        {
+            question: 'Химия: какова молярная масса воды (H2O)?',
+            options: ['18 г/моль', '10 г/моль', '28 г/моль', '44 г/моль'],
+            correctIndex: 0
+        },
+        {
+            question: 'Физика: какое явление описывает огибание волной препятствий?',
+            options: ['Дифракция', 'Интерференция', 'Отражение', 'Дисперсия'],
+            correctIndex: 0
+        },
+        {
+            question: 'Химия: какая субатомная частица определяет атомный номер элемента?',
+            options: ['Протон', 'Нейтрон', 'Электрон', 'Позитрон'],
+            correctIndex: 0
         }
     ],
     ko: [
@@ -780,6 +983,56 @@ const SCIENCE_CHALLENGES = {
             question: '화학: 지구 대기의 주성분은 어떤 기체인가요?',
             options: ['이산화탄소', '질소', '산소', '수소'],
             correctIndex: 1
+        },
+        {
+            question: '물리: 운동 에너지의 공식은 무엇인가요?',
+            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
+            correctIndex: 0
+        },
+        {
+            question: '화학: 황산의 화학식은 무엇인가요?',
+            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
+            correctIndex: 0
+        },
+        {
+            question: '물리: 전류의 SI 단위는 무엇인가요?',
+            options: ['암페어', '볼트', '옴', '테슬라'],
+            correctIndex: 0
+        },
+        {
+            question: '화학: 아보가드로 수는 대략 얼마인가요?',
+            options: ['6.02 × 10^23', '3.00 × 10^8', '1.38 × 10^-23', '9.81'],
+            correctIndex: 0
+        },
+        {
+            question: '물리: 어떤 식이 옴의 법칙을 나타내나요?',
+            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
+            correctIndex: 0
+        },
+        {
+            question: '화학: 어떤 결합이 원자 사이에서 전자쌍을 공유하나요?',
+            options: ['공유 결합', '이온 결합', '금속 결합', '수소 결합'],
+            correctIndex: 0
+        },
+        {
+            question: '물리: 압력은 어떻게 정의되나요?',
+            options: ['단위 면적당 힘', '단위 시간당 에너지', '단위 부피당 질량', '단위 시간당 전하'],
+            correctIndex: 0
+        },
+        {
+            question: '화학: 물(H2O)의 몰 질량은 얼마인가요?',
+            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
+            correctIndex: 0
+        },
+        {
+            question: '물리: 파동이 장애물을 돌아 굽는 현상은 무엇인가요?',
+            options: ['회절', '간섭', '반사', '분산'],
+            correctIndex: 0
+        },
+        {
+            question: '화학: 어떤 아원자 입자가 원자 번호를 결정하나요?',
+            options: ['양성자', '중성자', '전자', '양전자'],
+            correctIndex: 0
         }
     ],
     id: [
@@ -827,6 +1080,56 @@ const SCIENCE_CHALLENGES = {
             question: 'Kimia: Gas utama yang terdapat di atmosfer Bumi adalah apa?',
             options: ['Karbon dioksida', 'Nitrogen', 'Oksigen', 'Hidrogen'],
             correctIndex: 1
+        },
+        {
+            question: 'Fisika: Apa rumus energi kinetik?',
+            options: ['1/2 mv²', 'm v', 'm g h', 'q V'],
+            correctIndex: 0
+        },
+        {
+            question: 'Kimia: Apa rumus kimia untuk asam sulfat?',
+            options: ['H2SO4', 'H2SO3', 'H2S', 'H2O'],
+            correctIndex: 0
+        },
+        {
+            question: 'Fisika: Apa satuan SI untuk arus listrik?',
+            options: ['Ampere', 'Volt', 'Ohm', 'Tesla'],
+            correctIndex: 0
+        },
+        {
+            question: 'Kimia: Bilangan Avogadro kira-kira sama dengan?',
+            options: ['6,02 × 10^23', '3,00 × 10^8', '1,38 × 10^-23', '9,81'],
+            correctIndex: 0
+        },
+        {
+            question: 'Fisika: Persamaan mana yang menyatakan hukum Ohm?',
+            options: ['V = I × R', 'P = I × V', 'F = m × a', 'Q = m × c'],
+            correctIndex: 0
+        },
+        {
+            question: 'Kimia: Ikatan apa yang melibatkan berbagi pasangan elektron antar atom?',
+            options: ['Ikatan kovalen', 'Ikatan ion', 'Ikatan logam', 'Ikatan hidrogen'],
+            correctIndex: 0
+        },
+        {
+            question: 'Fisika: Tekanan didefinisikan sebagai?',
+            options: ['Gaya per satuan luas', 'Energi per satuan waktu', 'Massa per satuan volume', 'Muatan per satuan waktu'],
+            correctIndex: 0
+        },
+        {
+            question: 'Kimia: Berapa massa molar air (H2O)?',
+            options: ['18 g/mol', '10 g/mol', '28 g/mol', '44 g/mol'],
+            correctIndex: 0
+        },
+        {
+            question: 'Fisika: Fenomena apa yang menjelaskan gelombang membelok mengelilingi rintangan?',
+            options: ['Difraksi', 'Interferensi', 'Refleksi', 'Dispersi'],
+            correctIndex: 0
+        },
+        {
+            question: 'Kimia: Partikel subatom apa yang menentukan nomor atom suatu unsur?',
+            options: ['Proton', 'Neutron', 'Elektron', 'Positron'],
+            correctIndex: 0
         }
     ]
 };
