@@ -33,12 +33,117 @@ const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
     });
 });
 
+function sanitizeTimeSlot(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    const match = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) {
+        return null;
+    }
+
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (!Number.isInteger(hour) || !Number.isInteger(minute)) {
+        return null;
+    }
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        return null;
+    }
+
+    return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+}
+
+function normalizeAutoMessageTimes(value, fallbackTime = '08:00') {
+    let rawList = [];
+
+    if (Array.isArray(value)) {
+        rawList = value;
+    } else if (typeof value === 'string' && value.trim()) {
+        try {
+            const parsed = JSON.parse(value);
+            if (Array.isArray(parsed)) {
+                rawList = parsed;
+            } else {
+                rawList = value.split(',');
+            }
+        } catch (error) {
+            rawList = value.split(',');
+        }
+    }
+
+    const seen = new Set();
+    const normalized = [];
+    for (const entry of rawList) {
+        const slot = sanitizeTimeSlot(entry);
+        if (!slot || seen.has(slot)) {
+            continue;
+        }
+        seen.add(slot);
+        normalized.push(slot);
+    }
+
+    if (normalized.length === 0) {
+        const fallbackSlot = sanitizeTimeSlot(fallbackTime) || '08:00';
+        return fallbackSlot ? [fallbackSlot] : [];
+    }
+
+    return normalized.sort();
+}
+
+function normalizeSummaryMessageTimes(value) {
+    let rawList = [];
+
+    if (Array.isArray(value)) {
+        rawList = value;
+    } else if (typeof value === 'string' && value.trim()) {
+        try {
+            const parsed = JSON.parse(value);
+            if (Array.isArray(parsed)) {
+                rawList = parsed;
+            } else {
+                rawList = value.split(',');
+            }
+        } catch (error) {
+            rawList = value.split(',');
+        }
+    }
+
+    const seen = new Set();
+    const normalized = [];
+    for (const entry of rawList) {
+        const slot = sanitizeTimeSlot(entry);
+        if (!slot || seen.has(slot)) {
+            continue;
+        }
+        seen.add(slot);
+        normalized.push(slot);
+    }
+
+    return normalized.sort();
+}
+
 const CHECKIN_DEFAULTS = {
     checkinTime: '08:00',
     timezone: 'UTC',
     autoMessageEnabled: 1,
     dailyPoints: 10,
-    summaryWindow: 7
+    summaryWindow: 7,
+    summaryPeriodStart: null,
+    mathWeight: 2,
+    physicsWeight: 1,
+    chemistryWeight: 1,
+    autoMessageTimes: ['08:00'],
+    summaryMessageEnabled: 0,
+    summaryMessageTimes: [],
+    leaderboardPeriodStart: null
 };
 
 function getTodayDateString(timezone = 'UTC') {
@@ -105,6 +210,20 @@ function getPreviousDate(dateStr) {
     return `${prevYear}-${prevMonth}-${prevDay}`;
 }
 
+function resolveLeaderboardPeriodStart(value, timezone = CHECKIN_DEFAULTS.timezone) {
+    const normalized = normalizeDateString(value);
+    if (normalized) {
+        return normalized;
+    }
+
+    return getTodayDateString(timezone || CHECKIN_DEFAULTS.timezone);
+}
+
+function resolveSummaryPeriodStart(value) {
+    const normalized = normalizeDateString(value);
+    return normalized || null;
+}
+
 async function ensureCheckinGroup(chatId) {
     const now = Math.floor(Date.now() / 1000);
     const existing = await dbGet('SELECT chatId FROM checkin_groups WHERE chatId = ?', [chatId]);
@@ -112,9 +231,11 @@ async function ensureCheckinGroup(chatId) {
         return existing.chatId;
     }
 
+    const defaultStart = getTodayDateString(CHECKIN_DEFAULTS.timezone);
+
     await dbRun(
-        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, autoMessageTimes, summaryMessageEnabled, summaryMessageTimes, leaderboardPeriodStart, summaryPeriodStart, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             chatId,
             CHECKIN_DEFAULTS.checkinTime,
@@ -122,6 +243,14 @@ async function ensureCheckinGroup(chatId) {
             CHECKIN_DEFAULTS.autoMessageEnabled,
             CHECKIN_DEFAULTS.dailyPoints,
             CHECKIN_DEFAULTS.summaryWindow,
+            CHECKIN_DEFAULTS.mathWeight,
+            CHECKIN_DEFAULTS.physicsWeight,
+            CHECKIN_DEFAULTS.chemistryWeight,
+            JSON.stringify(CHECKIN_DEFAULTS.autoMessageTimes),
+            CHECKIN_DEFAULTS.summaryMessageEnabled,
+            JSON.stringify(CHECKIN_DEFAULTS.summaryMessageTimes),
+            defaultStart,
+            CHECKIN_DEFAULTS.summaryPeriodStart,
             now,
             now
         ]
@@ -136,7 +265,8 @@ async function getCheckinGroup(chatId) {
         return {
             chatId,
             ...CHECKIN_DEFAULTS,
-            lastAutoMessageDate: null
+            lastAutoMessageDate: null,
+            leaderboardPeriodStart: getTodayDateString(CHECKIN_DEFAULTS.timezone)
         };
     }
 
@@ -147,7 +277,15 @@ async function getCheckinGroup(chatId) {
         autoMessageEnabled: row.autoMessageEnabled ?? CHECKIN_DEFAULTS.autoMessageEnabled,
         dailyPoints: row.dailyPoints ?? CHECKIN_DEFAULTS.dailyPoints,
         summaryWindow: row.summaryWindow ?? CHECKIN_DEFAULTS.summaryWindow,
-        lastAutoMessageDate: row.lastAutoMessageDate || null
+        mathWeight: row.mathWeight ?? CHECKIN_DEFAULTS.mathWeight,
+        physicsWeight: row.physicsWeight ?? CHECKIN_DEFAULTS.physicsWeight,
+        chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
+        lastAutoMessageDate: row.lastAutoMessageDate || null,
+        autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime),
+        summaryMessageEnabled: row.summaryMessageEnabled ?? CHECKIN_DEFAULTS.summaryMessageEnabled,
+        summaryMessageTimes: normalizeSummaryMessageTimes(row.summaryMessageTimes),
+        leaderboardPeriodStart: resolveLeaderboardPeriodStart(row.leaderboardPeriodStart, row.timezone || CHECKIN_DEFAULTS.timezone),
+        summaryPeriodStart: resolveSummaryPeriodStart(row.summaryPeriodStart)
     };
 }
 
@@ -164,7 +302,15 @@ async function listCheckinGroups() {
         autoMessageEnabled: row.autoMessageEnabled ?? CHECKIN_DEFAULTS.autoMessageEnabled,
         dailyPoints: row.dailyPoints ?? CHECKIN_DEFAULTS.dailyPoints,
         summaryWindow: row.summaryWindow ?? CHECKIN_DEFAULTS.summaryWindow,
-        lastAutoMessageDate: row.lastAutoMessageDate || null
+        mathWeight: row.mathWeight ?? CHECKIN_DEFAULTS.mathWeight,
+        physicsWeight: row.physicsWeight ?? CHECKIN_DEFAULTS.physicsWeight,
+        chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
+        lastAutoMessageDate: row.lastAutoMessageDate || null,
+        autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime),
+        summaryMessageEnabled: row.summaryMessageEnabled ?? CHECKIN_DEFAULTS.summaryMessageEnabled,
+        summaryMessageTimes: normalizeSummaryMessageTimes(row.summaryMessageTimes),
+        leaderboardPeriodStart: resolveLeaderboardPeriodStart(row.leaderboardPeriodStart, row.timezone || CHECKIN_DEFAULTS.timezone),
+        summaryPeriodStart: resolveSummaryPeriodStart(row.summaryPeriodStart)
     }));
 }
 
@@ -172,11 +318,15 @@ async function updateCheckinGroup(chatId, patch = {}) {
     await ensureCheckinGroup(chatId);
     const fields = [];
     const values = [];
-    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate'];
+    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight', 'autoMessageTimes', 'leaderboardPeriodStart', 'summaryMessageEnabled', 'summaryMessageTimes', 'summaryPeriodStart'];
     for (const key of allowed) {
         if (Object.prototype.hasOwnProperty.call(patch, key)) {
+            let value = patch[key];
+            if ((key === 'autoMessageTimes' || key === 'summaryMessageTimes') && Array.isArray(value)) {
+                value = JSON.stringify(value);
+            }
             fields.push(`${key} = ?`);
-            values.push(patch[key]);
+            values.push(value);
         }
     }
 
@@ -201,6 +351,22 @@ async function updateAutoMessageDate(chatId, dateStr) {
     }
 
     return updateCheckinGroup(chatId, { lastAutoMessageDate: normalized });
+}
+
+async function setLeaderboardPeriodStart(chatId, dateStr, timezone = CHECKIN_DEFAULTS.timezone) {
+    const normalized = normalizeDateString(dateStr);
+    const resolved = normalized || getTodayDateString(timezone || CHECKIN_DEFAULTS.timezone);
+    return updateCheckinGroup(chatId, { leaderboardPeriodStart: resolved });
+}
+
+async function setSummaryPeriodStart(chatId, dateStr, timezone = CHECKIN_DEFAULTS.timezone) {
+    if (!dateStr && dateStr !== '0') {
+        return updateCheckinGroup(chatId, { summaryPeriodStart: null });
+    }
+
+    const normalized = normalizeDateString(dateStr);
+    const resolved = normalized || getTodayDateString(timezone || CHECKIN_DEFAULTS.timezone);
+    return updateCheckinGroup(chatId, { summaryPeriodStart: resolved });
 }
 
 async function getCheckinAttempt(chatId, userId, checkinDate) {
@@ -490,6 +656,21 @@ async function getCheckinsForDate(chatId, checkinDate) {
     return rows;
 }
 
+async function getCheckinsInRange(chatId, startDate, endDate) {
+    const normalizedStart = normalizeDateString(startDate);
+    const normalizedEnd = normalizeDateString(endDate);
+    if (!normalizedStart || !normalizedEnd) {
+        return [];
+    }
+
+    const rows = await dbAll(
+        'SELECT * FROM checkin_records WHERE chatId = ? AND checkinDate BETWEEN ? AND ? ORDER BY checkinDate ASC, updatedAt ASC',
+        [chatId, normalizedStart, normalizedEnd]
+    );
+
+    return rows || [];
+}
+
 async function getCheckinMemberSummary(chatId, userId) {
     if (!chatId || !userId) {
         return null;
@@ -512,25 +693,153 @@ async function getCheckinMemberSummary(chatId, userId) {
     };
 }
 
-async function getTopCheckins(chatId, limit = 10, mode = 'streak') {
+async function getMemberLeaderboardStats(chatId, userId, sinceDate = null) {
+    if (!chatId || !userId) {
+        return { entries: [] };
+    }
+
+    const normalizedSince = normalizeDateString(sinceDate);
+    let sql = 'SELECT checkinDate, pointsAwarded, createdAt, updatedAt FROM checkin_records WHERE chatId = ? AND userId = ?';
+    const params = [chatId, userId];
+
+    if (normalizedSince) {
+        sql += ' AND checkinDate >= ?';
+        params.push(normalizedSince);
+    }
+
+    sql += ' ORDER BY checkinDate ASC, updatedAt ASC';
+    const rows = await dbAll(sql, params);
+
+    if (!rows || rows.length === 0) {
+        return { entries: [] };
+    }
+
+    const dates = rows.map((row) => row.checkinDate).filter(Boolean);
+    const { streak, longest, lastDate } = calculateConsecutiveStreak(dates);
+    const totalPoints = rows.reduce((sum, row) => sum + Number(row.pointsAwarded || 0), 0);
+
+    return {
+        streak,
+        longestStreak: longest,
+        totalCheckins: rows.length,
+        totalPoints,
+        lastCheckinDate: lastDate,
+        entries: rows.map((row) => ({
+            ...row,
+            createdAt: Number(row.createdAt || 0),
+            updatedAt: Number(row.updatedAt || 0)
+        }))
+    };
+}
+
+function compareLeaderboardRows(a, b, mode) {
+    const metrics = {
+        streak: ['streak', 'totalCheckins', 'totalPoints', 'longestStreak'],
+        total: ['totalCheckins', 'streak', 'totalPoints', 'longestStreak'],
+        points: ['totalPoints', 'streak', 'totalCheckins', 'longestStreak'],
+        longest: ['longestStreak', 'totalCheckins', 'totalPoints', 'streak']
+    };
+    const keys = metrics[mode] || metrics.streak;
+
+    for (const key of keys) {
+        const diff = Number(b[key] || 0) - Number(a[key] || 0);
+        if (diff !== 0) {
+            return diff;
+        }
+    }
+
+    const lastDiff = Number(b.lastTimestamp || 0) - Number(a.lastTimestamp || 0);
+    if (lastDiff !== 0) {
+        return lastDiff;
+    }
+
+    return String(a.userId || '').localeCompare(String(b.userId || ''));
+}
+
+async function getTopCheckins(chatId, limit = 10, mode = 'streak', sinceDate = null) {
     const allowedModes = new Set(['streak', 'total', 'points', 'longest']);
     const finalMode = allowedModes.has(mode) ? mode : 'streak';
-    let orderClause = 'streak DESC, totalCheckins DESC';
+    const normalizedLimit = Math.max(Number(limit) || 0, 1);
+    const normalizedSince = normalizeDateString(sinceDate);
 
-    if (finalMode === 'total') {
-        orderClause = 'totalCheckins DESC, streak DESC';
-    } else if (finalMode === 'points') {
-        orderClause = 'totalPoints DESC, streak DESC';
-    } else if (finalMode === 'longest') {
-        orderClause = 'longestStreak DESC, totalCheckins DESC';
+    if (!normalizedSince) {
+        let orderClause = 'streak DESC, totalCheckins DESC';
+
+        if (finalMode === 'total') {
+            orderClause = 'totalCheckins DESC, streak DESC';
+        } else if (finalMode === 'points') {
+            orderClause = 'totalPoints DESC, streak DESC';
+        } else if (finalMode === 'longest') {
+            orderClause = 'longestStreak DESC, totalCheckins DESC';
+        }
+
+        const rows = await dbAll(
+            `SELECT * FROM checkin_members WHERE chatId = ? ORDER BY ${orderClause} LIMIT ?`,
+            [chatId, normalizedLimit]
+        );
+
+        return rows || [];
     }
 
     const rows = await dbAll(
-        `SELECT * FROM checkin_members WHERE chatId = ? ORDER BY ${orderClause} LIMIT ?`,
-        [chatId, limit]
+        `SELECT userId, checkinDate, pointsAwarded, createdAt, updatedAt
+         FROM checkin_records
+         WHERE chatId = ? AND checkinDate >= ?
+         ORDER BY userId ASC, checkinDate ASC, updatedAt ASC`,
+        [chatId, normalizedSince]
     );
 
-    return rows || [];
+    if (!rows || rows.length === 0) {
+        return [];
+    }
+
+    const perUser = new Map();
+    for (const row of rows) {
+        if (!row || !row.userId) {
+            continue;
+        }
+
+        if (!perUser.has(row.userId)) {
+            perUser.set(row.userId, {
+                userId: row.userId,
+                dates: [],
+                totalPoints: 0,
+                totalCheckins: 0,
+                lastTimestamp: 0,
+                lastCheckinDate: null
+            });
+        }
+
+        const entry = perUser.get(row.userId);
+        if (row.checkinDate) {
+            entry.dates.push(row.checkinDate);
+            entry.lastCheckinDate = row.checkinDate;
+        }
+
+        entry.totalPoints += Number(row.pointsAwarded || 0);
+        entry.totalCheckins += 1;
+        const updatedAt = Number(row.updatedAt || row.createdAt || 0);
+        if (updatedAt > entry.lastTimestamp) {
+            entry.lastTimestamp = updatedAt;
+        }
+    }
+
+    const leaderboard = [];
+    for (const entry of perUser.values()) {
+        const { streak, longest, lastDate } = calculateConsecutiveStreak(entry.dates);
+        leaderboard.push({
+            userId: entry.userId,
+            streak,
+            longestStreak: longest,
+            totalCheckins: entry.totalCheckins,
+            totalPoints: entry.totalPoints,
+            lastCheckinDate: lastDate || entry.lastCheckinDate,
+            lastTimestamp: entry.lastTimestamp
+        });
+    }
+
+    leaderboard.sort((a, b) => compareLeaderboardRows(a, b, finalMode));
+    return leaderboard.slice(0, normalizedLimit);
 }
 
 async function removeCheckinRecord(chatId, userId, checkinDate) {
@@ -547,6 +856,25 @@ async function removeCheckinRecord(chatId, userId, checkinDate) {
     await dbRun('DELETE FROM checkin_records WHERE id = ?', [record.id]);
     await recalculateMemberStats(chatId, userId);
     await clearDailyAttempts(chatId, userId, normalized);
+    return true;
+}
+
+async function clearMemberLeaderboardEntries(chatId, userId, sinceDate = null) {
+    if (!chatId || !userId) {
+        return false;
+    }
+
+    const normalizedSince = normalizeDateString(sinceDate);
+    let sql = 'DELETE FROM checkin_records WHERE chatId = ? AND userId = ?';
+    const params = [chatId, userId];
+
+    if (normalizedSince) {
+        sql += ' AND checkinDate >= ?';
+        params.push(normalizedSince);
+    }
+
+    await dbRun(sql, params);
+    await recalculateMemberStats(chatId, userId);
     return true;
 }
 
@@ -572,6 +900,72 @@ async function markMemberLocked(chatId, userId, checkinDate) {
         'UPDATE checkin_members SET lockedUntilDate = ?, updatedAt = ? WHERE chatId = ? AND userId = ?',
         [normalized, now, chatId, userId]
     );
+}
+
+async function hasAutoMessageLog(chatId, checkinDate, slot) {
+    const normalizedDate = normalizeDateString(checkinDate);
+    const normalizedSlot = sanitizeTimeSlot(slot);
+    if (!normalizedDate || !normalizedSlot) {
+        return false;
+    }
+
+    const row = await dbGet(
+        'SELECT 1 FROM checkin_auto_logs WHERE chatId = ? AND checkinDate = ? AND slot = ?',
+        [chatId, normalizedDate, normalizedSlot]
+    );
+
+    return Boolean(row);
+}
+
+async function recordAutoMessageLog(chatId, checkinDate, slot) {
+    const normalizedDate = normalizeDateString(checkinDate);
+    const normalizedSlot = sanitizeTimeSlot(slot);
+    if (!normalizedDate || !normalizedSlot) {
+        return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        'INSERT OR IGNORE INTO checkin_auto_logs (chatId, checkinDate, slot, sentAt) VALUES (?, ?, ?, ?)',
+        [chatId, normalizedDate, normalizedSlot, now]
+    );
+}
+
+async function hasSummaryMessageLog(chatId, summaryDate, slot) {
+    const normalizedDate = normalizeDateString(summaryDate);
+    const normalizedSlot = sanitizeTimeSlot(slot);
+    if (!normalizedDate || !normalizedSlot) {
+        return false;
+    }
+
+    const row = await dbGet(
+        'SELECT 1 FROM checkin_summary_logs WHERE chatId = ? AND summaryDate = ? AND slot = ?',
+        [chatId, normalizedDate, normalizedSlot]
+    );
+
+    return Boolean(row);
+}
+
+async function recordSummaryMessageLog(chatId, summaryDate, slot) {
+    const normalizedDate = normalizeDateString(summaryDate);
+    const normalizedSlot = sanitizeTimeSlot(slot);
+    if (!normalizedDate || !normalizedSlot) {
+        return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun(
+        'INSERT OR IGNORE INTO checkin_summary_logs (chatId, summaryDate, slot, sentAt) VALUES (?, ?, ?, ?)',
+        [chatId, normalizedDate, normalizedSlot, now]
+    );
+}
+
+async function resetSummaryMessageLogs(chatId) {
+    if (!chatId) {
+        return;
+    }
+
+    await dbRun('DELETE FROM checkin_summary_logs WHERE chatId = ?', [chatId]);
 }
 
 async function getLockedMembers(chatId, checkinDate) {
@@ -659,11 +1053,79 @@ async function init() {
             autoMessageEnabled INTEGER NOT NULL DEFAULT 1,
             dailyPoints INTEGER NOT NULL DEFAULT 10,
             summaryWindow INTEGER NOT NULL DEFAULT 7,
+            mathWeight REAL NOT NULL DEFAULT 2,
+            physicsWeight REAL NOT NULL DEFAULT 1,
+            chemistryWeight REAL NOT NULL DEFAULT 1,
+            autoMessageTimes TEXT,
+            summaryMessageEnabled INTEGER NOT NULL DEFAULT 0,
+            summaryMessageTimes TEXT,
+            leaderboardPeriodStart TEXT,
+            summaryPeriodStart TEXT,
             lastAutoMessageDate TEXT,
             createdAt INTEGER NOT NULL,
             updatedAt INTEGER NOT NULL
         );
     `);
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN autoMessageTimes TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN leaderboardPeriodStart TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN summaryPeriodStart TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN summaryMessageEnabled INTEGER NOT NULL DEFAULT 0`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE checkin_groups ADD COLUMN summaryMessageTimes TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    const defaultPeriodStart = getTodayDateString(CHECKIN_DEFAULTS.timezone);
+    await dbRun(
+        `UPDATE checkin_groups SET leaderboardPeriodStart = COALESCE(leaderboardPeriodStart, ?)`,
+        [defaultPeriodStart]
+    );
+    await dbRun(
+        `UPDATE checkin_groups SET summaryMessageEnabled = COALESCE(summaryMessageEnabled, 0)`
+    );
+    await dbRun(
+        `UPDATE checkin_groups SET summaryMessageTimes = CASE
+            WHEN summaryMessageTimes IS NULL OR TRIM(summaryMessageTimes) = '' THEN ?
+            ELSE summaryMessageTimes
+        END`,
+        [JSON.stringify(CHECKIN_DEFAULTS.summaryMessageTimes)]
+    );
+    const weightDefaults = { mathWeight: 2, physicsWeight: 1, chemistryWeight: 1 };
+    for (const column of Object.keys(weightDefaults)) {
+        try {
+            await dbRun(`ALTER TABLE checkin_groups ADD COLUMN ${column} REAL DEFAULT ${weightDefaults[column]}`);
+        } catch (err) {
+            if (!/duplicate column name/i.test(err.message)) {
+                throw err;
+            }
+        }
+    }
 
     await dbRun(`
         UPDATE checkin_groups
@@ -717,6 +1179,24 @@ async function init() {
     await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_records_chat_date ON checkin_records (chatId, checkinDate);`);
     await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_records_user ON checkin_records (chatId, userId, checkinDate);`);
     await dbRun(`CREATE INDEX IF NOT EXISTS idx_checkin_attempts_locked ON checkin_attempts (chatId, checkinDate, locked);`);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS checkin_auto_logs (
+            chatId TEXT NOT NULL,
+            checkinDate TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            sentAt INTEGER NOT NULL,
+            PRIMARY KEY (chatId, checkinDate, slot)
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS checkin_summary_logs (
+            chatId TEXT NOT NULL,
+            summaryDate TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            sentAt INTEGER NOT NULL,
+            PRIMARY KEY (chatId, summaryDate, slot)
+        );
+    `);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -1000,11 +1480,19 @@ module.exports = {
     completeCheckin,
     updateCheckinFeedback,
     getCheckinsForDate,
+    getCheckinsInRange,
     getCheckinMemberSummary,
+    getMemberLeaderboardStats,
     getTopCheckins,
     removeCheckinRecord,
+    clearMemberLeaderboardEntries,
     unlockMemberCheckin,
     markMemberLocked,
+    hasAutoMessageLog,
+    recordAutoMessageLog,
+    hasSummaryMessageLog,
+    recordSummaryMessageLog,
+    resetSummaryMessageLogs,
     getLockedMembers,
     addWalletToUser,
     removeWalletFromUser,
@@ -1024,6 +1512,8 @@ module.exports = {
     removeGroupSubscription,
     getGroupSubscription,
     getGroupSubscriptions,
+    setLeaderboardPeriodStart,
+    setSummaryPeriodStart,
     getGroupMemberLanguage,
     getGroupMemberLanguages,
     setGroupMemberLanguage,
