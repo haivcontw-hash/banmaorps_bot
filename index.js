@@ -124,26 +124,31 @@ const CHECKIN_GOAL_PRESETS = [
     'checkin_goal_preset_help'
 ];
 
-const QUESTION_TYPE_KEYS = ['math', 'physics', 'chemistry'];
+const QUESTION_TYPE_KEYS = ['math', 'physics', 'chemistry', 'okx', 'web3'];
+const SCIENCE_CATEGORY_KEYS = QUESTION_TYPE_KEYS.filter((key) => key !== 'math');
 
 const DEFAULT_QUESTION_WEIGHTS = (() => {
     if (Object.prototype.hasOwnProperty.call(process.env, 'CHECKIN_SCIENCE_PROBABILITY')) {
         const mathShare = Math.max(1 - CHECKIN_SCIENCE_PROBABILITY, 0);
         const scienceShare = Math.max(CHECKIN_SCIENCE_PROBABILITY, 0);
         if (mathShare + scienceShare > 0) {
-            const halfScience = scienceShare / 2;
-            return { math: mathShare, physics: halfScience, chemistry: halfScience };
+            const equalScience = scienceShare / SCIENCE_CATEGORY_KEYS.length;
+            const base = { math: mathShare };
+            for (const key of SCIENCE_CATEGORY_KEYS) {
+                base[key] = equalScience;
+            }
+            return base;
         }
     }
-    return { math: 2, physics: 1, chemistry: 1 };
+    return { math: 2, physics: 1, chemistry: 1, okx: 1, web3: 1 };
 })();
 
 const QUESTION_WEIGHT_PRESETS = [
-    { math: 40, physics: 30, chemistry: 30 },
-    { math: 34, physics: 33, chemistry: 33 },
-    { math: 25, physics: 50, chemistry: 25 },
-    { math: 25, physics: 25, chemistry: 50 },
-    { math: 50, physics: 25, chemistry: 25 }
+    { math: 30, physics: 20, chemistry: 20, okx: 15, web3: 15 },
+    { math: 25, physics: 25, chemistry: 20, okx: 15, web3: 15 },
+    { math: 20, physics: 20, chemistry: 20, okx: 20, web3: 20 },
+    { math: 40, physics: 15, chemistry: 15, okx: 15, web3: 15 },
+    { math: 28, physics: 18, chemistry: 18, okx: 18, web3: 18 }
 ];
 
 const CHECKIN_SCHEDULE_MAX_SLOTS = 6;
@@ -179,12 +184,13 @@ function sanitizeWeightValue(value, fallback) {
 
 function getQuestionWeights(settings = null) {
     const fallback = DEFAULT_QUESTION_WEIGHTS;
-    const weights = {
-        math: sanitizeWeightValue(settings?.mathWeight, fallback.math),
-        physics: sanitizeWeightValue(settings?.physicsWeight, fallback.physics),
-        chemistry: sanitizeWeightValue(settings?.chemistryWeight, fallback.chemistry)
-    };
-    if (weights.math + weights.physics + weights.chemistry <= 0) {
+    const weights = {};
+    for (const key of QUESTION_TYPE_KEYS) {
+        const prop = `${key}Weight`;
+        weights[key] = sanitizeWeightValue(settings?.[prop], fallback[key]);
+    }
+    const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
+    if (total <= 0) {
         return { ...DEFAULT_QUESTION_WEIGHTS };
     }
     return weights;
@@ -192,31 +198,28 @@ function getQuestionWeights(settings = null) {
 
 function pickQuestionType(settings = null) {
     const weights = getQuestionWeights(settings);
-    const total = weights.math + weights.physics + weights.chemistry;
+    const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
     if (total <= 0) {
         return 'math';
     }
-    const roll = Math.random() * total;
-    if (roll < weights.math) {
-        return 'math';
+    let roll = Math.random() * total;
+    for (const key of QUESTION_TYPE_KEYS) {
+        roll -= weights[key];
+        if (roll < 0) {
+            return key;
+        }
     }
-    if (roll < weights.math + weights.physics) {
-        return 'physics';
-    }
-    return 'chemistry';
+    return 'math';
 }
 
 function formatQuestionWeightPercentages(weights) {
-    const total = weights.math + weights.physics + weights.chemistry;
-    if (total <= 0) {
-        return { math: '0%', physics: '0%', chemistry: '0%' };
+    const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
+    const toPercent = (value) => `${Math.round((value / Math.max(total, 1)) * 1000) / 10}%`;
+    const result = {};
+    for (const key of QUESTION_TYPE_KEYS) {
+        result[key] = total > 0 ? toPercent(weights[key]) : '0%';
     }
-    const toPercent = (value) => `${Math.round((value / total) * 1000) / 10}%`;
-    return {
-        math: toPercent(weights.math),
-        physics: toPercent(weights.physics),
-        chemistry: toPercent(weights.chemistry)
-    };
+    return result;
 }
 
 function normalizeTimeSlot(value) {
@@ -1012,10 +1015,9 @@ function getSummaryWindowBounds(settings) {
     };
 }
 
-const SCIENCE_LANGUAGE_SET = new Set([
-    ...Object.keys(SCIENCE_TEMPLATES.physics || {}),
-    ...Object.keys(SCIENCE_TEMPLATES.chemistry || {})
-]);
+const SCIENCE_LANGUAGE_SET = new Set(
+    Object.values(SCIENCE_TEMPLATES || {}).flatMap((templates) => Object.keys(templates || {}))
+);
 
 
 function resolveScienceLang(lang = 'en') {
@@ -1161,10 +1163,10 @@ function generateScienceChallenge(category = 'physics', lang = 'en') {
 
 function generateCheckinChallenge(lang = 'en', questionType = null, settings = null) {
     const resolvedType = questionType || pickQuestionType(settings);
-    if (resolvedType === 'physics' || resolvedType === 'chemistry') {
-        return generateScienceChallenge(resolvedType, lang);
+    if (resolvedType === 'math') {
+        return generateMathChallenge(lang);
     }
-    return generateMathChallenge(lang);
+    return generateScienceChallenge(resolvedType, lang);
 }
 
 function buildEmotionKeyboard(lang, token) {
@@ -3270,12 +3272,12 @@ async function setAdminSummaryWindow(chatId, adminId, value, { fallbackLang } = 
 
 async function setAdminQuestionWeights(chatId, adminId, weights, { fallbackLang } = {}) {
     const lang = await resolveNotificationLanguage(adminId, fallbackLang);
-    const sanitized = {
-        mathWeight: sanitizeWeightValue(weights.math, 0),
-        physicsWeight: sanitizeWeightValue(weights.physics, 0),
-        chemistryWeight: sanitizeWeightValue(weights.chemistry, 0)
-    };
-    if (sanitized.mathWeight + sanitized.physicsWeight + sanitized.chemistryWeight <= 0) {
+    const sanitized = {};
+    for (const key of QUESTION_TYPE_KEYS) {
+        sanitized[`${key}Weight`] = sanitizeWeightValue(weights[key], 0);
+    }
+    const total = Object.values(sanitized).reduce((sum, value) => sum + value, 0);
+    if (total <= 0) {
         await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_weights_invalid'));
         return;
     }
@@ -3303,9 +3305,9 @@ function parseQuestionWeightsInput(rawText) {
             .map((part) => Number(part))
             .filter((value) => Number.isFinite(value));
         if (numericParts.length >= QUESTION_TYPE_KEYS.length) {
-            values.math = numericParts[0];
-            values.physics = numericParts[1];
-            values.chemistry = numericParts[2];
+            QUESTION_TYPE_KEYS.forEach((key, index) => {
+                values[key] = numericParts[index];
+            });
         }
     }
     const weights = {};
@@ -3328,9 +3330,11 @@ function buildQuestionWeightKeyboard(chatId, lang) {
         text: t(lang, 'checkin_admin_weights_option', {
             math: `${preset.math}%`,
             physics: `${preset.physics}%`,
-            chemistry: `${preset.chemistry}%`
+            chemistry: `${preset.chemistry}%`,
+            okx: `${preset.okx}%`,
+            web3: `${preset.web3}%`
         }),
-        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}`
+        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}|${preset.okx}|${preset.web3}`
     }]));
     inline_keyboard.push([{ text: t(lang, 'checkin_admin_button_custom'), callback_data: `checkin_admin_weights_custom|${chatKey}` }]);
     inline_keyboard.push([
@@ -8292,11 +8296,10 @@ function startTelegramBot() {
                         // ignore
                     }
                 }
-                const presetWeights = {
-                    math: Number(parts[2]),
-                    physics: Number(parts[3]),
-                    chemistry: Number(parts[4])
-                };
+                const presetWeights = {};
+                QUESTION_TYPE_KEYS.forEach((key, index) => {
+                    presetWeights[key] = Number(parts[index + 2]);
+                });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_weights_updated_alert') });
                 await setAdminQuestionWeights(targetChatId, query.from.id, presetWeights, { fallbackLang: callbackLang });
                 return;
