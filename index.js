@@ -865,6 +865,40 @@ function sendReply(sourceMessage, text, options = {}) {
     return sendMessageRespectingThread(sourceMessage.chat.id, sourceMessage, text, options);
 }
 
+function withNavigationKeyboard(options = {}, lang, navOptions = {}) {
+    const { includeHelp = true, includeClose = true, helpView = 'user' } = navOptions || {};
+    const finalOptions = { ...options };
+    const baseKeyboard = (options.reply_markup?.inline_keyboard || []).map((row) => [...row]);
+    const navRow = [];
+
+    if (includeHelp) {
+        navRow.push({ text: t(lang, 'nav_button_help'), callback_data: `nav_help|${helpView}` });
+    }
+    if (includeClose) {
+        navRow.push({ text: t(lang, 'nav_button_close'), callback_data: 'nav_close' });
+    }
+
+    if (navRow.length > 0) {
+        baseKeyboard.push(navRow);
+    }
+
+    if (baseKeyboard.length > 0) {
+        finalOptions.reply_markup = { ...(options.reply_markup || {}), inline_keyboard: baseKeyboard };
+    }
+
+    return finalOptions;
+}
+
+function sendReplyWithControls(sourceMessage, text, lang, options = {}, navOptions = {}) {
+    const finalOptions = withNavigationKeyboard(options, lang, navOptions);
+    return sendReply(sourceMessage, text, finalOptions);
+}
+
+function sendThreadedWithControls(chatId, sourceMessage, text, lang, options = {}, navOptions = {}) {
+    const finalOptions = withNavigationKeyboard(options, lang, navOptions);
+    return sendMessageRespectingThread(chatId, sourceMessage, text, finalOptions);
+}
+
 function buildUserMention(user) {
     if (!user) {
         return { text: 'user', parseMode: null };
@@ -6139,7 +6173,7 @@ function startTelegramBot() {
     async function handleStartNoToken(msg) {
         const lang = await getLang(msg);
         const message = t(lang, 'welcome_generic');
-        sendReply(msg, message, { parse_mode: 'Markdown' });
+        sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
     }
 
     async function handleRegisterWithAddress(msg, address) {
@@ -6149,11 +6183,11 @@ function startTelegramBot() {
             const normalizedAddr = ethers.getAddress(address);
             await db.addWalletToUser(chatId, lang, normalizedAddr);
             const message = t(lang, 'register_success', { walletAddress: normalizedAddr });
-            sendReply(msg, message, { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
             console.log(`[BOT] Thêm ví (Manual): ${normalizedAddr} -> ${chatId} (lang: ${lang})`);
         } catch (error) {
             const message = t(lang, 'register_invalid_address');
-            sendReply(msg, message, { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6165,9 +6199,9 @@ function startTelegramBot() {
             let message = t(lang, 'mywallet_list_header', { count: wallets.length }) + '\n\n';
             wallets.forEach((wallet) => { message += `• \`${wallet}\`\n`; });
             message += `\n${t(lang, 'mywallet_list_footer')}`;
-            sendReply(msg, message, { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
         } else {
-            sendReply(msg, t(lang, 'mywallet_not_linked'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(lang, 'mywallet_not_linked'), lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6176,7 +6210,7 @@ function startTelegramBot() {
         const lang = await getLang(msg);
         const wallets = await db.getWalletsForUser(chatId);
         if (wallets.length === 0) {
-            sendReply(msg, t(lang, 'stats_no_wallet'));
+            sendReplyWithControls(msg, t(lang, 'stats_no_wallet'), lang);
             return;
         }
 
@@ -6192,7 +6226,7 @@ function startTelegramBot() {
         }
 
         if (totalStats.games === 0) {
-            sendReply(msg, t(lang, 'stats_no_games'));
+            sendReplyWithControls(msg, t(lang, 'stats_no_games'), lang);
             return;
         }
 
@@ -6204,13 +6238,13 @@ function startTelegramBot() {
         message += `• ${t(lang, 'stats_line_3', { amount: totalStats.totalWon.toFixed(2) })}\n`;
         message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
         message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
-        sendReply(msg, message, { parse_mode: 'Markdown' });
+        sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
     }
 
     async function handleDonateCommand(msg) {
         const lang = await getLang(msg);
         const text = buildDonateMessage(lang);
-        await sendReply(msg, text, { parse_mode: 'HTML', disable_web_page_preview: true });
+        await sendReplyWithControls(msg, text, lang, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
     async function handleOkxChainsCommand(msg) {
@@ -6218,7 +6252,7 @@ function startTelegramBot() {
         try {
             const directory = await fetchOkxSupportedChains();
             if (!directory) {
-                sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+                sendReplyWithControls(msg, t(lang, 'okxchains_error'), lang, { parse_mode: 'Markdown' });
                 return;
             }
 
@@ -6234,10 +6268,10 @@ function startTelegramBot() {
                 marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
             ];
 
-            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, lines.join('\n'), lang, { parse_mode: 'Markdown' });
         } catch (error) {
             console.error(`[OkxChains] Failed to load supported chains: ${error.message}`);
-            sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(lang, 'okxchains_error'), lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6251,10 +6285,10 @@ function startTelegramBot() {
                     ? t(lang, 'okx402_supported', { chains: supported.join(', ') })
                     : t(lang, 'okx402_not_supported')
             ];
-            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, lines.join('\n'), lang, { parse_mode: 'Markdown' });
         } catch (error) {
             console.error(`[Okx402] Failed to check x402 support: ${error.message}`);
-            sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(lang, 'okx402_error'), lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6344,10 +6378,10 @@ function startTelegramBot() {
                 t(lang, 'banmaoprice_source_line', { source: sourceLabel })
             ].filter(Boolean);
 
-            await sendMessageRespectingThread(chatId, msg, lines.join('\n'), { parse_mode: 'Markdown' });
+            await sendThreadedWithControls(chatId, msg, lines.join('\n'), lang, { parse_mode: 'Markdown' });
         } catch (error) {
             console.error(`[Price] Failed to fetch price: ${error.message}`);
-            sendReply(msg, t(lang, 'banmaoprice_error'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(lang, 'banmaoprice_error'), lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6356,7 +6390,7 @@ function startTelegramBot() {
         const lang = await getLang(msg);
         const wallets = await db.getWalletsForUser(chatId);
         if (wallets.length === 0) {
-            sendReply(msg, t(lang, 'mywallet_not_linked'));
+            sendReplyWithControls(msg, t(lang, 'mywallet_not_linked'), lang);
             return;
         }
 
@@ -6365,7 +6399,7 @@ function startTelegramBot() {
             return [{ text: `❌ ${shortWallet}`, callback_data: `delete_${wallet}` }];
         });
         keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'delete_all' }]);
-        sendReply(msg, t(lang, 'unregister_header'), {
+        sendReplyWithControls(msg, t(lang, 'unregister_header'), lang, {
             reply_markup: { inline_keyboard: keyboard }
         });
     }
@@ -6387,7 +6421,7 @@ function startTelegramBot() {
             const isAdmin = memberInfo && ['administrator', 'creator'].includes(memberInfo.status);
             if (!isAdmin) {
                 const feedbackLang = resolveLangCode(msg.from.language_code || lang);
-                sendReply(msg, t(feedbackLang, 'group_language_admin_only'), { parse_mode: 'Markdown' });
+                sendReplyWithControls(msg, t(feedbackLang, 'group_language_admin_only'), feedbackLang, { parse_mode: 'Markdown' });
                 return;
             }
         }
@@ -6403,7 +6437,7 @@ function startTelegramBot() {
                 ]
             }
         };
-        sendReply(msg, text, options);
+        sendReplyWithControls(msg, text, lang, options);
     }
 
     async function handleFeedLangCommand(msg, argText = '') {
@@ -6413,7 +6447,7 @@ function startTelegramBot() {
         const fallbackLang = resolveLangCode(msg.from.language_code);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
-            sendReply(msg, t(fallbackLang, 'group_feed_member_language_group_only'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(fallbackLang, 'group_feed_member_language_group_only'), fallbackLang, { parse_mode: 'Markdown' });
             return;
         }
 
@@ -6435,10 +6469,10 @@ function startTelegramBot() {
             if (['off', 'disable', 'stop', 'cancel', 'clear', 'remove'].includes(lowered)) {
                 try {
                     await db.removeGroupMemberLanguage(chatId, userId);
-                    sendReply(msg, t(preferredLang, 'group_feed_member_language_removed'), { parse_mode: 'Markdown' });
+                    sendReplyWithControls(msg, t(preferredLang, 'group_feed_member_language_removed'), preferredLang, { parse_mode: 'Markdown' });
                 } catch (error) {
                     console.warn(`[GroupFeed] Không thể xóa ngôn ngữ cá nhân cho ${userId} trong ${chatId}: ${error.message}`);
-                    sendReply(msg, t(preferredLang, 'group_feed_member_language_error'), { parse_mode: 'Markdown' });
+                    sendReplyWithControls(msg, t(preferredLang, 'group_feed_member_language_error'), preferredLang, { parse_mode: 'Markdown' });
                 }
                 return;
             }
@@ -6464,7 +6498,7 @@ function startTelegramBot() {
         ]);
 
         const message = t(preferredLang, 'group_feed_member_language_prompt');
-        sendReply(msg, message, {
+        sendReplyWithControls(msg, message, preferredLang, {
             reply_markup: { inline_keyboard: keyboard },
             reply_to_message_id: msg.message_id,
             parse_mode: 'Markdown'
@@ -6502,16 +6536,16 @@ function startTelegramBot() {
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
         const lang = resolveLangCode(msg.from.language_code);
-        const walletAddress = await db.getPendingWallet(token); 
+        const walletAddress = await db.getPendingWallet(token);
         if (walletAddress) {
             await db.addWalletToUser(chatId, lang, walletAddress);
             await db.deletePendingToken(token);
             const message = t(lang, 'connect_success', { walletAddress: walletAddress });
-            sendReply(msg, message, { parse_mode: "Markdown" });
+            sendReplyWithControls(msg, message, lang, { parse_mode: "Markdown" });
             console.log(`[BOT] Liên kết (DApp): ${walletAddress} -> ${chatId} (lang: ${lang})`);
         } else {
             const message = t(lang, 'connect_fail_token');
-            sendReply(msg, message, { parse_mode: "Markdown" });
+            sendReplyWithControls(msg, message, lang, { parse_mode: "Markdown" });
             console.log(`[BOT] Token không hợp lệ: ${token}`);
         }
     });
@@ -6608,7 +6642,7 @@ function startTelegramBot() {
             } catch (error) {
                 console.error(`[AdminHub] Failed to open hub for ${userId}: ${error.message}`);
                 const lang = await getLang(msg);
-                await sendReply(msg, t(lang, 'checkin_admin_command_error'));
+                await sendReplyWithControls(msg, t(lang, 'checkin_admin_command_error'), lang);
             }
             return;
         }
@@ -6619,7 +6653,7 @@ function startTelegramBot() {
             : await getLang(msg);
 
         if (!isGroupChat) {
-            await sendReply(msg, t(replyLang, 'checkin_admin_command_group_only'));
+            await sendReplyWithControls(msg, t(replyLang, 'checkin_admin_command_group_only'), replyLang);
             return;
         }
 
@@ -6680,7 +6714,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const userLang = await getLang(msg);
-        const sendInThread = (text, options = {}) => sendReply(msg, text, options);
+        const sendInThread = (text, options = {}) => sendReplyWithControls(msg, text, userLang, options);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
             await sendInThread(t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
@@ -6741,7 +6775,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const lang = await getLang(msg);
-        const sendInThread = (text, options = {}) => sendReply(msg, text, options);
+        const sendInThread = (text, options = {}) => sendReplyWithControls(msg, text, lang, options);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
             await sendInThread(t(lang, 'feedtopic_group_only'), { parse_mode: "Markdown" });
@@ -6860,6 +6894,38 @@ function startTelegramBot() {
             saveHelpMessageState(sent.chat.id.toString(), sent.message_id, { view: 'user', group: defaultGroup });
         }
     });
+
+    async function openHelpFromNavigation(query, lang, view = 'user') {
+        const resolvedView = view === 'admin' ? 'admin' : 'user';
+        const helpText = buildHelpText(lang, resolvedView);
+        const defaultGroup = getDefaultHelpGroup(resolvedView);
+        const replyMarkup = buildHelpKeyboard(lang, resolvedView, defaultGroup);
+        const chatId = query.message?.chat?.id;
+        const messageId = query.message?.message_id;
+
+        if (chatId && messageId) {
+            try {
+                await bot.editMessageText(helpText, {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                });
+                saveHelpMessageState(chatId.toString(), messageId, { view: resolvedView, group: defaultGroup });
+                await bot.answerCallbackQuery(query.id);
+                return;
+            } catch (error) {
+                console.warn(`[Nav] Không thể chuyển về help: ${error.message}`);
+            }
+        }
+
+        const targetChatId = chatId || query.from.id;
+        const sent = await bot.sendMessage(targetChatId, helpText, { parse_mode: 'HTML', reply_markup: replyMarkup });
+        if (sent?.chat?.id && sent?.message_id) {
+            saveHelpMessageState(sent.chat.id.toString(), sent.message_id, { view: resolvedView, group: defaultGroup });
+        }
+        await bot.answerCallbackQuery(query.id);
+    }
 
     // Xử lý tất cả CALLBACK QUERY (Nút bấm) - Cần async
     const helpCommandExecutors = {
@@ -6992,6 +7058,25 @@ function startTelegramBot() {
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
+            if (query.data === 'nav_close') {
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore deletion errors
+                    }
+                    clearHelpMessageState(query.message.chat.id.toString(), query.message.message_id);
+                }
+                await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data.startsWith('nav_help')) {
+                const [, requestedView] = query.data.split('|');
+                await openHelpFromNavigation(query, callbackLang, requestedView);
+                return;
+            }
+
             if (query.data === 'help_close') {
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {

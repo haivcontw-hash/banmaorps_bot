@@ -455,6 +455,8 @@
   "help_button_admin": "🛠 Perintah admin",
   "help_button_back": "⬅️ Kembali",
   "help_button_close": "❌ Tutup",
+  "nav_button_help": "⬅️ Kembali ke bantuan",
+  "nav_button_close": "❌ Tutup",
   "help_admin_features": "Di /admin kamu bisa mengirim pengingat, meninjau daftar hadir, membuka blokir anggota, mengirim pesan rahasia, menyesuaikan poin, periode rekap, soal matematika, dan banyak lagi tanpa harus kembali ke grup.",
   "help_action_executed": "✅ Perintah dijalankan.",
   "help_action_dm_sent": "📬 Bot sudah mengirim pesan pribadi kepada Anda.",

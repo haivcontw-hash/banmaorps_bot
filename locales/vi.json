@@ -499,6 +499,8 @@
   "help_button_admin": "🛠 Lệnh quản trị",
   "help_button_back": "⬅️ Quay lại",
   "help_button_close": "❌ Đóng",
+  "nav_button_help": "⬅️ Quay lại hướng dẫn",
+  "nav_button_close": "❌ Đóng",
   "help_admin_features": "Trong /admin bạn có thể gửi nhắc nhở, xem danh sách điểm danh, mở khóa thành viên, gửi tin bí mật, chỉnh điểm, số ngày tổng kết, câu hỏi toán... mà không cần quay lại nhóm.",
   "help_action_executed": "✅ Đã thực thi lệnh.",
   "help_action_dm_sent": "📬 Bot đã gửi tin nhắn riêng cho bạn.",

@@ -455,6 +455,8 @@
   "help_button_admin": "🛠 관리자 명령",
   "help_button_back": "⬅️ 뒤로",
   "help_button_close": "❌ 닫기",
+  "nav_button_help": "⬅️ 도움말로 돌아가기",
+  "nav_button_close": "❌ 닫기",
   "help_admin_features": "/admin 안에서 알림 보내기, 출석 명단 확인, 잠금 해제, 비밀 메시지, 포인트·요약·문제 조정 등을 채팅을 나가지 않고 처리할 수 있습니다.",
   "help_action_executed": "✅ 명령을 실행했습니다.",
   "help_action_dm_sent": "📬 봇이 개인 메시지를 보냈어요.",

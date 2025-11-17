@@ -499,6 +499,8 @@
   "help_button_admin": "🛠 Admin commands",
   "help_button_back": "⬅️ Back",
   "help_button_close": "❌ Close",
+  "nav_button_help": "⬅️ Back to help",
+  "nav_button_close": "❌ Close",
   "help_admin_features": "Inside /admin you can broadcast reminders, review attendance, unlock members, send secret notes, adjust points, summaries, math questions, and more — all without leaving the chat.",
   "help_action_executed": "✅ Command executed.",
   "help_action_dm_sent": "📬 Sent you a DM to continue.",
