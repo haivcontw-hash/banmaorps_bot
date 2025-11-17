@@ -124,26 +124,31 @@ const CHECKIN_GOAL_PRESETS = [
     'checkin_goal_preset_help'
 ];
 
-const QUESTION_TYPE_KEYS = ['math', 'physics', 'chemistry'];
+const QUESTION_TYPE_KEYS = ['math', 'physics', 'chemistry', 'okx', 'web3'];
+const SCIENCE_CATEGORY_KEYS = QUESTION_TYPE_KEYS.filter((key) => key !== 'math');
 
 const DEFAULT_QUESTION_WEIGHTS = (() => {
     if (Object.prototype.hasOwnProperty.call(process.env, 'CHECKIN_SCIENCE_PROBABILITY')) {
         const mathShare = Math.max(1 - CHECKIN_SCIENCE_PROBABILITY, 0);
         const scienceShare = Math.max(CHECKIN_SCIENCE_PROBABILITY, 0);
         if (mathShare + scienceShare > 0) {
-            const halfScience = scienceShare / 2;
-            return { math: mathShare, physics: halfScience, chemistry: halfScience };
+            const equalScience = scienceShare / SCIENCE_CATEGORY_KEYS.length;
+            const base = { math: mathShare };
+            for (const key of SCIENCE_CATEGORY_KEYS) {
+                base[key] = equalScience;
+            }
+            return base;
         }
     }
-    return { math: 2, physics: 1, chemistry: 1 };
+    return { math: 2, physics: 1, chemistry: 1, okx: 1, web3: 1 };
 })();
 
 const QUESTION_WEIGHT_PRESETS = [
-    { math: 40, physics: 30, chemistry: 30 },
-    { math: 34, physics: 33, chemistry: 33 },
-    { math: 25, physics: 50, chemistry: 25 },
-    { math: 25, physics: 25, chemistry: 50 },
-    { math: 50, physics: 25, chemistry: 25 }
+    { math: 30, physics: 20, chemistry: 20, okx: 15, web3: 15 },
+    { math: 25, physics: 25, chemistry: 20, okx: 15, web3: 15 },
+    { math: 20, physics: 20, chemistry: 20, okx: 20, web3: 20 },
+    { math: 40, physics: 15, chemistry: 15, okx: 15, web3: 15 },
+    { math: 28, physics: 18, chemistry: 18, okx: 18, web3: 18 }
 ];
 
 const CHECKIN_SCHEDULE_MAX_SLOTS = 6;
@@ -179,12 +184,13 @@ function sanitizeWeightValue(value, fallback) {
 
 function getQuestionWeights(settings = null) {
     const fallback = DEFAULT_QUESTION_WEIGHTS;
-    const weights = {
-        math: sanitizeWeightValue(settings?.mathWeight, fallback.math),
-        physics: sanitizeWeightValue(settings?.physicsWeight, fallback.physics),
-        chemistry: sanitizeWeightValue(settings?.chemistryWeight, fallback.chemistry)
-    };
-    if (weights.math + weights.physics + weights.chemistry <= 0) {
+    const weights = {};
+    for (const key of QUESTION_TYPE_KEYS) {
+        const prop = `${key}Weight`;
+        weights[key] = sanitizeWeightValue(settings?.[prop], fallback[key]);
+    }
+    const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
+    if (total <= 0) {
         return { ...DEFAULT_QUESTION_WEIGHTS };
     }
     return weights;
@@ -192,31 +198,28 @@ function getQuestionWeights(settings = null) {
 
 function pickQuestionType(settings = null) {
     const weights = getQuestionWeights(settings);
-    const total = weights.math + weights.physics + weights.chemistry;
+    const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
     if (total <= 0) {
         return 'math';
     }
-    const roll = Math.random() * total;
-    if (roll < weights.math) {
-        return 'math';
+    let roll = Math.random() * total;
+    for (const key of QUESTION_TYPE_KEYS) {
+        roll -= weights[key];
+        if (roll < 0) {
+            return key;
+        }
     }
-    if (roll < weights.math + weights.physics) {
-        return 'physics';
-    }
-    return 'chemistry';
+    return 'math';
 }
 
 function formatQuestionWeightPercentages(weights) {
-    const total = weights.math + weights.physics + weights.chemistry;
-    if (total <= 0) {
-        return { math: '0%', physics: '0%', chemistry: '0%' };
+    const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
+    const toPercent = (value) => `${Math.round((value / Math.max(total, 1)) * 1000) / 10}%`;
+    const result = {};
+    for (const key of QUESTION_TYPE_KEYS) {
+        result[key] = total > 0 ? toPercent(weights[key]) : '0%';
     }
-    const toPercent = (value) => `${Math.round((value / total) * 1000) / 10}%`;
-    return {
-        math: toPercent(weights.math),
-        physics: toPercent(weights.physics),
-        chemistry: toPercent(weights.chemistry)
-    };
+    return result;
 }
 
 function normalizeTimeSlot(value) {
@@ -862,6 +865,40 @@ function sendReply(sourceMessage, text, options = {}) {
     return sendMessageRespectingThread(sourceMessage.chat.id, sourceMessage, text, options);
 }
 
+function withNavigationKeyboard(options = {}, lang, navOptions = {}) {
+    const { includeHelp = true, includeClose = true, helpView = 'user' } = navOptions || {};
+    const finalOptions = { ...options };
+    const baseKeyboard = (options.reply_markup?.inline_keyboard || []).map((row) => [...row]);
+    const navRow = [];
+
+    if (includeHelp) {
+        navRow.push({ text: t(lang, 'nav_button_help'), callback_data: `nav_help|${helpView}` });
+    }
+    if (includeClose) {
+        navRow.push({ text: t(lang, 'nav_button_close'), callback_data: 'nav_close' });
+    }
+
+    if (navRow.length > 0) {
+        baseKeyboard.push(navRow);
+    }
+
+    if (baseKeyboard.length > 0) {
+        finalOptions.reply_markup = { ...(options.reply_markup || {}), inline_keyboard: baseKeyboard };
+    }
+
+    return finalOptions;
+}
+
+function sendReplyWithControls(sourceMessage, text, lang, options = {}, navOptions = {}) {
+    const finalOptions = withNavigationKeyboard(options, lang, navOptions);
+    return sendReply(sourceMessage, text, finalOptions);
+}
+
+function sendThreadedWithControls(chatId, sourceMessage, text, lang, options = {}, navOptions = {}) {
+    const finalOptions = withNavigationKeyboard(options, lang, navOptions);
+    return sendMessageRespectingThread(chatId, sourceMessage, text, finalOptions);
+}
+
 function buildUserMention(user) {
     if (!user) {
         return { text: 'user', parseMode: null };
@@ -1012,10 +1049,9 @@ function getSummaryWindowBounds(settings) {
     };
 }
 
-const SCIENCE_LANGUAGE_SET = new Set([
-    ...Object.keys(SCIENCE_TEMPLATES.physics || {}),
-    ...Object.keys(SCIENCE_TEMPLATES.chemistry || {})
-]);
+const SCIENCE_LANGUAGE_SET = new Set(
+    Object.values(SCIENCE_TEMPLATES || {}).flatMap((templates) => Object.keys(templates || {}))
+);
 
 
 function resolveScienceLang(lang = 'en') {
@@ -1161,10 +1197,10 @@ function generateScienceChallenge(category = 'physics', lang = 'en') {
 
 function generateCheckinChallenge(lang = 'en', questionType = null, settings = null) {
     const resolvedType = questionType || pickQuestionType(settings);
-    if (resolvedType === 'physics' || resolvedType === 'chemistry') {
-        return generateScienceChallenge(resolvedType, lang);
+    if (resolvedType === 'math') {
+        return generateMathChallenge(lang);
     }
-    return generateMathChallenge(lang);
+    return generateScienceChallenge(resolvedType, lang);
 }
 
 function buildEmotionKeyboard(lang, token) {
@@ -3270,12 +3306,12 @@ async function setAdminSummaryWindow(chatId, adminId, value, { fallbackLang } = 
 
 async function setAdminQuestionWeights(chatId, adminId, weights, { fallbackLang } = {}) {
     const lang = await resolveNotificationLanguage(adminId, fallbackLang);
-    const sanitized = {
-        mathWeight: sanitizeWeightValue(weights.math, 0),
-        physicsWeight: sanitizeWeightValue(weights.physics, 0),
-        chemistryWeight: sanitizeWeightValue(weights.chemistry, 0)
-    };
-    if (sanitized.mathWeight + sanitized.physicsWeight + sanitized.chemistryWeight <= 0) {
+    const sanitized = {};
+    for (const key of QUESTION_TYPE_KEYS) {
+        sanitized[`${key}Weight`] = sanitizeWeightValue(weights[key], 0);
+    }
+    const total = Object.values(sanitized).reduce((sum, value) => sum + value, 0);
+    if (total <= 0) {
         await sendEphemeralMessage(adminId, t(lang, 'checkin_admin_weights_invalid'));
         return;
     }
@@ -3303,9 +3339,9 @@ function parseQuestionWeightsInput(rawText) {
             .map((part) => Number(part))
             .filter((value) => Number.isFinite(value));
         if (numericParts.length >= QUESTION_TYPE_KEYS.length) {
-            values.math = numericParts[0];
-            values.physics = numericParts[1];
-            values.chemistry = numericParts[2];
+            QUESTION_TYPE_KEYS.forEach((key, index) => {
+                values[key] = numericParts[index];
+            });
         }
     }
     const weights = {};
@@ -3328,9 +3364,11 @@ function buildQuestionWeightKeyboard(chatId, lang) {
         text: t(lang, 'checkin_admin_weights_option', {
             math: `${preset.math}%`,
             physics: `${preset.physics}%`,
-            chemistry: `${preset.chemistry}%`
+            chemistry: `${preset.chemistry}%`,
+            okx: `${preset.okx}%`,
+            web3: `${preset.web3}%`
         }),
-        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}`
+        callback_data: `checkin_admin_weights_set|${chatKey}|${preset.math}|${preset.physics}|${preset.chemistry}|${preset.okx}|${preset.web3}`
     }]));
     inline_keyboard.push([{ text: t(lang, 'checkin_admin_button_custom'), callback_data: `checkin_admin_weights_custom|${chatKey}` }]);
     inline_keyboard.push([
@@ -6135,7 +6173,7 @@ function startTelegramBot() {
     async function handleStartNoToken(msg) {
         const lang = await getLang(msg);
         const message = t(lang, 'welcome_generic');
-        sendReply(msg, message, { parse_mode: 'Markdown' });
+        sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
     }
 
     async function handleRegisterWithAddress(msg, address) {
@@ -6145,11 +6183,11 @@ function startTelegramBot() {
             const normalizedAddr = ethers.getAddress(address);
             await db.addWalletToUser(chatId, lang, normalizedAddr);
             const message = t(lang, 'register_success', { walletAddress: normalizedAddr });
-            sendReply(msg, message, { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
             console.log(`[BOT] Thêm ví (Manual): ${normalizedAddr} -> ${chatId} (lang: ${lang})`);
         } catch (error) {
             const message = t(lang, 'register_invalid_address');
-            sendReply(msg, message, { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6161,9 +6199,9 @@ function startTelegramBot() {
             let message = t(lang, 'mywallet_list_header', { count: wallets.length }) + '\n\n';
             wallets.forEach((wallet) => { message += `• \`${wallet}\`\n`; });
             message += `\n${t(lang, 'mywallet_list_footer')}`;
-            sendReply(msg, message, { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
         } else {
-            sendReply(msg, t(lang, 'mywallet_not_linked'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(lang, 'mywallet_not_linked'), lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6172,7 +6210,7 @@ function startTelegramBot() {
         const lang = await getLang(msg);
         const wallets = await db.getWalletsForUser(chatId);
         if (wallets.length === 0) {
-            sendReply(msg, t(lang, 'stats_no_wallet'));
+            sendReplyWithControls(msg, t(lang, 'stats_no_wallet'), lang);
             return;
         }
 
@@ -6188,7 +6226,7 @@ function startTelegramBot() {
         }
 
         if (totalStats.games === 0) {
-            sendReply(msg, t(lang, 'stats_no_games'));
+            sendReplyWithControls(msg, t(lang, 'stats_no_games'), lang);
             return;
         }
 
@@ -6200,13 +6238,13 @@ function startTelegramBot() {
         message += `• ${t(lang, 'stats_line_3', { amount: totalStats.totalWon.toFixed(2) })}\n`;
         message += `• ${t(lang, 'stats_line_4', { amount: totalStats.totalLost.toFixed(2) })}\n`;
         message += `• **${t(lang, 'stats_line_5', { amount: netProfit.toFixed(2) })} $BANMAO**`;
-        sendReply(msg, message, { parse_mode: 'Markdown' });
+        sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
     }
 
     async function handleDonateCommand(msg) {
         const lang = await getLang(msg);
         const text = buildDonateMessage(lang);
-        await sendReply(msg, text, { parse_mode: 'HTML', disable_web_page_preview: true });
+        await sendReplyWithControls(msg, text, lang, { parse_mode: 'HTML', disable_web_page_preview: true });
     }
 
     async function handleOkxChainsCommand(msg) {
@@ -6214,7 +6252,7 @@ function startTelegramBot() {
         try {
             const directory = await fetchOkxSupportedChains();
             if (!directory) {
-                sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+                sendReplyWithControls(msg, t(lang, 'okxchains_error'), lang, { parse_mode: 'Markdown' });
                 return;
             }
 
@@ -6230,10 +6268,10 @@ function startTelegramBot() {
                 marketLines.length > 0 ? marketLines.map((line) => `• ${line}`).join('\n') : t(lang, 'okxchains_no_data')
             ];
 
-            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, lines.join('\n'), lang, { parse_mode: 'Markdown' });
         } catch (error) {
             console.error(`[OkxChains] Failed to load supported chains: ${error.message}`);
-            sendReply(msg, t(lang, 'okxchains_error'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(lang, 'okxchains_error'), lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6247,10 +6285,10 @@ function startTelegramBot() {
                     ? t(lang, 'okx402_supported', { chains: supported.join(', ') })
                     : t(lang, 'okx402_not_supported')
             ];
-            sendReply(msg, lines.join('\n'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, lines.join('\n'), lang, { parse_mode: 'Markdown' });
         } catch (error) {
             console.error(`[Okx402] Failed to check x402 support: ${error.message}`);
-            sendReply(msg, t(lang, 'okx402_error'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(lang, 'okx402_error'), lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6340,10 +6378,10 @@ function startTelegramBot() {
                 t(lang, 'banmaoprice_source_line', { source: sourceLabel })
             ].filter(Boolean);
 
-            await sendMessageRespectingThread(chatId, msg, lines.join('\n'), { parse_mode: 'Markdown' });
+            await sendThreadedWithControls(chatId, msg, lines.join('\n'), lang, { parse_mode: 'Markdown' });
         } catch (error) {
             console.error(`[Price] Failed to fetch price: ${error.message}`);
-            sendReply(msg, t(lang, 'banmaoprice_error'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(lang, 'banmaoprice_error'), lang, { parse_mode: 'Markdown' });
         }
     }
 
@@ -6352,7 +6390,7 @@ function startTelegramBot() {
         const lang = await getLang(msg);
         const wallets = await db.getWalletsForUser(chatId);
         if (wallets.length === 0) {
-            sendReply(msg, t(lang, 'mywallet_not_linked'));
+            sendReplyWithControls(msg, t(lang, 'mywallet_not_linked'), lang);
             return;
         }
 
@@ -6361,7 +6399,7 @@ function startTelegramBot() {
             return [{ text: `❌ ${shortWallet}`, callback_data: `delete_${wallet}` }];
         });
         keyboard.push([{ text: `🔥🔥 ${t(lang, 'unregister_all')} 🔥🔥`, callback_data: 'delete_all' }]);
-        sendReply(msg, t(lang, 'unregister_header'), {
+        sendReplyWithControls(msg, t(lang, 'unregister_header'), lang, {
             reply_markup: { inline_keyboard: keyboard }
         });
     }
@@ -6383,7 +6421,7 @@ function startTelegramBot() {
             const isAdmin = memberInfo && ['administrator', 'creator'].includes(memberInfo.status);
             if (!isAdmin) {
                 const feedbackLang = resolveLangCode(msg.from.language_code || lang);
-                sendReply(msg, t(feedbackLang, 'group_language_admin_only'), { parse_mode: 'Markdown' });
+                sendReplyWithControls(msg, t(feedbackLang, 'group_language_admin_only'), feedbackLang, { parse_mode: 'Markdown' });
                 return;
             }
         }
@@ -6399,7 +6437,7 @@ function startTelegramBot() {
                 ]
             }
         };
-        sendReply(msg, text, options);
+        sendReplyWithControls(msg, text, lang, options);
     }
 
     async function handleFeedLangCommand(msg, argText = '') {
@@ -6409,7 +6447,7 @@ function startTelegramBot() {
         const fallbackLang = resolveLangCode(msg.from.language_code);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
-            sendReply(msg, t(fallbackLang, 'group_feed_member_language_group_only'), { parse_mode: 'Markdown' });
+            sendReplyWithControls(msg, t(fallbackLang, 'group_feed_member_language_group_only'), fallbackLang, { parse_mode: 'Markdown' });
             return;
         }
 
@@ -6431,10 +6469,10 @@ function startTelegramBot() {
             if (['off', 'disable', 'stop', 'cancel', 'clear', 'remove'].includes(lowered)) {
                 try {
                     await db.removeGroupMemberLanguage(chatId, userId);
-                    sendReply(msg, t(preferredLang, 'group_feed_member_language_removed'), { parse_mode: 'Markdown' });
+                    sendReplyWithControls(msg, t(preferredLang, 'group_feed_member_language_removed'), preferredLang, { parse_mode: 'Markdown' });
                 } catch (error) {
                     console.warn(`[GroupFeed] Không thể xóa ngôn ngữ cá nhân cho ${userId} trong ${chatId}: ${error.message}`);
-                    sendReply(msg, t(preferredLang, 'group_feed_member_language_error'), { parse_mode: 'Markdown' });
+                    sendReplyWithControls(msg, t(preferredLang, 'group_feed_member_language_error'), preferredLang, { parse_mode: 'Markdown' });
                 }
                 return;
             }
@@ -6460,7 +6498,7 @@ function startTelegramBot() {
         ]);
 
         const message = t(preferredLang, 'group_feed_member_language_prompt');
-        sendReply(msg, message, {
+        sendReplyWithControls(msg, message, preferredLang, {
             reply_markup: { inline_keyboard: keyboard },
             reply_to_message_id: msg.message_id,
             parse_mode: 'Markdown'
@@ -6498,16 +6536,16 @@ function startTelegramBot() {
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
         const lang = resolveLangCode(msg.from.language_code);
-        const walletAddress = await db.getPendingWallet(token); 
+        const walletAddress = await db.getPendingWallet(token);
         if (walletAddress) {
             await db.addWalletToUser(chatId, lang, walletAddress);
             await db.deletePendingToken(token);
             const message = t(lang, 'connect_success', { walletAddress: walletAddress });
-            sendReply(msg, message, { parse_mode: "Markdown" });
+            sendReplyWithControls(msg, message, lang, { parse_mode: "Markdown" });
             console.log(`[BOT] Liên kết (DApp): ${walletAddress} -> ${chatId} (lang: ${lang})`);
         } else {
             const message = t(lang, 'connect_fail_token');
-            sendReply(msg, message, { parse_mode: "Markdown" });
+            sendReplyWithControls(msg, message, lang, { parse_mode: "Markdown" });
             console.log(`[BOT] Token không hợp lệ: ${token}`);
         }
     });
@@ -6604,7 +6642,7 @@ function startTelegramBot() {
             } catch (error) {
                 console.error(`[AdminHub] Failed to open hub for ${userId}: ${error.message}`);
                 const lang = await getLang(msg);
-                await sendReply(msg, t(lang, 'checkin_admin_command_error'));
+                await sendReplyWithControls(msg, t(lang, 'checkin_admin_command_error'), lang);
             }
             return;
         }
@@ -6615,7 +6653,7 @@ function startTelegramBot() {
             : await getLang(msg);
 
         if (!isGroupChat) {
-            await sendReply(msg, t(replyLang, 'checkin_admin_command_group_only'));
+            await sendReplyWithControls(msg, t(replyLang, 'checkin_admin_command_group_only'), replyLang);
             return;
         }
 
@@ -6676,7 +6714,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const userLang = await getLang(msg);
-        const sendInThread = (text, options = {}) => sendReply(msg, text, options);
+        const sendInThread = (text, options = {}) => sendReplyWithControls(msg, text, userLang, options);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
             await sendInThread(t(userLang, 'group_feed_group_only'), { parse_mode: "Markdown" });
@@ -6737,7 +6775,7 @@ function startTelegramBot() {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const lang = await getLang(msg);
-        const sendInThread = (text, options = {}) => sendReply(msg, text, options);
+        const sendInThread = (text, options = {}) => sendReplyWithControls(msg, text, lang, options);
 
         if (chatType !== 'group' && chatType !== 'supergroup') {
             await sendInThread(t(lang, 'feedtopic_group_only'), { parse_mode: "Markdown" });
@@ -6856,6 +6894,38 @@ function startTelegramBot() {
             saveHelpMessageState(sent.chat.id.toString(), sent.message_id, { view: 'user', group: defaultGroup });
         }
     });
+
+    async function openHelpFromNavigation(query, lang, view = 'user') {
+        const resolvedView = view === 'admin' ? 'admin' : 'user';
+        const helpText = buildHelpText(lang, resolvedView);
+        const defaultGroup = getDefaultHelpGroup(resolvedView);
+        const replyMarkup = buildHelpKeyboard(lang, resolvedView, defaultGroup);
+        const chatId = query.message?.chat?.id;
+        const messageId = query.message?.message_id;
+
+        if (chatId && messageId) {
+            try {
+                await bot.editMessageText(helpText, {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup
+                });
+                saveHelpMessageState(chatId.toString(), messageId, { view: resolvedView, group: defaultGroup });
+                await bot.answerCallbackQuery(query.id);
+                return;
+            } catch (error) {
+                console.warn(`[Nav] Không thể chuyển về help: ${error.message}`);
+            }
+        }
+
+        const targetChatId = chatId || query.from.id;
+        const sent = await bot.sendMessage(targetChatId, helpText, { parse_mode: 'HTML', reply_markup: replyMarkup });
+        if (sent?.chat?.id && sent?.message_id) {
+            saveHelpMessageState(sent.chat.id.toString(), sent.message_id, { view: resolvedView, group: defaultGroup });
+        }
+        await bot.answerCallbackQuery(query.id);
+    }
 
     // Xử lý tất cả CALLBACK QUERY (Nút bấm) - Cần async
     const helpCommandExecutors = {
@@ -6988,6 +7058,25 @@ function startTelegramBot() {
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
+            if (query.data === 'nav_close') {
+                if (query.message?.chat?.id && query.message?.message_id) {
+                    try {
+                        await bot.deleteMessage(query.message.chat.id, query.message.message_id);
+                    } catch (error) {
+                        // ignore deletion errors
+                    }
+                    clearHelpMessageState(query.message.chat.id.toString(), query.message.message_id);
+                }
+                await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data.startsWith('nav_help')) {
+                const [, requestedView] = query.data.split('|');
+                await openHelpFromNavigation(query, callbackLang, requestedView);
+                return;
+            }
+
             if (query.data === 'help_close') {
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {
@@ -8292,11 +8381,10 @@ function startTelegramBot() {
                         // ignore
                     }
                 }
-                const presetWeights = {
-                    math: Number(parts[2]),
-                    physics: Number(parts[3]),
-                    chemistry: Number(parts[4])
-                };
+                const presetWeights = {};
+                QUESTION_TYPE_KEYS.forEach((key, index) => {
+                    presetWeights[key] = Number(parts[index + 2]);
+                });
                 await bot.answerCallbackQuery(queryId, { text: t(callbackLang, 'checkin_admin_weights_updated_alert') });
                 await setAdminQuestionWeights(targetChatId, query.from.id, presetWeights, { fallbackLang: callbackLang });
                 return;

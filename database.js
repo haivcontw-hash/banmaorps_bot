@@ -140,6 +140,8 @@ const CHECKIN_DEFAULTS = {
     mathWeight: 2,
     physicsWeight: 1,
     chemistryWeight: 1,
+    okxWeight: 1,
+    web3Weight: 1,
     autoMessageTimes: ['08:00'],
     summaryMessageEnabled: 0,
     summaryMessageTimes: [],
@@ -234,8 +236,8 @@ async function ensureCheckinGroup(chatId) {
     const defaultStart = getTodayDateString(CHECKIN_DEFAULTS.timezone);
 
     await dbRun(
-        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, autoMessageTimes, summaryMessageEnabled, summaryMessageTimes, leaderboardPeriodStart, summaryPeriodStart, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO checkin_groups (chatId, checkinTime, timezone, autoMessageEnabled, dailyPoints, summaryWindow, mathWeight, physicsWeight, chemistryWeight, okxWeight, web3Weight, autoMessageTimes, summaryMessageEnabled, summaryMessageTimes, leaderboardPeriodStart, summaryPeriodStart, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             chatId,
             CHECKIN_DEFAULTS.checkinTime,
@@ -246,6 +248,8 @@ async function ensureCheckinGroup(chatId) {
             CHECKIN_DEFAULTS.mathWeight,
             CHECKIN_DEFAULTS.physicsWeight,
             CHECKIN_DEFAULTS.chemistryWeight,
+            CHECKIN_DEFAULTS.okxWeight,
+            CHECKIN_DEFAULTS.web3Weight,
             JSON.stringify(CHECKIN_DEFAULTS.autoMessageTimes),
             CHECKIN_DEFAULTS.summaryMessageEnabled,
             JSON.stringify(CHECKIN_DEFAULTS.summaryMessageTimes),
@@ -280,6 +284,8 @@ async function getCheckinGroup(chatId) {
         mathWeight: row.mathWeight ?? CHECKIN_DEFAULTS.mathWeight,
         physicsWeight: row.physicsWeight ?? CHECKIN_DEFAULTS.physicsWeight,
         chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
+        okxWeight: row.okxWeight ?? CHECKIN_DEFAULTS.okxWeight,
+        web3Weight: row.web3Weight ?? CHECKIN_DEFAULTS.web3Weight,
         lastAutoMessageDate: row.lastAutoMessageDate || null,
         autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime),
         summaryMessageEnabled: row.summaryMessageEnabled ?? CHECKIN_DEFAULTS.summaryMessageEnabled,
@@ -305,6 +311,8 @@ async function listCheckinGroups() {
         mathWeight: row.mathWeight ?? CHECKIN_DEFAULTS.mathWeight,
         physicsWeight: row.physicsWeight ?? CHECKIN_DEFAULTS.physicsWeight,
         chemistryWeight: row.chemistryWeight ?? CHECKIN_DEFAULTS.chemistryWeight,
+        okxWeight: row.okxWeight ?? CHECKIN_DEFAULTS.okxWeight,
+        web3Weight: row.web3Weight ?? CHECKIN_DEFAULTS.web3Weight,
         lastAutoMessageDate: row.lastAutoMessageDate || null,
         autoMessageTimes: normalizeAutoMessageTimes(row.autoMessageTimes, row.checkinTime || CHECKIN_DEFAULTS.checkinTime),
         summaryMessageEnabled: row.summaryMessageEnabled ?? CHECKIN_DEFAULTS.summaryMessageEnabled,
@@ -318,7 +326,7 @@ async function updateCheckinGroup(chatId, patch = {}) {
     await ensureCheckinGroup(chatId);
     const fields = [];
     const values = [];
-    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight', 'autoMessageTimes', 'leaderboardPeriodStart', 'summaryMessageEnabled', 'summaryMessageTimes', 'summaryPeriodStart'];
+    const allowed = ['checkinTime', 'timezone', 'autoMessageEnabled', 'dailyPoints', 'summaryWindow', 'lastAutoMessageDate', 'mathWeight', 'physicsWeight', 'chemistryWeight', 'okxWeight', 'web3Weight', 'autoMessageTimes', 'leaderboardPeriodStart', 'summaryMessageEnabled', 'summaryMessageTimes', 'summaryPeriodStart'];
     for (const key of allowed) {
         if (Object.prototype.hasOwnProperty.call(patch, key)) {
             let value = patch[key];
@@ -1056,6 +1064,8 @@ async function init() {
             mathWeight REAL NOT NULL DEFAULT 2,
             physicsWeight REAL NOT NULL DEFAULT 1,
             chemistryWeight REAL NOT NULL DEFAULT 1,
+            okxWeight REAL NOT NULL DEFAULT 1,
+            web3Weight REAL NOT NULL DEFAULT 1,
             autoMessageTimes TEXT,
             summaryMessageEnabled INTEGER NOT NULL DEFAULT 0,
             summaryMessageTimes TEXT,
@@ -1116,7 +1126,7 @@ async function init() {
         END`,
         [JSON.stringify(CHECKIN_DEFAULTS.summaryMessageTimes)]
     );
-    const weightDefaults = { mathWeight: 2, physicsWeight: 1, chemistryWeight: 1 };
+    const weightDefaults = { mathWeight: 2, physicsWeight: 1, chemistryWeight: 1, okxWeight: 1, web3Weight: 1 };
     for (const column of Object.keys(weightDefaults)) {
         try {
             await dbRun(`ALTER TABLE checkin_groups ADD COLUMN ${column} REAL DEFAULT ${weightDefaults[column]}`);
