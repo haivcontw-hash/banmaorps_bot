@@ -439,10 +439,97 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+function formatOkxTxStatusLabel(status, lang) {
+    const normalized = (status || '').toString().toLowerCase();
+    if (normalized === 'success') {
+        return `✅ ${t(lang, 'txstatus_status_success')}`;
+    }
+    if (normalized === 'failure' || normalized === 'failed') {
+        return `❌ ${t(lang, 'txstatus_status_failed')}`;
+    }
+    if (normalized === 'pending') {
+        return `⏳ ${t(lang, 'txstatus_status_pending')}`;
+    }
+    return `❔ ${t(lang, 'txstatus_status_unknown')}`;
+}
+
+function formatOkxTxTypeLabel(txType, lang) {
+    const normalized = (txType || '').toString().toLowerCase();
+    switch (normalized) {
+    case 'approve':
+        return t(lang, 'txstatus_type_approve');
+    case 'wrap':
+        return t(lang, 'txstatus_type_wrap');
+    case 'unwrap':
+        return t(lang, 'txstatus_type_unwrap');
+    case 'swap':
+        return t(lang, 'txstatus_type_swap');
+    default:
+        return t(lang, 'txstatus_type_unknown');
+    }
+}
+
+function formatOkxTokenDetails(details) {
+    if (!details) {
+        return null;
+    }
+
+    const entry = Array.isArray(details) ? (details[0] || null) : details;
+    if (!entry || typeof entry !== 'object') {
+        return null;
+    }
+
+    const amount = entry.amount || '—';
+    const symbol = entry.symbol || '';
+    const tokenAddress = entry.tokenAddress || entry.token || null;
+    const symbolPart = symbol ? ` ${symbol}` : '';
+    const addressPart = tokenAddress ? ` (${tokenAddress})` : '';
+    return `${amount}${symbolPart}${addressPart}`;
+}
+
+function buildTxStatusMessage(tx, lang, scopeLabel = null) {
+    if (!tx) {
+        return t(lang, 'txstatus_not_found_generic');
+    }
+
+    const fromToken = formatOkxTokenDetails(tx.fromTokenDetails);
+    const toToken = formatOkxTokenDetails(tx.toTokenDetails);
+    const timestamp = tx.txTime ? new Date(Number(tx.txTime)) : null;
+    const timeLabel = timestamp && !Number.isNaN(timestamp.getTime())
+        ? timestamp.toISOString()
+        : null;
+    const lines = [
+        t(lang, 'txstatus_title'),
+        t(lang, 'txstatus_status_line', { status: formatOkxTxStatusLabel(tx.status, lang) }),
+        tx.txType ? t(lang, 'txstatus_type_line', { type: formatOkxTxTypeLabel(tx.txType, lang) }) : null,
+        tx.chainId ? t(lang, 'txstatus_chain_line', { chainId: tx.chainId }) : null,
+        tx.txHash ? t(lang, 'txstatus_hash_line', { txHash: tx.txHash }) : null,
+        tx.fromAddress ? t(lang, 'txstatus_from_line', { address: tx.fromAddress }) : null,
+        tx.toAddress ? t(lang, 'txstatus_to_line', { address: tx.toAddress }) : null,
+        tx.dexRouter ? t(lang, 'txstatus_router_line', { address: tx.dexRouter }) : null,
+        fromToken || toToken ? t(lang, 'txstatus_tokens_line', { fromToken: fromToken || '—', toToken: toToken || '—' }) : null,
+        timeLabel ? t(lang, 'txstatus_time_line', { time: timeLabel }) : null,
+        tx.gasLimit || tx.gasUsed || tx.gasPrice
+            ? t(lang, 'txstatus_gas_line', {
+                limit: tx.gasLimit || '—',
+                used: tx.gasUsed || '—',
+                price: tx.gasPrice || '—'
+            })
+            : null,
+        tx.txFee ? t(lang, 'txstatus_fee_line', { fee: tx.txFee }) : null,
+        tx.referralAmount ? t(lang, 'txstatus_referral_line', { amount: tx.referralAmount }) : null,
+        tx.errorMsg ? t(lang, 'txstatus_error_line', { error: tx.errorMsg }) : null,
+        scopeLabel ? t(lang, 'txstatus_scope_line', { scope: scopeLabel }) : null
+    ];
+
+    return lines.filter(Boolean).join('\n');
+}
+
 const HELP_COMMAND_DETAILS = {
     start: { command: '/start', icon: '🚀', descKey: 'help_command_start' },
     register: { command: '/register', icon: '📝', descKey: 'help_command_register' },
     mywallet: { command: '/mywallet', icon: '💼', descKey: 'help_command_mywallet' },
+    txstatus: { command: '/txstatus', icon: '🔍', descKey: 'help_command_txstatus' },
     stats: { command: '/stats', icon: '📊', descKey: 'help_command_stats' },
     donate: { command: '/donate', icon: '🎁', descKey: 'help_command_donate' },
     banmaoprice: { command: '/banmaoprice', icon: '💰', descKey: 'help_command_banmaoprice' },
@@ -471,7 +558,7 @@ const HELP_GROUP_DETAILS = {
         icon: '🆔',
         titleKey: 'help_group_account_title',
         descKey: 'help_group_account_desc',
-        commands: ['register', 'mywallet', 'unregister']
+        commands: ['register', 'mywallet', 'txstatus', 'unregister']
     },
     language: {
         icon: '🌐',
@@ -4947,6 +5034,24 @@ async function fetchOkx402Supported() {
         .filter(Boolean);
 }
 
+async function fetchOkxTransactionStatus(chainId, txHash, options = {}) {
+    if (!chainId || !txHash) {
+        return null;
+    }
+
+    const query = { chainId, txHash };
+    if (typeof options.isFromMyProject === 'boolean') {
+        query.isFromMyProject = options.isFromMyProject;
+    }
+
+    const payload = await okxJsonRequest('GET', '/api/v5/dex/aggregator/history', {
+        query,
+        auth: hasOkxCredentials
+    });
+
+    return unwrapOkxFirst(payload);
+}
+
 async function tryFetchOkxMarketTicker() {
     if (!OKX_MARKET_INSTRUMENT) {
         return null;
@@ -6205,6 +6310,59 @@ function startTelegramBot() {
         }
     }
 
+    function parseTxStatusScope(value) {
+        if (!value) {
+            return null;
+        }
+        const normalized = value.trim().toLowerCase();
+        if (['mine', 'project', 'own', 'true', 'me'].includes(normalized)) {
+            return true;
+        }
+        if (['any', 'all', 'false'].includes(normalized)) {
+            return false;
+        }
+        return null;
+    }
+
+    async function handleTxStatusCommand(msg) {
+        const lang = await getLang(msg);
+        const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+        const parts = text.split(/\s+/).filter(Boolean);
+        const [, rawChainId, rawTxHash, rawScope] = parts;
+
+        if (!rawChainId || !rawTxHash) {
+            const usageLines = [
+                t(lang, 'txstatus_usage'),
+                t(lang, 'txstatus_usage_scope')
+            ];
+            sendReplyWithControls(msg, usageLines.join('\n'), lang, { parse_mode: 'Markdown' });
+            return;
+        }
+
+        const scope = parseTxStatusScope(rawScope);
+        const scopeLabel = scope === true
+            ? t(lang, 'txstatus_scope_mine')
+            : scope === false
+                ? t(lang, 'txstatus_scope_any')
+                : null;
+
+        try {
+            const tx = await fetchOkxTransactionStatus(rawChainId, rawTxHash, { isFromMyProject: scope });
+            if (!tx) {
+                sendReplyWithControls(msg, t(lang, 'txstatus_not_found', { chainId: rawChainId, txHash: rawTxHash }), lang, {
+                    parse_mode: 'Markdown'
+                });
+                return;
+            }
+
+            const message = buildTxStatusMessage(tx, lang, scopeLabel);
+            sendReplyWithControls(msg, message, lang, { parse_mode: 'Markdown' });
+        } catch (error) {
+            console.error(`[TxStatus] Failed to fetch tx status: ${error.message}`);
+            sendReplyWithControls(msg, t(lang, 'txstatus_error'), lang, { parse_mode: 'Markdown' });
+        }
+    }
+
     async function handleStatsCommand(msg) {
         const chatId = msg.chat.id.toString();
         const lang = await getLang(msg);
@@ -6564,6 +6722,11 @@ function startTelegramBot() {
     // COMMAND: /mywallet - Cần async
     bot.onText(/\/mywallet/, async (msg) => {
         await handleMyWalletCommand(msg);
+    });
+
+    // COMMAND: /txstatus - Query transaction status via OKX DEX
+    bot.onText(/\/txstatus/, async (msg) => {
+        await handleTxStatusCommand(msg);
     });
 
     // COMMAND: /stats - Cần async
@@ -6950,6 +7113,11 @@ function startTelegramBot() {
         mywallet: async (query, lang) => {
             const synthetic = buildSyntheticCommandMessage(query);
             await handleMyWalletCommand(synthetic);
+            return { message: t(lang, 'help_action_executed') };
+        },
+        txstatus: async (query, lang) => {
+            const synthetic = buildSyntheticCommandMessage(query);
+            await handleTxStatusCommand(synthetic);
             return { message: t(lang, 'help_action_executed') };
         },
         stats: async (query, lang) => {
