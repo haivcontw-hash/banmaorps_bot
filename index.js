@@ -401,11 +401,19 @@ if (!TELEGRAM_TOKEN || !RPC_URL || !CONTRACT_ADDRESS) {
 // --- KHỞI TẠO CÁC DỊCH VỤ ---
 // db.init() sẽ được gọi trong hàm main()
 const app = express();
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+const bot = new TelegramBot(TELEGRAM_TOKEN, {
+    polling: {
+        interval: 500,
+        autoStart: true,
+        params: { timeout: 10 }
+    }
+});
 let provider = null;
 let contract = null;
 let reconnectTimeout = null;
 let reconnectAttempts = 0;
+let pollingRestartTimeout = null;
+let pollingRestartAttempts = 0;
 
 // Hàm 't' (translate) nội bộ
 function t(lang_code, key, variables = {}) {
@@ -6050,6 +6058,39 @@ function startApiServer() {
 // 🤖 PHẦN 2: LOGIC BOT TELEGRAM (ĐÃ SỬA LỖI LOGIC NGÔN NGỮ)
 // ==========================================================
 
+function scheduleTelegramPollingRestart(reason = 'unknown') {
+    if (pollingRestartTimeout) {
+        return;
+    }
+
+    pollingRestartAttempts += 1;
+    const delay = Math.min(30000, 2000 * pollingRestartAttempts);
+    console.warn(`[Telegram] Polling gặp lỗi (${reason}). Thử khởi động lại sau ${Math.round(delay / 1000)}s (lần ${pollingRestartAttempts}).`);
+
+    pollingRestartTimeout = setTimeout(async () => {
+        pollingRestartTimeout = null;
+
+        try {
+            await bot.stopPolling();
+        } catch (error) {
+            console.warn(`[Telegram] Dừng polling thất bại: ${error.message}`);
+        }
+
+        try {
+            await bot.startPolling();
+            pollingRestartAttempts = 0;
+            console.log('✅ [Telegram] Polling đã khởi động lại thành công.');
+        } catch (error) {
+            console.error(`[Telegram] Khởi động lại polling thất bại: ${error.message}`);
+            scheduleTelegramPollingRestart('retry_after_failure');
+        }
+    }, delay);
+
+    if (typeof pollingRestartTimeout.unref === 'function') {
+        pollingRestartTimeout.unref();
+    }
+}
+
 // ===== HÀM HELPER MỚI (SỬA LỖI) =====
 // Lấy ngôn ngữ ĐÃ LƯU của user, nếu không có thì set ngôn ngữ mặc định
 async function getLang(msg) {
@@ -8690,7 +8731,15 @@ function startTelegramBot() {
     });
 
     bot.on('polling_error', (error) => {
-        console.error(`[LỖI BOT POLLING]: ${error.message}`);
+        const message = error?.message || 'unknown';
+        console.error(`[LỖI BOT POLLING]: ${message}`);
+        scheduleTelegramPollingRestart(message);
+    });
+
+    bot.on('error', (error) => {
+        const message = error?.message || 'unknown';
+        console.error(`[LỖI BOT]: ${message}`);
+        scheduleTelegramPollingRestart(message);
     });
 
     console.log('✅ [Telegram Bot] Đang chạy...');
