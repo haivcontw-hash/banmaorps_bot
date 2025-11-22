@@ -916,6 +916,25 @@ function sendOwnerPrompt(userId, text, options = {}, lang = defaultLang) {
     return bot.sendMessage(userId, text, { ...options, reply_markup: replyMarkup });
 }
 
+function formatOwnerTimestamp(seconds) {
+    if (!seconds || !Number.isFinite(seconds)) {
+        return 'Chưa ghi nhận';
+    }
+
+    try {
+        return new Intl.DateTimeFormat('vi-VN', {
+            hour12: false,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit'
+        }).format(new Date(seconds * 1000));
+    } catch (error) {
+        return new Date(seconds * 1000).toISOString();
+    }
+}
+
 function recordUserProfileFromMessage(msg) {
     const userId = msg?.from?.id;
     if (!userId) {
@@ -971,15 +990,15 @@ async function enforceBanForMessage(msg) {
     return banned;
 }
 
-function wrapCommandHandler(handler) {
-    return async (msg, ...args) => {
-        if (await enforceBanForMessage(msg)) {
-            return;
-        }
-        recordUserProfileFromMessage(msg);
-        return handler(msg, ...args);
-    };
-}
+    function wrapCommandHandler(handler) {
+        return async (msg, ...args) => {
+            recordUserProfileFromMessage(msg);
+            if (await enforceBanForMessage(msg)) {
+                return;
+            }
+            return handler(msg, ...args);
+        };
+    }
 
 function buildUserMention(user) {
     if (!user) {
@@ -6702,7 +6721,11 @@ function startTelegramBot() {
                     { text: 'UNBAN', callback_data: 'owner|unban' }
                 ],
                 [
-                    { text: 'Khôi phục ID', callback_data: 'owner|reset' }
+                    { text: 'Khôi phục ID', callback_data: 'owner|reset' },
+                    { text: 'Gỡ đồng sở hữu', callback_data: 'owner|revoke' }
+                ],
+                [
+                    { text: 'Thống kê nhóm', callback_data: 'owner|groups' }
                 ],
                 [
                     { text: t(lang, 'nav_button_close'), callback_data: 'nav_close' }
@@ -6762,8 +6785,10 @@ function startTelegramBot() {
             ? user.wallets.map((w) => `<code>${escapeHtml(w)}</code>`).join(', ')
             : 'Chưa đăng kí';
         const idText = `<code>${escapeHtml(user.chatId)}</code>`;
+        const startedAt = formatOwnerTimestamp(user.createdAt);
+        const lastActive = formatOwnerTimestamp(user.lastActiveAt);
 
-        return `${role.icon} <b>${role.label}</b> — ${displayName} (${usernameSection})\nID: ${idText}\nVí: ${walletText}`;
+        return `${role.icon} <b>${role.label}</b> — ${displayName} (${usernameSection})\nID: ${idText}\nVí: ${walletText}\nBắt đầu: ${startedAt}\nGần nhất: ${lastActive}`;
     }
 
     async function handleOwnerStats(userId, lang = defaultLang) {
@@ -6779,6 +6804,58 @@ function startTelegramBot() {
 
         for (const chunk of messages) {
             await sendOwnerPrompt(userId, chunk, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) }, lang);
+        }
+    }
+
+    async function handleOwnerGroupStats(ownerId, lang = defaultLang) {
+        const groups = await db.getGroupSubscriptions();
+        if (!groups || groups.length === 0) {
+            await sendOwnerPrompt(ownerId, 'Chưa có nhóm nào đang dùng bot.', { reply_markup: buildCloseKeyboard(lang) }, lang);
+            return;
+        }
+
+        const lines = [];
+        const keyboard = [];
+
+        for (const group of groups) {
+            let title = group.title || '';
+            if (!title) {
+                try {
+                    const chat = await bot.getChat(group.chatId);
+                    title = chat?.title || '';
+                } catch (error) {
+                    console.warn(`[OwnerGroups] Không thể lấy tên nhóm ${group.chatId}: ${error.message}`);
+                }
+            }
+
+            const safeTitle = escapeHtml(title || 'Không rõ tên');
+            const idText = `<code>${escapeHtml(group.chatId)}</code>`;
+            const started = formatOwnerTimestamp(group.createdAt);
+            const updated = formatOwnerTimestamp(group.updatedAt);
+            const minStake = group.minStake != null ? group.minStake : 0;
+
+            lines.push(`👥 <b>${safeTitle}</b>\nID: ${idText}\nNgôn ngữ: ${escapeHtml(group.lang || 'N/A')}\nNgưỡng: ${minStake}\nBắt đầu: ${started}\nCập nhật: ${updated}`);
+            keyboard.push([{ text: `Gỡ bot khỏi ${title || group.chatId}`, callback_data: `owner|kick|${group.chatId}` }]);
+        }
+
+        const replyMarkup = { inline_keyboard: [...keyboard, ...buildCloseKeyboard(lang).inline_keyboard] };
+        const messages = splitMessagesByLength(lines);
+
+        for (const chunk of messages) {
+            await sendOwnerPrompt(ownerId, chunk, { parse_mode: 'HTML', reply_markup: replyMarkup }, lang);
+        }
+    }
+
+    async function notifyResetTarget(chatId, lang = defaultLang) {
+        try {
+            const sent = await bot.sendMessage(chatId, 'Toàn bộ dữ liệu và lịch sử của bạn đã được xoá. Vui lòng khởi động lại với bot nếu cần.', {
+                reply_markup: buildCloseKeyboard(lang)
+            });
+            setTimeout(() => {
+                bot.deleteMessage(chatId, sent.message_id).catch(() => {});
+            }, 5000);
+        } catch (error) {
+            console.warn(`[OwnerReset] Không thể gửi thông báo reset tới ${chatId}: ${error.message}`);
         }
     }
 
@@ -6829,8 +6906,12 @@ function startTelegramBot() {
         );
     }
 
-    async function handleOwnerReset(ownerId, target) {
+    async function handleOwnerReset(ownerId, target, lang = defaultLang) {
         if (target.type === 'all') {
+            const users = await db.getAllUsersDetailed();
+            for (const user of users) {
+                await notifyResetTarget(user.chatId, lang);
+            }
             await db.clearAllUserData();
             await sendOwnerPrompt(ownerId, 'Đã xoá toàn bộ dữ liệu và lịch sử lưu trữ.');
             return;
@@ -6842,6 +6923,7 @@ function startTelegramBot() {
                 const users = await db.getUsersForWallet(target.value);
                 for (const user of users) {
                     await db.clearUserData(user.chatId);
+                    await notifyResetTarget(user.chatId, lang);
                 }
                 await sendOwnerPrompt(ownerId, `Đã xoá dữ liệu cho ví ${target.value}.`);
             } catch (error) {
@@ -6851,6 +6933,7 @@ function startTelegramBot() {
         }
 
         await db.clearUserData(target.value);
+        await notifyResetTarget(target.value, lang);
         await sendOwnerPrompt(ownerId, `Đã xoá dữ liệu cho ID ${target.value}.`);
     }
 
@@ -6942,7 +7025,34 @@ function startTelegramBot() {
                 return true;
             }
 
-            await handleOwnerReset(userId, target);
+            const lang = await getLang(msg);
+            await handleOwnerReset(userId, target, lang);
+            resetOwnerState(userId);
+            return true;
+        }
+
+        if (state.type === 'revoke') {
+            const target = parseOwnerTarget(text);
+            if (!target || target.type !== 'user') {
+                await sendOwnerPrompt(userId, 'Vui lòng nhập ID Telegram hợp lệ của đồng sở hữu cần gỡ.');
+                return true;
+            }
+
+            const owners = await db.getOwners();
+            const requester = owners.find((o) => o.chatId.toString() === userId.toString());
+            if (!requester?.isPrimary) {
+                await sendOwnerPrompt(userId, 'Chỉ chủ sở hữu chính mới có thể gỡ đồng sở hữu.');
+                resetOwnerState(userId);
+                return true;
+            }
+
+            const removed = await db.removeOwner(target.value.toString());
+            if (removed) {
+                await sendOwnerPrompt(userId, `Đã gỡ quyền đồng sở hữu của ID ${target.value}.`);
+            } else {
+                await sendOwnerPrompt(userId, 'Không tìm thấy đồng sở hữu để gỡ hoặc đây là chủ sở hữu chính.');
+            }
+
             resetOwnerState(userId);
             return true;
         }
@@ -6977,6 +7087,12 @@ function startTelegramBot() {
             return;
         }
 
+        if (action === 'groups') {
+            await handleOwnerGroupStats(userId);
+            await bot.answerCallbackQuery(query.id, { text: 'Đang hiển thị nhóm' });
+            return;
+        }
+
         if (action === 'ban') {
             startOwnerState(userId, { type: 'ban' });
             await sendOwnerPrompt(userId, 'Nhập ID Telegram hoặc địa chỉ ví cần BAN:');
@@ -6995,6 +7111,32 @@ function startTelegramBot() {
             startOwnerState(userId, { type: 'reset' });
             await sendOwnerPrompt(userId, 'Nhập all, ID Telegram hoặc địa chỉ ví để xoá dữ liệu:');
             await bot.answerCallbackQuery(query.id, { text: 'Nhập mục tiêu khôi phục' });
+            return;
+        }
+
+        if (action === 'revoke') {
+            startOwnerState(userId, { type: 'revoke' });
+            await sendOwnerPrompt(userId, 'Nhập ID Telegram đồng sở hữu cần gỡ:');
+            await bot.answerCallbackQuery(query.id, { text: 'Nhập ID đồng sở hữu' });
+            return;
+        }
+
+        if (action === 'kick') {
+            const [, , targetChatId] = query.data.split('|');
+            if (!targetChatId) {
+                await bot.answerCallbackQuery(query.id, { text: 'Thiếu ID nhóm' });
+                return;
+            }
+
+            try {
+                await bot.leaveChat(targetChatId);
+                await db.removeGroupSubscription(targetChatId);
+                await bot.answerCallbackQuery(query.id, { text: `Đã rời nhóm ${targetChatId}` });
+                await sendOwnerPrompt(userId, `Đã xoá bot khỏi nhóm ${targetChatId}.`);
+            } catch (error) {
+                await bot.answerCallbackQuery(query.id, { text: 'Không thể rời nhóm', show_alert: true });
+                await sendOwnerPrompt(userId, `Không thể rời nhóm ${targetChatId}: ${error.message}`);
+            }
             return;
         }
 
@@ -7247,7 +7389,7 @@ function startTelegramBot() {
             }
 
             const threadId = msg.message_thread_id;
-            await db.upsertGroupSubscription(chatId, userLang, minStake, threadId);
+            await db.upsertGroupSubscription(chatId, userLang, minStake, threadId, msg.chat.title || null);
             await sendInThread(t(userLang, 'group_feed_enabled', { amount: formatBanmao(minStake) }), { parse_mode: "Markdown" });
         } catch (error) {
             console.error(`[GroupFeed] Lỗi cấu hình cho nhóm ${chatId}:`, error.message);
@@ -7551,6 +7693,7 @@ function startTelegramBot() {
                 from: query.from,
                 chat: query.message?.chat ? { id: query.message.chat.id } : { id: query.from.id }
             };
+            recordUserProfileFromMessage(pseudoMessage);
             if (await enforceBanForMessage(pseudoMessage)) {
                 await bot.answerCallbackQuery(queryId, { text: OWNER_BAN_MESSAGE, show_alert: true });
                 return;

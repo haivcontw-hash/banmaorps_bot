@@ -1003,7 +1003,9 @@ async function init() {
             lang_source TEXT DEFAULT 'auto',
             first_name TEXT,
             last_name TEXT,
-            username TEXT
+            username TEXT,
+            createdAt INTEGER,
+            lastActiveAt INTEGER
         );
     `);
 
@@ -1017,6 +1019,16 @@ async function init() {
     for (const column of ['first_name', 'last_name', 'username']) {
         try {
             await dbRun(`ALTER TABLE users ADD COLUMN ${column} TEXT`);
+        } catch (err) {
+            if (!/duplicate column name/i.test(err.message)) {
+                throw err;
+            }
+        }
+    }
+
+    for (const column of ['createdAt', 'lastActiveAt']) {
+        try {
+            await dbRun(`ALTER TABLE users ADD COLUMN ${column} INTEGER`);
         } catch (err) {
             if (!/duplicate column name/i.test(err.message)) {
                 throw err;
@@ -1044,12 +1056,20 @@ async function init() {
             lang TEXT,
             minStake REAL,
             messageThreadId TEXT,
+            title TEXT,
             createdAt INTEGER,
             updatedAt INTEGER
         );
     `);
     try {
         await dbRun(`ALTER TABLE group_subscriptions ADD COLUMN messageThreadId TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE group_subscriptions ADD COLUMN title TEXT`);
     } catch (err) {
         if (!/duplicate column name/i.test(err.message)) {
             throw err;
@@ -1252,7 +1272,8 @@ function normalizeUsername(username) {
 async function addWalletToUser(chatId, lang, walletAddress) {
     const normalizedLangInput = normalizeLanguageCode(lang);
     const normalizedAddr = ethers.getAddress(walletAddress);
-    let user = await dbGet('SELECT lang, lang_source, wallets FROM users WHERE chatId = ?', [chatId]);
+    const now = Math.floor(Date.now() / 1000);
+    let user = await dbGet('SELECT lang, lang_source, wallets, createdAt FROM users WHERE chatId = ?', [chatId]);
 
     if (user) {
         let wallets = [];
@@ -1280,9 +1301,15 @@ async function addWalletToUser(chatId, lang, walletAddress) {
             nextSource = 'auto';
         }
 
-        await dbRun('UPDATE users SET lang = ?, lang_source = ?, wallets = ? WHERE chatId = ?', [langToPersist, nextSource, JSON.stringify(wallets), chatId]);
+        await dbRun(
+            'UPDATE users SET lang = ?, lang_source = ?, wallets = ?, createdAt = COALESCE(createdAt, ?), lastActiveAt = ? WHERE chatId = ?',
+            [langToPersist, nextSource, JSON.stringify(wallets), now, now, chatId]
+        );
     } else {
-        await dbRun('INSERT INTO users (chatId, lang, wallets, lang_source) VALUES (?, ?, ?, ?)', [chatId, normalizedLangInput, JSON.stringify([normalizedAddr]), 'auto']);
+        await dbRun(
+            'INSERT INTO users (chatId, lang, wallets, lang_source, createdAt, lastActiveAt) VALUES (?, ?, ?, ?, ?, ?)',
+            [chatId, normalizedLangInput, JSON.stringify([normalizedAddr]), 'auto', now, now]
+        );
     }
     console.log(`[DB] Đã thêm/cập nhật ví ${normalizedAddr} cho chatId ${chatId}`);
 }
@@ -1315,17 +1342,18 @@ async function saveUserProfile(chatId, profile = {}) {
 
     const { first_name = null, last_name = null, username = null } = profile;
     const normalizedUsername = normalizeUsername(username);
-    const existing = await dbGet('SELECT chatId FROM users WHERE chatId = ?', [chatId]);
+    const existing = await dbGet('SELECT chatId, createdAt FROM users WHERE chatId = ?', [chatId]);
+    const now = Math.floor(Date.now() / 1000);
 
     if (existing) {
         await dbRun(
-            'UPDATE users SET first_name = ?, last_name = ?, username = COALESCE(?, username) WHERE chatId = ?',
-            [first_name, last_name, normalizedUsername, chatId]
+            'UPDATE users SET first_name = ?, last_name = ?, username = COALESCE(?, username), createdAt = COALESCE(createdAt, ?), lastActiveAt = ? WHERE chatId = ?',
+            [first_name, last_name, normalizedUsername, now, now, chatId]
         );
     } else {
         await dbRun(
-            'INSERT INTO users (chatId, lang, wallets, lang_source, first_name, last_name, username) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [chatId, null, '[]', 'auto', first_name, last_name, normalizedUsername]
+            'INSERT INTO users (chatId, lang, wallets, lang_source, first_name, last_name, username, createdAt, lastActiveAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [chatId, null, '[]', 'auto', first_name, last_name, normalizedUsername, now, now]
         );
     }
 }
@@ -1441,22 +1469,23 @@ async function getStats(walletAddress) {
     return stats;
 }
 
-async function upsertGroupSubscription(chatId, lang, minStake, messageThreadId = null) {
+async function upsertGroupSubscription(chatId, lang, minStake, messageThreadId = null, title = null) {
     const now = Math.floor(Date.now() / 1000);
     const normalizedThreadId =
         messageThreadId === undefined || messageThreadId === null
             ? null
             : messageThreadId.toString();
+    const normalizedTitle = title || null;
     const existing = await dbGet('SELECT chatId FROM group_subscriptions WHERE chatId = ?', [chatId]);
     if (existing) {
         await dbRun(
-            'UPDATE group_subscriptions SET lang = ?, minStake = ?, messageThreadId = ?, updatedAt = ? WHERE chatId = ?',
-            [lang, minStake, normalizedThreadId, now, chatId]
+            'UPDATE group_subscriptions SET lang = ?, minStake = ?, messageThreadId = ?, title = COALESCE(?, title), updatedAt = ? WHERE chatId = ?',
+            [lang, minStake, normalizedThreadId, normalizedTitle, now, chatId]
         );
     } else {
         await dbRun(
-            'INSERT INTO group_subscriptions (chatId, lang, minStake, messageThreadId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
-            [chatId, lang, minStake, normalizedThreadId, now, now]
+            'INSERT INTO group_subscriptions (chatId, lang, minStake, messageThreadId, title, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [chatId, lang, minStake, normalizedThreadId, normalizedTitle, now, now]
         );
     }
 }
@@ -1466,7 +1495,7 @@ async function removeGroupSubscription(chatId) {
 }
 
 async function getGroupSubscription(chatId) {
-    const row = await dbGet('SELECT chatId, lang, minStake, messageThreadId FROM group_subscriptions WHERE chatId = ?', [chatId]);
+    const row = await dbGet('SELECT chatId, lang, minStake, messageThreadId, title, createdAt, updatedAt FROM group_subscriptions WHERE chatId = ?', [chatId]);
     if (!row) {
         return null;
     }
@@ -1475,17 +1504,23 @@ async function getGroupSubscription(chatId) {
         chatId: row.chatId,
         lang: row.lang,
         minStake: row.minStake,
-        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString()
+        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString(),
+        title: row.title || null,
+        createdAt: row.createdAt || null,
+        updatedAt: row.updatedAt || null
     };
 }
 
 async function getGroupSubscriptions() {
-    const rows = await dbAll('SELECT chatId, lang, minStake, messageThreadId FROM group_subscriptions');
+    const rows = await dbAll('SELECT chatId, lang, minStake, messageThreadId, title, createdAt, updatedAt FROM group_subscriptions');
     return rows.map(row => ({
         chatId: row.chatId,
         lang: row.lang,
         minStake: row.minStake,
-        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString()
+        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString(),
+        title: row.title || null,
+        createdAt: row.createdAt || null,
+        updatedAt: row.updatedAt || null
     }));
 }
 
@@ -1571,6 +1606,24 @@ async function getOwners() {
     }));
 }
 
+async function removeOwner(chatId) {
+    if (!chatId) {
+        return false;
+    }
+
+    const existing = await dbGet('SELECT chatId, isPrimary FROM owners WHERE chatId = ?', [chatId]);
+    if (!existing || existing.isPrimary) {
+        return false;
+    }
+
+    await dbRun('DELETE FROM owners WHERE chatId = ?', [chatId]);
+    return true;
+}
+
+async function removeAllCoOwners() {
+    await dbRun('DELETE FROM owners WHERE isPrimary = 0');
+}
+
 async function banUser(chatId, createdBy = null) {
     if (!chatId) {
         return;
@@ -1643,7 +1696,7 @@ async function clearAllBans() {
 }
 
 async function getAllUsersDetailed() {
-    const rows = await dbAll('SELECT chatId, lang, wallets, first_name, last_name, username FROM users');
+    const rows = await dbAll('SELECT chatId, lang, wallets, first_name, last_name, username, createdAt, lastActiveAt FROM users');
     return rows.map((row) => {
         let parsedWallets = [];
         try {
@@ -1657,7 +1710,9 @@ async function getAllUsersDetailed() {
             wallets: Array.isArray(parsedWallets) ? parsedWallets : [],
             firstName: row.first_name || '',
             lastName: row.last_name || '',
-            username: row.username || ''
+            username: row.username || '',
+            createdAt: row.createdAt || null,
+            lastActiveAt: row.lastActiveAt || null
         };
     });
 }
@@ -1672,15 +1727,20 @@ async function clearUserData(chatId) {
     await dbRun('DELETE FROM checkin_members WHERE userId = ?', [idText]);
     await dbRun('DELETE FROM checkin_records WHERE userId = ?', [idText]);
     await dbRun('DELETE FROM checkin_attempts WHERE userId = ?', [idText]);
+    await dbRun('DELETE FROM owners WHERE chatId = ? AND isPrimary = 0', [idText]);
     await unbanUser(idText);
 }
 
 async function clearAllUserData() {
     await dbRun('DELETE FROM users');
+    await dbRun('DELETE FROM pending_tokens');
+    await dbRun('DELETE FROM game_stats');
+    await dbRun('DELETE FROM group_subscriptions');
     await dbRun('DELETE FROM group_member_languages');
     await dbRun('DELETE FROM checkin_members');
     await dbRun('DELETE FROM checkin_records');
     await dbRun('DELETE FROM checkin_attempts');
+    await removeAllCoOwners();
     await clearAllBans();
 }
 
@@ -1719,6 +1779,7 @@ module.exports = {
     getUsersForWallet,
     getUserLanguage,
     getUserLanguageInfo,
+    setUserLanguage,
     setLanguage,
     setLanguageAuto,
     addPendingToken,
@@ -1748,6 +1809,8 @@ module.exports = {
     unbanWallet,
     isChatBanned,
     areWalletsBanned,
+    removeOwner,
+    removeAllCoOwners,
     listBans,
     getAllUsersDetailed,
     clearUserData,
