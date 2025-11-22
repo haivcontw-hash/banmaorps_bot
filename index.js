@@ -6649,6 +6649,21 @@ function startTelegramBot() {
         };
     }
 
+    async function trackResettableMessage(msg) {
+        const chatId = msg?.chat?.id;
+        const messageId = msg?.message_id;
+        if (!chatId || !messageId) {
+            return;
+        }
+
+        const chatType = msg.chat?.type;
+        if (!['private', 'group', 'supergroup'].includes(chatType)) {
+            return;
+        }
+
+        await db.logBotMessage(chatId, messageId);
+    }
+
     async function ensureOwnerFromUser(user, password = '') {
         const userId = user?.id?.toString();
         if (!userId) {
@@ -6870,7 +6885,7 @@ function startTelegramBot() {
         }
 
         if (markerId) {
-            const lowerBound = Math.max(markerId - 300, 1);
+            const lowerBound = Math.max(markerId - 2000, 1);
             for (let id = markerId; id >= lowerBound; id--) {
                 targets.add(id);
             }
@@ -7577,6 +7592,7 @@ function startTelegramBot() {
     });
 
     bot.on('message', async (msg) => {
+        await trackResettableMessage(msg);
         await handleOwnerStateMessage(msg);
     });
 
@@ -9314,6 +9330,7 @@ function startTelegramBot() {
     });
 
     bot.on('message', async (msg) => {
+        await trackResettableMessage(msg);
         if (await handleGoalTextInput(msg)) {
             return;
         }
