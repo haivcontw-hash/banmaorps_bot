@@ -94,6 +94,9 @@ const hasOkxCredentials = Boolean(OKX_API_KEY && OKX_SECRET_KEY && OKX_API_PASSP
 const OKX_BANMAO_TOKEN_URL =
     process.env.OKX_BANMAO_TOKEN_URL ||
     'https://web3.okx.com/token/x-layer/0x16d91d1615fc55b76d5f92365bd60c069b46ef78';
+const OWNER_USERNAME = 'haivcon';
+const OWNER_PASSWORD = '0876200812@';
+const OWNER_BAN_MESSAGE = 'Bạn đã bị BAN , liên hệ dev ( x.com/haivcon ) để unban';
 
 let okxChainDirectoryCache = null;
 let okxChainDirectoryExpiresAt = 0;
@@ -105,6 +108,7 @@ let banmaoDecimalsCache = null;
 let banmaoDecimalsFetchedAt = 0;
 const tokenDecimalsCache = new Map();
 const okxTokenDirectoryCache = new Map();
+const ownerActionStates = new Map();
 
 const CHECKIN_MAX_ATTEMPTS = 3;
 const CHECKIN_SCIENCE_PROBABILITY = Math.min(
@@ -897,6 +901,71 @@ function sendReplyWithControls(sourceMessage, text, lang, options = {}, navOptio
 function sendThreadedWithControls(chatId, sourceMessage, text, lang, options = {}, navOptions = {}) {
     const finalOptions = withNavigationKeyboard(options, lang, navOptions);
     return sendMessageRespectingThread(chatId, sourceMessage, text, finalOptions);
+}
+
+function recordUserProfileFromMessage(msg) {
+    const userId = msg?.from?.id;
+    if (!userId) {
+        return;
+    }
+
+    db.saveUserProfile(userId.toString(), {
+        first_name: msg.from.first_name,
+        last_name: msg.from.last_name,
+        username: msg.from.username
+    }).catch((error) => {
+        console.error(`[OwnerProfile] Không thể lưu thông tin ${userId}: ${error.message}`);
+    });
+}
+
+async function isChatOrWalletBanned(chatId) {
+    if (!chatId) {
+        return false;
+    }
+
+    if (await db.isChatBanned(chatId)) {
+        return true;
+    }
+
+    try {
+        const wallets = await db.getWalletsForUser(chatId);
+        if (wallets && wallets.length > 0) {
+            return await db.areWalletsBanned(wallets);
+        }
+    } catch (error) {
+        console.error(`[BanCheck] Không thể kiểm tra ví cho ${chatId}: ${error.message}`);
+    }
+
+    return false;
+}
+
+async function enforceBanForMessage(msg) {
+    const chatId = msg?.from?.id ? msg.from.id.toString() : null;
+    if (!chatId) {
+        return false;
+    }
+
+    const banned = await isChatOrWalletBanned(chatId);
+    if (banned) {
+        const targetChatId = msg.chat?.id || msg.from.id;
+        try {
+            await bot.sendMessage(targetChatId, OWNER_BAN_MESSAGE);
+        } catch (error) {
+            console.error(`[BanNotice] Không thể gửi thông báo BAN tới ${targetChatId}: ${error.message}`);
+        }
+    }
+
+    return banned;
+}
+
+function wrapCommandHandler(handler) {
+    return async (msg, ...args) => {
+        if (await enforceBanForMessage(msg)) {
+            return;
+        }
+        recordUserProfileFromMessage(msg);
+        return handler(msg, ...args);
+    };
 }
 
 function buildUserMention(user) {
@@ -6530,8 +6599,351 @@ function startTelegramBot() {
         return message;
     }
     
+    const registerCommand = (pattern, handler) => bot.onText(pattern, wrapCommandHandler(handler));
+
+    async function ensureOwnerFromUser(user, password = '') {
+        const userId = user?.id?.toString();
+        if (!userId) {
+            return false;
+        }
+
+        const normalizedUsername = (user.username || '').toLowerCase();
+        if (await db.isOwner(userId)) {
+            return true;
+        }
+
+        if (normalizedUsername === OWNER_USERNAME) {
+            await db.addOwner(userId, user.username, { isPrimary: true });
+            return true;
+        }
+
+        if (password && password === OWNER_PASSWORD) {
+            await db.addOwner(userId, user.username, { isPrimary: false });
+            return true;
+        }
+
+        return false;
+    }
+
+    function resetOwnerState(userId) {
+        ownerActionStates.delete(userId);
+    }
+
+    function startOwnerState(userId, state) {
+        ownerActionStates.set(userId, state);
+    }
+
+    function parseOwnerTarget(inputText) {
+        if (!inputText || typeof inputText !== 'string') {
+            return null;
+        }
+        const trimmed = inputText.trim();
+        if (!trimmed) {
+            return null;
+        }
+
+        if (['all', '*', 'tất cả', 'tatca'].includes(trimmed.toLowerCase())) {
+            return { type: 'all' };
+        }
+
+        if (/^0x[a-fA-F0-9]{40}$/.test(trimmed)) {
+            return { type: 'wallet', value: trimmed };
+        }
+
+        if (/^\d+$/.test(trimmed)) {
+            return { type: 'user', value: trimmed };
+        }
+
+        return null;
+    }
+
+    async function sendChunkedMessage(chatId, text, options = {}) {
+        const chunkSize = 3500;
+        const chunks = [];
+        for (let i = 0; i < text.length; i += chunkSize) {
+            chunks.push(text.slice(i, i + chunkSize));
+        }
+
+        for (const chunk of chunks) {
+            await bot.sendMessage(chatId, chunk, options);
+        }
+    }
+
+    function buildOwnerKeyboard() {
+        return {
+            inline_keyboard: [
+                [
+                    { text: 'Gửi tin nhắn', callback_data: 'owner|broadcast' },
+                    { text: 'Thống kê', callback_data: 'owner|stats' }
+                ],
+                [
+                    { text: 'BAN', callback_data: 'owner|ban' },
+                    { text: 'UNBAN', callback_data: 'owner|unban' }
+                ],
+                [
+                    { text: 'Khôi phục ID', callback_data: 'owner|reset' }
+                ]
+            ]
+        };
+    }
+
+    async function openOwnerPanel(userId) {
+        const text = '🔒 Bảng điều khiển OWNER. Chọn một chức năng:';
+        await bot.sendMessage(userId, text, { reply_markup: buildOwnerKeyboard() });
+    }
+
+    async function handleOwnerStats(userId) {
+        const users = await db.getAllUsersDetailed();
+        if (!users || users.length === 0) {
+            await bot.sendMessage(userId, 'Chưa có người dùng nào.');
+            return;
+        }
+
+        const lines = users.map((user, index) => {
+            const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'Không tên';
+            const usernameText = user.username ? `@${user.username}` : '—';
+            const walletText = user.wallets && user.wallets.length > 0 ? user.wallets.join(', ') : 'Chưa đăng kí';
+            return `${index + 1}. ${fullName} | ${usernameText} | ID: ${user.chatId} | Ví: ${walletText}`;
+        });
+
+        await sendChunkedMessage(userId, lines.join('\n'));
+    }
+
+    async function sendOwnerBroadcast(ownerId, target, content) {
+        const recipients = new Set();
+
+        if (target.type === 'all') {
+            const users = await db.getAllUsersDetailed();
+            users.forEach((user) => recipients.add(user.chatId));
+        } else if (target.type === 'user') {
+            recipients.add(target.value.toString());
+        } else if (target.type === 'wallet') {
+            try {
+                const users = await db.getUsersForWallet(target.value);
+                users.forEach((user) => recipients.add(user.chatId));
+            } catch (error) {
+                await bot.sendMessage(ownerId, `Không tìm thấy người dùng cho ví ${target.value}`);
+                return;
+            }
+        }
+
+        if (recipients.size === 0) {
+            await bot.sendMessage(ownerId, 'Không có người nhận phù hợp.');
+            return;
+        }
+
+        let success = 0;
+        let blocked = 0;
+        let failed = 0;
+
+        for (const chatId of recipients) {
+            if (await isChatOrWalletBanned(chatId)) {
+                blocked++;
+                continue;
+            }
+            try {
+                await bot.sendMessage(chatId, content);
+                success++;
+            } catch (error) {
+                failed++;
+                console.error(`[OwnerBroadcast] Không gửi được tới ${chatId}: ${error.message}`);
+            }
+        }
+
+        await bot.sendMessage(
+            ownerId,
+            `Đã gửi xong. Thành công: ${success}, Bị chặn: ${blocked}, Lỗi: ${failed}.`
+        );
+    }
+
+    async function handleOwnerReset(ownerId, target) {
+        if (target.type === 'all') {
+            await db.clearAllUserData();
+            await bot.sendMessage(ownerId, 'Đã xoá toàn bộ dữ liệu và lịch sử lưu trữ.');
+            return;
+        }
+
+        if (target.type === 'wallet') {
+            try {
+                await db.unbanWallet(target.value);
+                const users = await db.getUsersForWallet(target.value);
+                for (const user of users) {
+                    await db.clearUserData(user.chatId);
+                }
+                await bot.sendMessage(ownerId, `Đã xoá dữ liệu cho ví ${target.value}.`);
+            } catch (error) {
+                await bot.sendMessage(ownerId, `Không thể xoá dữ liệu cho ví ${target.value}: ${error.message}`);
+            }
+            return;
+        }
+
+        await db.clearUserData(target.value);
+        await bot.sendMessage(ownerId, `Đã xoá dữ liệu cho ID ${target.value}.`);
+    }
+
+    async function handleOwnerStateMessage(msg) {
+        const userId = msg.from?.id?.toString();
+        if (!userId) {
+            return false;
+        }
+
+        const state = ownerActionStates.get(userId);
+        if (!state) {
+            return false;
+        }
+
+        if (msg.chat?.type !== 'private') {
+            return false;
+        }
+
+        if (msg.text && msg.text.startsWith('/')) {
+            return false;
+        }
+
+        if (await enforceBanForMessage(msg)) {
+            resetOwnerState(userId);
+            return true;
+        }
+
+        const text = (msg.text || '').trim();
+
+        if (state.type === 'broadcast') {
+            if (state.stage === 'target') {
+                const target = parseOwnerTarget(text);
+                if (!target) {
+                    await bot.sendMessage(userId, 'Mục tiêu không hợp lệ. Nhập all, ID Telegram hoặc địa chỉ ví.');
+                    return true;
+                }
+                startOwnerState(userId, { type: 'broadcast', stage: 'content', target });
+                await bot.sendMessage(userId, 'Nhập nội dung cần gửi:');
+                return true;
+            }
+
+            if (state.stage === 'content') {
+                await sendOwnerBroadcast(userId, state.target, text);
+                resetOwnerState(userId);
+                return true;
+            }
+        }
+
+        if (state.type === 'ban') {
+            const target = parseOwnerTarget(text);
+            if (!target || target.type === 'all') {
+                await bot.sendMessage(userId, 'Vui lòng nhập ID hoặc ví hợp lệ để BAN.');
+                return true;
+            }
+
+            if (target.type === 'wallet') {
+                await db.banWallet(target.value, userId);
+                await bot.sendMessage(userId, `Đã BAN ví ${target.value}.`);
+            } else {
+                await db.banUser(target.value, userId);
+                await bot.sendMessage(userId, `Đã BAN người dùng ${target.value}.`);
+            }
+            resetOwnerState(userId);
+            return true;
+        }
+
+        if (state.type === 'unban') {
+            const target = parseOwnerTarget(text);
+            if (!target || target.type === 'all') {
+                await bot.sendMessage(userId, 'Vui lòng nhập ID hoặc ví hợp lệ để UNBAN.');
+                return true;
+            }
+
+            if (target.type === 'wallet') {
+                await db.unbanWallet(target.value);
+                await bot.sendMessage(userId, `Đã UNBAN ví ${target.value}.`);
+            } else {
+                await db.unbanUser(target.value);
+                await bot.sendMessage(userId, `Đã UNBAN người dùng ${target.value}.`);
+            }
+            resetOwnerState(userId);
+            return true;
+        }
+
+        if (state.type === 'reset') {
+            const target = parseOwnerTarget(text);
+            if (!target) {
+                await bot.sendMessage(userId, 'Vui lòng nhập all, ID hoặc ví để khôi phục dữ liệu.');
+                return true;
+            }
+
+            await handleOwnerReset(userId, target);
+            resetOwnerState(userId);
+            return true;
+        }
+
+        return false;
+    }
+
+    async function handleOwnerCallback(query, action) {
+        const userId = query.from?.id?.toString();
+        if (!userId) {
+            return;
+        }
+
+        const hasAccess = await ensureOwnerFromUser(query.from);
+        if (!hasAccess) {
+            await bot.answerCallbackQuery(query.id, { text: 'Bạn không có quyền dùng lệnh /owner', show_alert: true });
+            return;
+        }
+
+        resetOwnerState(userId);
+
+        if (action === 'broadcast') {
+            startOwnerState(userId, { type: 'broadcast', stage: 'target' });
+            await bot.sendMessage(userId, 'Nhập mục tiêu (all / ID Telegram / địa chỉ ví):');
+            await bot.answerCallbackQuery(query.id, { text: 'Nhập mục tiêu gửi tin nhắn' });
+            return;
+        }
+
+        if (action === 'stats') {
+            await handleOwnerStats(userId);
+            await bot.answerCallbackQuery(query.id, { text: 'Đang hiển thị thống kê' });
+            return;
+        }
+
+        if (action === 'ban') {
+            startOwnerState(userId, { type: 'ban' });
+            await bot.sendMessage(userId, 'Nhập ID Telegram hoặc địa chỉ ví cần BAN:');
+            await bot.answerCallbackQuery(query.id, { text: 'Nhập thông tin BAN' });
+            return;
+        }
+
+        if (action === 'unban') {
+            startOwnerState(userId, { type: 'unban' });
+            await bot.sendMessage(userId, 'Nhập ID Telegram hoặc địa chỉ ví cần UNBAN:');
+            await bot.answerCallbackQuery(query.id, { text: 'Nhập thông tin UNBAN' });
+            return;
+        }
+
+        if (action === 'reset') {
+            startOwnerState(userId, { type: 'reset' });
+            await bot.sendMessage(userId, 'Nhập all, ID Telegram hoặc địa chỉ ví để xoá dữ liệu:');
+            await bot.answerCallbackQuery(query.id, { text: 'Nhập mục tiêu khôi phục' });
+            return;
+        }
+
+        await bot.answerCallbackQuery(query.id);
+    }
+
+    registerCommand(/^\/owner(?:\s+(.+))?$/, async (msg, match) => {
+        const userId = msg.from?.id?.toString();
+        const providedPassword = match && match[1] ? match[1].trim() : '';
+
+        const hasAccess = await ensureOwnerFromUser(msg.from, providedPassword);
+        if (!hasAccess) {
+            await bot.sendMessage(msg.chat.id, 'Lệnh chỉ dành cho OWNER. Nhập đúng mật khẩu để tiếp tục.');
+            return;
+        }
+
+        await bot.sendMessage(msg.chat.id, 'Đã xác minh quyền OWNER. Mở bảng điều khiển trong tin nhắn riêng.');
+        await openOwnerPanel(userId);
+    });
+
     // Xử lý /start CÓ token (Từ DApp) - Cần async
-    bot.onText(/\/start (.+)/, async (msg, match) => {
+    registerCommand(/\/start (.+)/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const token = match[1];
         // Khi /start, luôn ưu tiên ngôn ngữ của thiết bị
@@ -6551,32 +6963,32 @@ function startTelegramBot() {
     });
 
     // Xử lý /start KHÔNG CÓ token (Gõ tay) - Cần async
-    bot.onText(/\/start$/, async (msg) => {
+    registerCommand(/\/start$/, async (msg) => {
         await handleStartNoToken(msg);
     });
 
     // COMMAND: /register - Cần async
-    bot.onText(/\/register (.+)/, async (msg, match) => {
+    registerCommand(/\/register (.+)/, async (msg, match) => {
         const address = match[1];
         await handleRegisterWithAddress(msg, address);
     });
 
     // COMMAND: /mywallet - Cần async
-    bot.onText(/\/mywallet/, async (msg) => {
+    registerCommand(/\/mywallet/, async (msg) => {
         await handleMyWalletCommand(msg);
     });
 
     // COMMAND: /stats - Cần async
-    bot.onText(/\/stats/, async (msg) => {
+    registerCommand(/\/stats/, async (msg) => {
         await handleStatsCommand(msg);
     });
 
     // COMMAND: /donate - Cần async
-    bot.onText(/^\/donate(?:@[\w_]+)?$/, async (msg) => {
+    registerCommand(/^\/donate(?:@[\w_]+)?$/, async (msg) => {
         await handleDonateCommand(msg);
     });
 
-    bot.onText(/^\/checkin(?:@[\w_]+)?$/, async (msg) => {
+    registerCommand(/^\/checkin(?:@[\w_]+)?$/, async (msg) => {
         const chatType = msg.chat?.type;
         const chatId = msg.chat.id.toString();
         const userLang = await resolveNotificationLanguage(msg.from.id.toString(), msg.from.language_code);
@@ -6606,7 +7018,7 @@ function startTelegramBot() {
         }
     });
 
-    bot.onText(/^\/topcheckin(?:@[\w_]+)?(?:\s+(streak|total|points|longest))?$/, async (msg, match) => {
+    registerCommand(/^\/topcheckin(?:@[\w_]+)?(?:\s+(streak|total|points|longest))?$/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat?.type;
         const mode = (match && match[1]) ? match[1] : 'streak';
@@ -6621,7 +7033,7 @@ function startTelegramBot() {
         await sendMessageRespectingThread(chatId, msg, text);
     });
 
-    bot.onText(/\/okxchains/, async (msg) => {
+    registerCommand(/\/okxchains/, async (msg) => {
         await handleOkxChainsCommand(msg);
     });
 
@@ -6693,24 +7105,24 @@ function startTelegramBot() {
         }
     }
 
-    bot.onText(/^\/checkinadmin(?:@[\w_]+)?$/, async (msg) => {
+    registerCommand(/^\/checkinadmin(?:@[\w_]+)?$/, async (msg) => {
         await handleAdminCommand(msg);
     });
 
-    bot.onText(/^\/admin(?:@[\w_]+)?$/, async (msg) => {
+    registerCommand(/^\/admin(?:@[\w_]+)?$/, async (msg) => {
         await handleAdminCommand(msg);
     });
 
-    bot.onText(/\/okx402status/, async (msg) => {
+    registerCommand(/\/okx402status/, async (msg) => {
         await handleOkx402StatusCommand(msg);
     });
 
-    bot.onText(/\/banmaoprice/, async (msg) => {
+    registerCommand(/\/banmaoprice/, async (msg) => {
         await handleBanmaoPriceCommand(msg);
     });
 
     // COMMAND: /banmaofeed - Chỉ dùng cho group
-    bot.onText(/\/banmaofeed(?:\s+(.+))?/, async (msg, match) => {
+    registerCommand(/\/banmaofeed(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const userLang = await getLang(msg);
@@ -6771,7 +7183,7 @@ function startTelegramBot() {
     });
 
     // COMMAND: /feedtopic - cấu hình topic nhận thông báo nhóm
-    bot.onText(/\/feedtopic(?:\s+(.+))?/, async (msg, match) => {
+    registerCommand(/\/feedtopic(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id.toString();
         const chatType = msg.chat.type;
         const lang = await getLang(msg);
@@ -6868,23 +7280,23 @@ function startTelegramBot() {
     });
 
     // COMMAND: /feedlang - Cấu hình ngôn ngữ cá nhân cho thông báo nhóm
-    bot.onText(/\/feedlang(?:\s+(.+))?/, async (msg, match) => {
+    registerCommand(/\/feedlang(?:\s+(.+))?/, async (msg, match) => {
         const argText = (match && match[1]) ? match[1] : '';
         await handleFeedLangCommand(msg, argText);
     });
 
     // COMMAND: /unregister - Cần async
-    bot.onText(/\/unregister/, async (msg) => {
+    registerCommand(/\/unregister/, async (msg) => {
         await handleUnregisterCommand(msg);
     });
 
     // LỆNH: /language - Cần async
-    bot.onText(/\/language/, async (msg) => {
+    registerCommand(/\/language/, async (msg) => {
         await handleLanguageCommand(msg);
     });
 
     // LỆNH: /help - Cần async
-    bot.onText(/\/help/, async (msg) => {
+    registerCommand(/\/help/, async (msg) => {
         const lang = await getLang(msg);
         const defaultGroup = getDefaultHelpGroup('user');
         const helpText = buildHelpText(lang, 'user');
@@ -6893,6 +7305,10 @@ function startTelegramBot() {
         if (sent?.chat?.id && sent?.message_id) {
             saveHelpMessageState(sent.chat.id.toString(), sent.message_id, { view: 'user', group: defaultGroup });
         }
+    });
+
+    bot.on('message', async (msg) => {
+        await handleOwnerStateMessage(msg);
     });
 
     async function openHelpFromNavigation(query, lang, view = 'user') {
@@ -7058,6 +7474,15 @@ function startTelegramBot() {
         const callbackLang = await resolveNotificationLanguage(query.from.id, lang || fallbackLang);
 
         try {
+            const pseudoMessage = {
+                from: query.from,
+                chat: query.message?.chat ? { id: query.message.chat.id } : { id: query.from.id }
+            };
+            if (await enforceBanForMessage(pseudoMessage)) {
+                await bot.answerCallbackQuery(queryId, { text: OWNER_BAN_MESSAGE, show_alert: true });
+                return;
+            }
+
             if (query.data === 'nav_close') {
                 if (query.message?.chat?.id && query.message?.message_id) {
                     try {
@@ -7068,6 +7493,12 @@ function startTelegramBot() {
                     clearHelpMessageState(query.message.chat.id.toString(), query.message.message_id);
                 }
                 await bot.answerCallbackQuery(queryId);
+                return;
+            }
+
+            if (query.data.startsWith('owner|')) {
+                const [, action] = query.data.split('|');
+                await handleOwnerCallback(query, action);
                 return;
             }
 
