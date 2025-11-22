@@ -903,6 +903,19 @@ function sendThreadedWithControls(chatId, sourceMessage, text, lang, options = {
     return sendMessageRespectingThread(chatId, sourceMessage, text, finalOptions);
 }
 
+function buildCloseKeyboard(lang = defaultLang) {
+    return {
+        inline_keyboard: [
+            [{ text: t(lang, 'nav_button_close'), callback_data: 'nav_close' }]
+        ]
+    };
+}
+
+function sendOwnerPrompt(userId, text, options = {}, lang = defaultLang) {
+    const replyMarkup = options.reply_markup || buildCloseKeyboard(lang);
+    return bot.sendMessage(userId, text, { ...options, reply_markup: replyMarkup });
+}
+
 function recordUserProfileFromMessage(msg) {
     const userId = msg?.from?.id;
     if (!userId) {
@@ -6601,6 +6614,14 @@ function startTelegramBot() {
     
     const registerCommand = (pattern, handler) => bot.onText(pattern, wrapCommandHandler(handler));
 
+    function buildCloseKeyboard(lang = defaultLang) {
+        return {
+            inline_keyboard: [
+                [{ text: t(lang, 'nav_button_close'), callback_data: 'nav_close' }]
+            ]
+        };
+    }
+
     async function ensureOwnerFromUser(user, password = '') {
         const userId = user?.id?.toString();
         if (!userId) {
@@ -6669,7 +6690,7 @@ function startTelegramBot() {
         }
     }
 
-    function buildOwnerKeyboard() {
+    function buildOwnerKeyboard(lang = defaultLang) {
         return {
             inline_keyboard: [
                 [
@@ -6682,31 +6703,83 @@ function startTelegramBot() {
                 ],
                 [
                     { text: 'Khôi phục ID', callback_data: 'owner|reset' }
+                ],
+                [
+                    { text: t(lang, 'nav_button_close'), callback_data: 'nav_close' }
                 ]
             ]
         };
     }
 
-    async function openOwnerPanel(userId) {
+    async function openOwnerPanel(userId, lang = defaultLang) {
         const text = '🔒 Bảng điều khiển OWNER. Chọn một chức năng:';
-        await bot.sendMessage(userId, text, { reply_markup: buildOwnerKeyboard() });
+        await bot.sendMessage(userId, text, { reply_markup: buildOwnerKeyboard(lang) });
     }
 
-    async function handleOwnerStats(userId) {
-        const users = await db.getAllUsersDetailed();
+    function buildOwnerRole(user, ownerMap) {
+        const ownerEntry = ownerMap.get(user.chatId.toString());
+        if (ownerEntry?.isPrimary) {
+            return { icon: '👑', label: 'Chủ sở hữu' };
+        }
+        if (ownerEntry) {
+            return { icon: '🤝', label: 'Đồng sở hữu' };
+        }
+        return { icon: '👤', label: 'Người dùng' };
+    }
+
+    function splitMessagesByLength(lines, maxLength = 3500) {
+        const messages = [];
+        let buffer = '';
+
+        for (const line of lines) {
+            const candidate = buffer ? `${buffer}\n\n${line}` : line;
+            if (candidate.length > maxLength && buffer) {
+                messages.push(buffer);
+                buffer = line;
+            } else if (candidate.length > maxLength) {
+                messages.push(line);
+                buffer = '';
+            } else {
+                buffer = candidate;
+            }
+        }
+
+        if (buffer) {
+            messages.push(buffer);
+        }
+
+        return messages;
+    }
+
+    function formatOwnerUserLine(user, ownerMap) {
+        const role = buildOwnerRole(user, ownerMap);
+        const nameParts = [user.firstName, user.lastName].filter(Boolean);
+        const preferredName = nameParts.join(' ').trim();
+        const usernameText = user.username ? `@${user.username}` : 'Không có username';
+        const displayName = escapeHtml(preferredName || usernameText || 'Chưa cập nhật');
+        const usernameSection = escapeHtml(usernameText);
+        const walletText = (user.wallets && user.wallets.length > 0)
+            ? user.wallets.map((w) => `<code>${escapeHtml(w)}</code>`).join(', ')
+            : 'Chưa đăng kí';
+        const idText = `<code>${escapeHtml(user.chatId)}</code>`;
+
+        return `${role.icon} <b>${role.label}</b> — ${displayName} (${usernameSection})\nID: ${idText}\nVí: ${walletText}`;
+    }
+
+    async function handleOwnerStats(userId, lang = defaultLang) {
+        const [users, owners] = await Promise.all([db.getAllUsersDetailed(), db.getOwners()]);
         if (!users || users.length === 0) {
-            await bot.sendMessage(userId, 'Chưa có người dùng nào.');
+            await sendOwnerPrompt(userId, 'Chưa có người dùng nào.', { reply_markup: buildCloseKeyboard(lang) }, lang);
             return;
         }
 
-        const lines = users.map((user, index) => {
-            const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ') || 'Không tên';
-            const usernameText = user.username ? `@${user.username}` : '—';
-            const walletText = user.wallets && user.wallets.length > 0 ? user.wallets.join(', ') : 'Chưa đăng kí';
-            return `${index + 1}. ${fullName} | ${usernameText} | ID: ${user.chatId} | Ví: ${walletText}`;
-        });
+        const ownerMap = new Map(owners.map((owner) => [owner.chatId.toString(), owner]));
+        const lines = users.map((user, index) => `${index + 1}. ${formatOwnerUserLine(user, ownerMap)}`);
+        const messages = splitMessagesByLength(lines);
 
-        await sendChunkedMessage(userId, lines.join('\n'));
+        for (const chunk of messages) {
+            await sendOwnerPrompt(userId, chunk, { parse_mode: 'HTML', reply_markup: buildCloseKeyboard(lang) }, lang);
+        }
     }
 
     async function sendOwnerBroadcast(ownerId, target, content) {
@@ -6722,13 +6795,13 @@ function startTelegramBot() {
                 const users = await db.getUsersForWallet(target.value);
                 users.forEach((user) => recipients.add(user.chatId));
             } catch (error) {
-                await bot.sendMessage(ownerId, `Không tìm thấy người dùng cho ví ${target.value}`);
+                await sendOwnerPrompt(ownerId, `Không tìm thấy người dùng cho ví ${target.value}`);
                 return;
             }
         }
 
         if (recipients.size === 0) {
-            await bot.sendMessage(ownerId, 'Không có người nhận phù hợp.');
+            await sendOwnerPrompt(ownerId, 'Không có người nhận phù hợp.');
             return;
         }
 
@@ -6742,7 +6815,7 @@ function startTelegramBot() {
                 continue;
             }
             try {
-                await bot.sendMessage(chatId, content);
+                await bot.sendMessage(chatId, content, { reply_markup: buildCloseKeyboard() });
                 success++;
             } catch (error) {
                 failed++;
@@ -6750,7 +6823,7 @@ function startTelegramBot() {
             }
         }
 
-        await bot.sendMessage(
+        await sendOwnerPrompt(
             ownerId,
             `Đã gửi xong. Thành công: ${success}, Bị chặn: ${blocked}, Lỗi: ${failed}.`
         );
@@ -6759,7 +6832,7 @@ function startTelegramBot() {
     async function handleOwnerReset(ownerId, target) {
         if (target.type === 'all') {
             await db.clearAllUserData();
-            await bot.sendMessage(ownerId, 'Đã xoá toàn bộ dữ liệu và lịch sử lưu trữ.');
+            await sendOwnerPrompt(ownerId, 'Đã xoá toàn bộ dữ liệu và lịch sử lưu trữ.');
             return;
         }
 
@@ -6770,15 +6843,15 @@ function startTelegramBot() {
                 for (const user of users) {
                     await db.clearUserData(user.chatId);
                 }
-                await bot.sendMessage(ownerId, `Đã xoá dữ liệu cho ví ${target.value}.`);
+                await sendOwnerPrompt(ownerId, `Đã xoá dữ liệu cho ví ${target.value}.`);
             } catch (error) {
-                await bot.sendMessage(ownerId, `Không thể xoá dữ liệu cho ví ${target.value}: ${error.message}`);
+                await sendOwnerPrompt(ownerId, `Không thể xoá dữ liệu cho ví ${target.value}: ${error.message}`);
             }
             return;
         }
 
         await db.clearUserData(target.value);
-        await bot.sendMessage(ownerId, `Đã xoá dữ liệu cho ID ${target.value}.`);
+        await sendOwnerPrompt(ownerId, `Đã xoá dữ liệu cho ID ${target.value}.`);
     }
 
     async function handleOwnerStateMessage(msg) {
@@ -6811,11 +6884,11 @@ function startTelegramBot() {
             if (state.stage === 'target') {
                 const target = parseOwnerTarget(text);
                 if (!target) {
-                    await bot.sendMessage(userId, 'Mục tiêu không hợp lệ. Nhập all, ID Telegram hoặc địa chỉ ví.');
+                    await sendOwnerPrompt(userId, 'Mục tiêu không hợp lệ. Nhập all, ID Telegram hoặc địa chỉ ví.');
                     return true;
                 }
                 startOwnerState(userId, { type: 'broadcast', stage: 'content', target });
-                await bot.sendMessage(userId, 'Nhập nội dung cần gửi:');
+                await sendOwnerPrompt(userId, 'Nhập nội dung cần gửi:');
                 return true;
             }
 
@@ -6829,16 +6902,16 @@ function startTelegramBot() {
         if (state.type === 'ban') {
             const target = parseOwnerTarget(text);
             if (!target || target.type === 'all') {
-                await bot.sendMessage(userId, 'Vui lòng nhập ID hoặc ví hợp lệ để BAN.');
+                await sendOwnerPrompt(userId, 'Vui lòng nhập ID hoặc ví hợp lệ để BAN.');
                 return true;
             }
 
             if (target.type === 'wallet') {
                 await db.banWallet(target.value, userId);
-                await bot.sendMessage(userId, `Đã BAN ví ${target.value}.`);
+                await sendOwnerPrompt(userId, `Đã BAN ví ${target.value}.`);
             } else {
                 await db.banUser(target.value, userId);
-                await bot.sendMessage(userId, `Đã BAN người dùng ${target.value}.`);
+                await sendOwnerPrompt(userId, `Đã BAN người dùng ${target.value}.`);
             }
             resetOwnerState(userId);
             return true;
@@ -6847,16 +6920,16 @@ function startTelegramBot() {
         if (state.type === 'unban') {
             const target = parseOwnerTarget(text);
             if (!target || target.type === 'all') {
-                await bot.sendMessage(userId, 'Vui lòng nhập ID hoặc ví hợp lệ để UNBAN.');
+                await sendOwnerPrompt(userId, 'Vui lòng nhập ID hoặc ví hợp lệ để UNBAN.');
                 return true;
             }
 
             if (target.type === 'wallet') {
                 await db.unbanWallet(target.value);
-                await bot.sendMessage(userId, `Đã UNBAN ví ${target.value}.`);
+                await sendOwnerPrompt(userId, `Đã UNBAN ví ${target.value}.`);
             } else {
                 await db.unbanUser(target.value);
-                await bot.sendMessage(userId, `Đã UNBAN người dùng ${target.value}.`);
+                await sendOwnerPrompt(userId, `Đã UNBAN người dùng ${target.value}.`);
             }
             resetOwnerState(userId);
             return true;
@@ -6865,7 +6938,7 @@ function startTelegramBot() {
         if (state.type === 'reset') {
             const target = parseOwnerTarget(text);
             if (!target) {
-                await bot.sendMessage(userId, 'Vui lòng nhập all, ID hoặc ví để khôi phục dữ liệu.');
+                await sendOwnerPrompt(userId, 'Vui lòng nhập all, ID hoặc ví để khôi phục dữ liệu.');
                 return true;
             }
 
@@ -6893,7 +6966,7 @@ function startTelegramBot() {
 
         if (action === 'broadcast') {
             startOwnerState(userId, { type: 'broadcast', stage: 'target' });
-            await bot.sendMessage(userId, 'Nhập mục tiêu (all / ID Telegram / địa chỉ ví):');
+            await sendOwnerPrompt(userId, 'Nhập mục tiêu (all / ID Telegram / địa chỉ ví):');
             await bot.answerCallbackQuery(query.id, { text: 'Nhập mục tiêu gửi tin nhắn' });
             return;
         }
@@ -6906,21 +6979,21 @@ function startTelegramBot() {
 
         if (action === 'ban') {
             startOwnerState(userId, { type: 'ban' });
-            await bot.sendMessage(userId, 'Nhập ID Telegram hoặc địa chỉ ví cần BAN:');
+            await sendOwnerPrompt(userId, 'Nhập ID Telegram hoặc địa chỉ ví cần BAN:');
             await bot.answerCallbackQuery(query.id, { text: 'Nhập thông tin BAN' });
             return;
         }
 
         if (action === 'unban') {
             startOwnerState(userId, { type: 'unban' });
-            await bot.sendMessage(userId, 'Nhập ID Telegram hoặc địa chỉ ví cần UNBAN:');
+            await sendOwnerPrompt(userId, 'Nhập ID Telegram hoặc địa chỉ ví cần UNBAN:');
             await bot.answerCallbackQuery(query.id, { text: 'Nhập thông tin UNBAN' });
             return;
         }
 
         if (action === 'reset') {
             startOwnerState(userId, { type: 'reset' });
-            await bot.sendMessage(userId, 'Nhập all, ID Telegram hoặc địa chỉ ví để xoá dữ liệu:');
+            await sendOwnerPrompt(userId, 'Nhập all, ID Telegram hoặc địa chỉ ví để xoá dữ liệu:');
             await bot.answerCallbackQuery(query.id, { text: 'Nhập mục tiêu khôi phục' });
             return;
         }
@@ -6934,11 +7007,11 @@ function startTelegramBot() {
 
         const hasAccess = await ensureOwnerFromUser(msg.from, providedPassword);
         if (!hasAccess) {
-            await bot.sendMessage(msg.chat.id, 'Lệnh chỉ dành cho OWNER. Nhập đúng mật khẩu để tiếp tục.');
+            await sendOwnerPrompt(msg.chat.id, 'Lệnh chỉ dành cho OWNER. Nhập đúng mật khẩu để tiếp tục.');
             return;
         }
 
-        await bot.sendMessage(msg.chat.id, 'Đã xác minh quyền OWNER. Mở bảng điều khiển trong tin nhắn riêng.');
+        await sendOwnerPrompt(msg.chat.id, 'Đã xác minh quyền OWNER. Mở bảng điều khiển trong tin nhắn riêng.');
         await openOwnerPanel(userId);
     });
 
