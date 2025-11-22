@@ -23,6 +23,24 @@ cd /root/banmaorps_bot
 ls -l
 mkdir banmaorps_bot
 
+
+pm2 start pm2-logrotate
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:rotateInterval '0 0 * * *' # Xoay vòng mỗi ngày
+pm2 set pm2-logrotate:retain 3 # Giữ lại log của 3 ngày
+pm2 set pm2-logrotate:max_size 10M
+pm2 flush
+pm2 list
+pm2 prettylist
+pm2 show banmaorps_bot
+
+npm install ethers node-telegram-bot-api dotenv
+npm install pm2 -g
+npm install @google/genai
+npm install axios
+
+pm2 logs xbot --lines 100
+
 npm install ethers node-telegram-bot-api dotenv
 npm install pm2 -g
 
