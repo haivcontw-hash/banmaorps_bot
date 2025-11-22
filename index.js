@@ -831,7 +831,9 @@ async function sendMessageRespectingThread(chatId, source, text, options = {}) {
     const threadedOptions = buildThreadedOptions(source, options);
 
     try {
-        return await bot.sendMessage(chatId, text, threadedOptions);
+        const sent = await bot.sendMessage(chatId, text, threadedOptions);
+        await db.logBotMessage(chatId, sent.message_id);
+        return sent;
     } catch (error) {
         const errorCode = error?.response?.body?.error_code;
         const description = error?.response?.body?.description || '';
@@ -853,7 +855,9 @@ async function sendMessageRespectingThread(chatId, source, text, options = {}) {
             if (shouldFallback) {
                 console.warn(`[ThreadFallback] Gửi tin nhắn tới thread ${threadedOptions.message_thread_id} thất bại (${description}). Thử gửi không chỉ định thread.`);
                 const fallbackOptions = { ...options };
-                return bot.sendMessage(chatId, text, fallbackOptions);
+                const fallbackSent = await bot.sendMessage(chatId, text, fallbackOptions);
+                await db.logBotMessage(chatId, fallbackSent.message_id);
+                return fallbackSent;
             }
         }
 
@@ -913,7 +917,11 @@ function buildCloseKeyboard(lang = defaultLang) {
 
 function sendOwnerPrompt(userId, text, options = {}, lang = defaultLang) {
     const replyMarkup = options.reply_markup || buildCloseKeyboard(lang);
-    return bot.sendMessage(userId, text, { ...options, reply_markup: replyMarkup });
+    return bot.sendMessage(userId, text, { ...options, reply_markup: replyMarkup })
+        .then(async (sent) => {
+            await db.logBotMessage(userId, sent.message_id);
+            return sent;
+        });
 }
 
 function formatOwnerTimestamp(seconds) {
@@ -6846,14 +6854,52 @@ function startTelegramBot() {
         }
     }
 
+    async function wipeChatHistory(chatId, lang = defaultLang) {
+        const targets = new Set(await db.getMessageLogs(chatId));
+        let markerId = null;
+
+        try {
+            const marker = await bot.sendMessage(chatId, 'Đang khôi phục dữ liệu...', { reply_markup: buildCloseKeyboard(lang) });
+            markerId = marker?.message_id;
+            if (markerId) {
+                await db.logBotMessage(chatId, markerId);
+                targets.add(markerId);
+            }
+        } catch (error) {
+            console.warn(`[OwnerReset] Không thể gửi thông báo khôi phục tới ${chatId}: ${error.message}`);
+        }
+
+        if (markerId) {
+            const lowerBound = Math.max(markerId - 300, 1);
+            for (let id = markerId; id >= lowerBound; id--) {
+                targets.add(id);
+            }
+        }
+
+        for (const messageId of targets) {
+            try {
+                await bot.deleteMessage(chatId, messageId);
+            } catch (error) {
+                // ignore deletion errors to ensure best-effort cleanup
+            }
+        }
+
+        await db.clearMessageLogs(chatId);
+    }
+
     async function notifyResetTarget(chatId, lang = defaultLang) {
         try {
             const sent = await bot.sendMessage(chatId, 'Toàn bộ dữ liệu và lịch sử của bạn đã được xoá. Vui lòng khởi động lại với bot nếu cần.', {
                 reply_markup: buildCloseKeyboard(lang)
             });
-            setTimeout(() => {
-                bot.deleteMessage(chatId, sent.message_id).catch(() => {});
-            }, 5000);
+            await db.logBotMessage(chatId, sent.message_id);
+            setTimeout(async () => {
+                try {
+                    await bot.deleteMessage(chatId, sent.message_id);
+                } finally {
+                    await db.clearMessageLogs(chatId);
+                }
+            }, 3500);
         } catch (error) {
             console.warn(`[OwnerReset] Không thể gửi thông báo reset tới ${chatId}: ${error.message}`);
         }
@@ -6892,7 +6938,8 @@ function startTelegramBot() {
                 continue;
             }
             try {
-                await bot.sendMessage(chatId, content, { reply_markup: buildCloseKeyboard() });
+                const sent = await bot.sendMessage(chatId, content, { reply_markup: buildCloseKeyboard() });
+                await db.logBotMessage(chatId, sent.message_id);
                 success++;
             } catch (error) {
                 failed++;
@@ -6910,17 +6957,23 @@ function startTelegramBot() {
         if (target.type === 'all') {
             const users = await db.getAllUsersDetailed();
             for (const user of users) {
-                await notifyResetTarget(user.chatId, lang);
+                await wipeChatHistory(user.chatId, lang);
             }
             await db.clearAllUserData();
+            for (const user of users) {
+                await notifyResetTarget(user.chatId, lang);
+            }
             await sendOwnerPrompt(ownerId, 'Đã xoá toàn bộ dữ liệu và lịch sử lưu trữ.');
             return;
         }
 
         if (target.type === 'wallet') {
             try {
-                await db.unbanWallet(target.value);
                 const users = await db.getUsersForWallet(target.value);
+                for (const user of users) {
+                    await wipeChatHistory(user.chatId, lang);
+                }
+                await db.unbanWallet(target.value);
                 for (const user of users) {
                     await db.clearUserData(user.chatId);
                     await notifyResetTarget(user.chatId, lang);
@@ -6932,6 +6985,7 @@ function startTelegramBot() {
             return;
         }
 
+        await wipeChatHistory(target.value, lang);
         await db.clearUserData(target.value);
         await notifyResetTarget(target.value, lang);
         await sendOwnerPrompt(ownerId, `Đã xoá dữ liệu cho ID ${target.value}.`);

@@ -1256,6 +1256,13 @@ async function init() {
             PRIMARY KEY (identifier, type)
         );
     `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS message_logs (
+            chatId TEXT NOT NULL,
+            messageId INTEGER NOT NULL,
+            PRIMARY KEY (chatId, messageId)
+        );
+    `);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
@@ -1695,6 +1702,32 @@ async function clearAllBans() {
     await dbRun('DELETE FROM bans');
 }
 
+async function logBotMessage(chatId, messageId) {
+    if (!chatId || !messageId) {
+        return;
+    }
+    await dbRun('INSERT OR IGNORE INTO message_logs (chatId, messageId) VALUES (?, ?)', [chatId.toString(), messageId]);
+}
+
+async function getMessageLogs(chatId) {
+    if (!chatId) {
+        return [];
+    }
+    const rows = await dbAll('SELECT messageId FROM message_logs WHERE chatId = ? ORDER BY messageId DESC', [chatId.toString()]);
+    return rows.map((row) => row.messageId);
+}
+
+async function clearMessageLogs(chatId) {
+    if (!chatId) {
+        return;
+    }
+    await dbRun('DELETE FROM message_logs WHERE chatId = ?', [chatId.toString()]);
+}
+
+async function clearAllMessageLogs() {
+    await dbRun('DELETE FROM message_logs');
+}
+
 async function getAllUsersDetailed() {
     const rows = await dbAll('SELECT chatId, lang, wallets, first_name, last_name, username, createdAt, lastActiveAt FROM users');
     return rows.map((row) => {
@@ -1728,6 +1761,7 @@ async function clearUserData(chatId) {
     await dbRun('DELETE FROM checkin_records WHERE userId = ?', [idText]);
     await dbRun('DELETE FROM checkin_attempts WHERE userId = ?', [idText]);
     await dbRun('DELETE FROM owners WHERE chatId = ? AND isPrimary = 0', [idText]);
+    await clearMessageLogs(idText);
     await unbanUser(idText);
 }
 
@@ -1742,6 +1776,7 @@ async function clearAllUserData() {
     await dbRun('DELETE FROM checkin_attempts');
     await removeAllCoOwners();
     await clearAllBans();
+    await clearAllMessageLogs();
 }
 
 module.exports = {
@@ -1813,6 +1848,10 @@ module.exports = {
     removeAllCoOwners,
     listBans,
     getAllUsersDetailed,
+    logBotMessage,
+    getMessageLogs,
+    clearMessageLogs,
+    clearAllMessageLogs,
     clearUserData,
     clearAllUserData,
     clearAllBans
