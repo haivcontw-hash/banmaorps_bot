@@ -1000,7 +1000,12 @@ async function init() {
             chatId TEXT PRIMARY KEY,
             lang TEXT,
             wallets TEXT,
-            lang_source TEXT DEFAULT 'auto'
+            lang_source TEXT DEFAULT 'auto',
+            first_name TEXT,
+            last_name TEXT,
+            username TEXT,
+            createdAt INTEGER,
+            lastActiveAt INTEGER
         );
     `);
 
@@ -1009,6 +1014,25 @@ async function init() {
     } catch (err) {
         if (!/duplicate column name/i.test(err.message)) {
             throw err;
+        }
+    }
+    for (const column of ['first_name', 'last_name', 'username']) {
+        try {
+            await dbRun(`ALTER TABLE users ADD COLUMN ${column} TEXT`);
+        } catch (err) {
+            if (!/duplicate column name/i.test(err.message)) {
+                throw err;
+            }
+        }
+    }
+
+    for (const column of ['createdAt', 'lastActiveAt']) {
+        try {
+            await dbRun(`ALTER TABLE users ADD COLUMN ${column} INTEGER`);
+        } catch (err) {
+            if (!/duplicate column name/i.test(err.message)) {
+                throw err;
+            }
         }
     }
     await dbRun(`
@@ -1032,12 +1056,20 @@ async function init() {
             lang TEXT,
             minStake REAL,
             messageThreadId TEXT,
+            title TEXT,
             createdAt INTEGER,
             updatedAt INTEGER
         );
     `);
     try {
         await dbRun(`ALTER TABLE group_subscriptions ADD COLUMN messageThreadId TEXT`);
+    } catch (err) {
+        if (!/duplicate column name/i.test(err.message)) {
+            throw err;
+        }
+    }
+    try {
+        await dbRun(`ALTER TABLE group_subscriptions ADD COLUMN title TEXT`);
     } catch (err) {
         if (!/duplicate column name/i.test(err.message)) {
             throw err;
@@ -1207,15 +1239,48 @@ async function init() {
             PRIMARY KEY (chatId, summaryDate, slot)
         );
     `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS owners (
+            chatId TEXT PRIMARY KEY,
+            username TEXT,
+            isPrimary INTEGER NOT NULL DEFAULT 0,
+            createdAt INTEGER NOT NULL
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS bans (
+            identifier TEXT NOT NULL,
+            type TEXT NOT NULL,
+            createdAt INTEGER NOT NULL,
+            createdBy TEXT,
+            PRIMARY KEY (identifier, type)
+        );
+    `);
+    await dbRun(`
+        CREATE TABLE IF NOT EXISTS message_logs (
+            chatId TEXT NOT NULL,
+            messageId INTEGER NOT NULL,
+            PRIMARY KEY (chatId, messageId)
+        );
+    `);
     console.log("Cơ sở dữ liệu đã sẵn sàng.");
 }
 
 // --- Hàm xử lý User & Wallet ---
 
+function normalizeUsername(username) {
+    if (!username || typeof username !== 'string') {
+        return null;
+    }
+    const trimmed = username.trim();
+    return trimmed ? trimmed.toLowerCase() : null;
+}
+
 async function addWalletToUser(chatId, lang, walletAddress) {
     const normalizedLangInput = normalizeLanguageCode(lang);
     const normalizedAddr = ethers.getAddress(walletAddress);
-    let user = await dbGet('SELECT lang, lang_source, wallets FROM users WHERE chatId = ?', [chatId]);
+    const now = Math.floor(Date.now() / 1000);
+    let user = await dbGet('SELECT lang, lang_source, wallets, createdAt FROM users WHERE chatId = ?', [chatId]);
 
     if (user) {
         let wallets = [];
@@ -1243,9 +1308,15 @@ async function addWalletToUser(chatId, lang, walletAddress) {
             nextSource = 'auto';
         }
 
-        await dbRun('UPDATE users SET lang = ?, lang_source = ?, wallets = ? WHERE chatId = ?', [langToPersist, nextSource, JSON.stringify(wallets), chatId]);
+        await dbRun(
+            'UPDATE users SET lang = ?, lang_source = ?, wallets = ?, createdAt = COALESCE(createdAt, ?), lastActiveAt = ? WHERE chatId = ?',
+            [langToPersist, nextSource, JSON.stringify(wallets), now, now, chatId]
+        );
     } else {
-        await dbRun('INSERT INTO users (chatId, lang, wallets, lang_source) VALUES (?, ?, ?, ?)', [chatId, normalizedLangInput, JSON.stringify([normalizedAddr]), 'auto']);
+        await dbRun(
+            'INSERT INTO users (chatId, lang, wallets, lang_source, createdAt, lastActiveAt) VALUES (?, ?, ?, ?, ?, ?)',
+            [chatId, normalizedLangInput, JSON.stringify([normalizedAddr]), 'auto', now, now]
+        );
     }
     console.log(`[DB] Đã thêm/cập nhật ví ${normalizedAddr} cho chatId ${chatId}`);
 }
@@ -1269,6 +1340,29 @@ async function removeAllWalletsFromUser(chatId) {
 async function getWalletsForUser(chatId) {
     let user = await dbGet('SELECT wallets FROM users WHERE chatId = ?', [chatId]);
     return user ? JSON.parse(user.wallets) : [];
+}
+
+async function saveUserProfile(chatId, profile = {}) {
+    if (!chatId) {
+        return;
+    }
+
+    const { first_name = null, last_name = null, username = null } = profile;
+    const normalizedUsername = normalizeUsername(username);
+    const existing = await dbGet('SELECT chatId, createdAt FROM users WHERE chatId = ?', [chatId]);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (existing) {
+        await dbRun(
+            'UPDATE users SET first_name = ?, last_name = ?, username = COALESCE(?, username), createdAt = COALESCE(createdAt, ?), lastActiveAt = ? WHERE chatId = ?',
+            [first_name, last_name, normalizedUsername, now, now, chatId]
+        );
+    } else {
+        await dbRun(
+            'INSERT INTO users (chatId, lang, wallets, lang_source, first_name, last_name, username, createdAt, lastActiveAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [chatId, null, '[]', 'auto', first_name, last_name, normalizedUsername, now, now]
+        );
+    }
 }
 
 async function getUsersForWallet(walletAddress) {
@@ -1382,22 +1476,23 @@ async function getStats(walletAddress) {
     return stats;
 }
 
-async function upsertGroupSubscription(chatId, lang, minStake, messageThreadId = null) {
+async function upsertGroupSubscription(chatId, lang, minStake, messageThreadId = null, title = null) {
     const now = Math.floor(Date.now() / 1000);
     const normalizedThreadId =
         messageThreadId === undefined || messageThreadId === null
             ? null
             : messageThreadId.toString();
+    const normalizedTitle = title || null;
     const existing = await dbGet('SELECT chatId FROM group_subscriptions WHERE chatId = ?', [chatId]);
     if (existing) {
         await dbRun(
-            'UPDATE group_subscriptions SET lang = ?, minStake = ?, messageThreadId = ?, updatedAt = ? WHERE chatId = ?',
-            [lang, minStake, normalizedThreadId, now, chatId]
+            'UPDATE group_subscriptions SET lang = ?, minStake = ?, messageThreadId = ?, title = COALESCE(?, title), updatedAt = ? WHERE chatId = ?',
+            [lang, minStake, normalizedThreadId, normalizedTitle, now, chatId]
         );
     } else {
         await dbRun(
-            'INSERT INTO group_subscriptions (chatId, lang, minStake, messageThreadId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
-            [chatId, lang, minStake, normalizedThreadId, now, now]
+            'INSERT INTO group_subscriptions (chatId, lang, minStake, messageThreadId, title, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [chatId, lang, minStake, normalizedThreadId, normalizedTitle, now, now]
         );
     }
 }
@@ -1407,7 +1502,7 @@ async function removeGroupSubscription(chatId) {
 }
 
 async function getGroupSubscription(chatId) {
-    const row = await dbGet('SELECT chatId, lang, minStake, messageThreadId FROM group_subscriptions WHERE chatId = ?', [chatId]);
+    const row = await dbGet('SELECT chatId, lang, minStake, messageThreadId, title, createdAt, updatedAt FROM group_subscriptions WHERE chatId = ?', [chatId]);
     if (!row) {
         return null;
     }
@@ -1416,17 +1511,23 @@ async function getGroupSubscription(chatId) {
         chatId: row.chatId,
         lang: row.lang,
         minStake: row.minStake,
-        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString()
+        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString(),
+        title: row.title || null,
+        createdAt: row.createdAt || null,
+        updatedAt: row.updatedAt || null
     };
 }
 
 async function getGroupSubscriptions() {
-    const rows = await dbAll('SELECT chatId, lang, minStake, messageThreadId FROM group_subscriptions');
+    const rows = await dbAll('SELECT chatId, lang, minStake, messageThreadId, title, createdAt, updatedAt FROM group_subscriptions');
     return rows.map(row => ({
         chatId: row.chatId,
         lang: row.lang,
         minStake: row.minStake,
-        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString()
+        messageThreadId: row.messageThreadId == null ? null : row.messageThreadId.toString(),
+        title: row.title || null,
+        createdAt: row.createdAt || null,
+        updatedAt: row.updatedAt || null
     }));
 }
 
@@ -1477,6 +1578,207 @@ async function updateGroupSubscriptionTopic(chatId, messageThreadId) {
     );
 }
 
+async function addOwner(chatId, username, options = {}) {
+    if (!chatId) {
+        return;
+    }
+
+    const normalizedUsername = normalizeUsername(username);
+    const isPrimary = options?.isPrimary ? 1 : 0;
+    const now = Math.floor(Date.now() / 1000);
+
+    const existing = await dbGet('SELECT chatId FROM owners WHERE chatId = ?', [chatId]);
+    if (existing) {
+        await dbRun('UPDATE owners SET username = COALESCE(?, username), isPrimary = MAX(isPrimary, ?), createdAt = ? WHERE chatId = ?',
+            [normalizedUsername, isPrimary, now, chatId]);
+    } else {
+        await dbRun('INSERT INTO owners (chatId, username, isPrimary, createdAt) VALUES (?, ?, ?, ?)', [chatId, normalizedUsername, isPrimary, now]);
+    }
+}
+
+async function isOwner(chatId) {
+    if (!chatId) {
+        return false;
+    }
+    const row = await dbGet('SELECT chatId FROM owners WHERE chatId = ?', [chatId]);
+    return !!row;
+}
+
+async function getOwners() {
+    const rows = await dbAll('SELECT chatId, username, isPrimary FROM owners');
+    return rows.map((row) => ({
+        chatId: row.chatId,
+        username: row.username,
+        isPrimary: Boolean(row.isPrimary)
+    }));
+}
+
+async function removeOwner(chatId) {
+    if (!chatId) {
+        return false;
+    }
+
+    const existing = await dbGet('SELECT chatId, isPrimary FROM owners WHERE chatId = ?', [chatId]);
+    if (!existing || existing.isPrimary) {
+        return false;
+    }
+
+    await dbRun('DELETE FROM owners WHERE chatId = ?', [chatId]);
+    return true;
+}
+
+async function removeAllCoOwners() {
+    await dbRun('DELETE FROM owners WHERE isPrimary = 0');
+}
+
+async function banUser(chatId, createdBy = null) {
+    if (!chatId) {
+        return;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun('INSERT OR REPLACE INTO bans (identifier, type, createdAt, createdBy) VALUES (?, ?, ?, ?)', [chatId.toString(), 'user', now, createdBy]);
+}
+
+async function banWallet(walletAddress, createdBy = null) {
+    if (!walletAddress) {
+        return;
+    }
+    const normalizedAddr = ethers.getAddress(walletAddress);
+    const now = Math.floor(Date.now() / 1000);
+    await dbRun('INSERT OR REPLACE INTO bans (identifier, type, createdAt, createdBy) VALUES (?, ?, ?, ?)', [normalizedAddr, 'wallet', now, createdBy]);
+}
+
+async function unbanUser(chatId) {
+    await dbRun('DELETE FROM bans WHERE identifier = ? AND type = ?', [chatId.toString(), 'user']);
+}
+
+async function unbanWallet(walletAddress) {
+    try {
+        const normalized = ethers.getAddress(walletAddress);
+        await dbRun('DELETE FROM bans WHERE identifier = ? AND type = ?', [normalized, 'wallet']);
+    } catch (err) {
+        console.error(`[DB] Không thể unban ví ${walletAddress}: ${err.message}`);
+    }
+}
+
+async function isChatBanned(chatId) {
+    if (!chatId) {
+        return false;
+    }
+    const row = await dbGet('SELECT 1 FROM bans WHERE identifier = ? AND type = ? LIMIT 1', [chatId.toString(), 'user']);
+    return !!row;
+}
+
+async function areWalletsBanned(wallets = []) {
+    if (!Array.isArray(wallets) || wallets.length === 0) {
+        return false;
+    }
+
+    const normalized = [];
+    for (const wallet of wallets) {
+        try {
+            normalized.push(ethers.getAddress(wallet));
+        } catch (err) {
+            // ignore invalid
+        }
+    }
+
+    if (normalized.length === 0) {
+        return false;
+    }
+
+    const placeholders = normalized.map(() => '?').join(',');
+    const sql = `SELECT 1 FROM bans WHERE type = 'wallet' AND identifier IN (${placeholders}) LIMIT 1`;
+    const row = await dbGet(sql, normalized);
+    return !!row;
+}
+
+async function listBans() {
+    const rows = await dbAll('SELECT identifier, type FROM bans');
+    return rows.map((row) => ({ identifier: row.identifier, type: row.type }));
+}
+
+async function clearAllBans() {
+    await dbRun('DELETE FROM bans');
+}
+
+async function logBotMessage(chatId, messageId) {
+    if (!chatId || !messageId) {
+        return;
+    }
+    await dbRun('INSERT OR IGNORE INTO message_logs (chatId, messageId) VALUES (?, ?)', [chatId.toString(), messageId]);
+}
+
+async function getMessageLogs(chatId) {
+    if (!chatId) {
+        return [];
+    }
+    const rows = await dbAll('SELECT messageId FROM message_logs WHERE chatId = ? ORDER BY messageId DESC', [chatId.toString()]);
+    return rows.map((row) => row.messageId);
+}
+
+async function clearMessageLogs(chatId) {
+    if (!chatId) {
+        return;
+    }
+    await dbRun('DELETE FROM message_logs WHERE chatId = ?', [chatId.toString()]);
+}
+
+async function clearAllMessageLogs() {
+    await dbRun('DELETE FROM message_logs');
+}
+
+async function getAllUsersDetailed() {
+    const rows = await dbAll('SELECT chatId, lang, wallets, first_name, last_name, username, createdAt, lastActiveAt FROM users');
+    return rows.map((row) => {
+        let parsedWallets = [];
+        try {
+            parsedWallets = row.wallets ? JSON.parse(row.wallets) : [];
+        } catch (err) {
+            parsedWallets = [];
+        }
+        return {
+            chatId: row.chatId,
+            lang: normalizeLanguageCode(row.lang),
+            wallets: Array.isArray(parsedWallets) ? parsedWallets : [],
+            firstName: row.first_name || '',
+            lastName: row.last_name || '',
+            username: row.username || '',
+            createdAt: row.createdAt || null,
+            lastActiveAt: row.lastActiveAt || null
+        };
+    });
+}
+
+async function clearUserData(chatId) {
+    if (!chatId) {
+        return;
+    }
+    const idText = chatId.toString();
+    await dbRun('DELETE FROM users WHERE chatId = ?', [idText]);
+    await dbRun('DELETE FROM group_member_languages WHERE userId = ?', [idText]);
+    await dbRun('DELETE FROM checkin_members WHERE userId = ?', [idText]);
+    await dbRun('DELETE FROM checkin_records WHERE userId = ?', [idText]);
+    await dbRun('DELETE FROM checkin_attempts WHERE userId = ?', [idText]);
+    await dbRun('DELETE FROM owners WHERE chatId = ? AND isPrimary = 0', [idText]);
+    await clearMessageLogs(idText);
+    await unbanUser(idText);
+}
+
+async function clearAllUserData() {
+    await dbRun('DELETE FROM users');
+    await dbRun('DELETE FROM pending_tokens');
+    await dbRun('DELETE FROM game_stats');
+    await dbRun('DELETE FROM group_subscriptions');
+    await dbRun('DELETE FROM group_member_languages');
+    await dbRun('DELETE FROM checkin_members');
+    await dbRun('DELETE FROM checkin_records');
+    await dbRun('DELETE FROM checkin_attempts');
+    await removeAllCoOwners();
+    await clearAllBans();
+    await clearAllMessageLogs();
+}
+
 module.exports = {
     init,
     ensureCheckinGroup,
@@ -1512,6 +1814,7 @@ module.exports = {
     getUsersForWallet,
     getUserLanguage,
     getUserLanguageInfo,
+    setUserLanguage,
     setLanguage,
     setLanguageAuto,
     addPendingToken,
@@ -1530,5 +1833,26 @@ module.exports = {
     setGroupMemberLanguage,
     removeGroupMemberLanguage,
     updateGroupSubscriptionLanguage,
-    updateGroupSubscriptionTopic
+    updateGroupSubscriptionTopic,
+    saveUserProfile,
+    addOwner,
+    isOwner,
+    getOwners,
+    banUser,
+    banWallet,
+    unbanUser,
+    unbanWallet,
+    isChatBanned,
+    areWalletsBanned,
+    removeOwner,
+    removeAllCoOwners,
+    listBans,
+    getAllUsersDetailed,
+    logBotMessage,
+    getMessageLogs,
+    clearMessageLogs,
+    clearAllMessageLogs,
+    clearUserData,
+    clearAllUserData,
+    clearAllBans
 };
